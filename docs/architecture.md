@@ -4,7 +4,7 @@
 
 A request-time NATS publish cannot atomically commit both PostgreSQL and JetStream. Publishing before the database commits can emit an event for an operation that later rolls back. An in-memory after-commit queue can lose an event if the process dies after database commit. Saving the event in the same transaction as the account change closes that gap without a distributed transaction.
 
-Keycloak explicitly documents that JPA listener work joins its transaction in the [EventListenerProvider contract](https://www.keycloak.org/docs-api/26.7.4/javadocs/org/keycloak/events/EventListenerProvider.html). Its [custom entity SPI](https://www.keycloak.org/docs/latest/server_development/index.html#_extensions_jpa) supplies the shared entity manager and Liquibase migration. This is an unsupported SPI, so the exact Keycloak version is pinned and tested.
+Keycloak explicitly documents that JPA listener work joins its transaction in the [EventListenerProvider contract](https://www.keycloak.org/docs-api/26.7.4/javadocs/org/keycloak/events/EventListenerProvider.html). Its [custom entity API](https://www.keycloak.org/docs/latest/server_development/index.html#_extensions_jpa) registers the outbox entity and Liquibase migration in Keycloak's existing persistence unit. This documented registration mechanism is the accepted architecture. Keycloak gives it no compatibility guarantee, so the [compatibility policy](compatibility.md) defines runtime and upgrade tests for each supported release.
 
 The [26.7.4 EventBuilder](https://github.com/keycloak/keycloak/blob/26.7.4/server-spi-private/src/main/java/org/keycloak/events/EventBuilder.java) and [AdminEventBuilder](https://github.com/keycloak/keycloak/blob/26.7.4/services/src/main/java/org/keycloak/services/resources/admin/AdminEventBuilder.java) catch listener exceptions. The provider therefore calls `setRollbackOnly()` on any capture/serialization failure. Flush/commit errors roll back through JPA. Error events can run in a distinct transaction; the extension honors the transaction in which Keycloak invokes it.
 
@@ -19,9 +19,27 @@ The review informed the failure model and tests, rather than copying source or d
 
 Every Keycloak node runs one relay after schema migration. Each attempt uses a fresh Keycloak session and transaction, selects one due row using PostgreSQL `FOR UPDATE SKIP LOCKED` via Hibernate, waits for a bounded JetStream publish acknowledgement, then deletes and commits. Other nodes skip locked rows. There is no shared `EntityManager`, global scheduler lock, lease extension, or in-memory source of truth.
 
+`OutboxRepository` contains JPQL over the mapped entity and uses Keycloak's managed connection. The hint name is `SpecHints.HINT_SPEC_LOCK_TIMEOUT`; its value is Hibernate's [`Timeouts.SKIP_LOCKED_MILLI`](https://docs.hibernate.org/orm/7.2/javadocs/org/hibernate/Timeouts.html#SKIP_LOCKED_MILLI). That symbolic sentinel means “skip a row already locked by another transaction,” not a negative wait duration. No Hibernate magic number is embedded in the query. The integration suite holds a due row locked while another row is delivered to test this behavior directly.
+
+## Wakeups and polling
+
+After a successful local database commit, the listener sets a pending wakeup flag under a monitor. The worker consumes this flag only when it reaches its wait, under the same monitor, so a commit between scanning and sleeping cannot lose its notification. Repeated signals coalesce into one pending flag. There is no accumulating permit count or lifetime generation counter. Multiple events in one transaction register one wakeup. Rollbacks do not signal, and the callback performs no database or network work.
+
+Full batches drain immediately. Otherwise idle scans back off to `KND_IDLE_POLL_MAX_MS` (five seconds by default), borrowing a database connection only for the scan. A local commit wakes the worker regardless of that delay. On a quiet cluster of N nodes, steady-state fallback traffic is approximately N/5 indexed selection queries per second, plus the transaction/session overhead. This is an estimate, not a load-test measurement. Retry eligibility is a minimum time; scheduling and outage recovery can add up to the idle scan interval.
+
+Polling is still necessary as recovery insurance: another node can die after commit and before its wakeup, and in-memory notifications do not survive a restart. PostgreSQL LISTEN/NOTIFY can reduce cross-node wakeup latency but still needs catch-up scans, a persistent listener connection and DB-specific notification setup. CDC can replace scans with a transaction-log reader at high volume, but adds operational infrastructure and retention/checkpoint responsibilities. The current hybrid keeps installation to a provider JAR and the existing database; benchmark before adding another service.
+
 Holding a transaction across network requests is deliberate: it avoids lease-expiry races and ownership complexity. It consumes one database connection per active node and limits throughput. Keep timeouts short, monitor database pools, and benchmark under expected load. Large installations can replace the relay with a leased or CDC publisher while preserving the persisted message identity; that is outside this implementation.
 
 Crash after acceptance but before delete/commit is unavoidable without a distributed transaction. Every retry reuses the persisted ID and bytes. Stream configuration is checked for each attempt rather than only at startup, so changes to retention settings stop publishing until corrected. This cannot prevent a privileged operator from changing or deleting stored data after a successful publish: stream administration must be restricted operationally.
+
+## Shutdown and long-running processes
+
+Shutdown stops further relay work, closes the wakeup, interrupts the worker and closes the NATS connection. The relay checks shutdown again after the database lookup, before publication. A publication already in progress may complete; a missing or uncertain acknowledgement retains its row for retry.
+
+The publisher serializes publication separately from connection lifecycle changes. Closing it can cancel an in-flight request without waiting for the publication monitor. If an initial connection finishes after shutdown, the publisher immediately closes that connection instead of installing or leaking it. The factory never holds its startup/shutdown monitor while closing sockets or waiting for the worker. Connection and request timeouts still apply; the five-second termination wait reports a warning if cleanup has not finished.
+
+The persisted attempt count saturates at `Long.MAX_VALUE`; retry scheduling continues after saturation. Backoff arithmetic and batch work are bounded by validated configuration. Idle waits use elapsed `System.nanoTime()` differences, so a signed clock wrap is safe for their bounded duration. No growing counter is used for notification identity or ownership. Regression tests force shutdown interleavings with latches and place retry state directly at the numeric boundary.
 
 ## Delivery and retention
 

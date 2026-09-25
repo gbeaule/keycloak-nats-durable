@@ -1,7 +1,20 @@
 package io.github.keycloaknats;
 
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.RETURNS_SELF;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyString;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.eq;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.TypedQuery;
@@ -13,6 +26,7 @@ import org.junit.jupiter.api.Test;
 
 class OutboxRelayTest {
   private EntityManager em;
+  private TypedQuery<OutboxEvent> query;
   private EventPublisher publisher;
   private OutboxEvent row;
   private OutboxRelay relay;
@@ -22,7 +36,7 @@ class OutboxRelayTest {
   void setup() {
     em = mock(EntityManager.class);
     publisher = mock(EventPublisher.class);
-    var query = mock(TypedQuery.class, RETURNS_SELF);
+    query = mock(TypedQuery.class, RETURNS_SELF);
     when(em.createQuery(anyString(), eq(OutboxEvent.class))).thenReturn(query);
     row = new OutboxEvent("id", "subject", "{}", 0);
     when(query.getResultList()).thenReturn(List.of(row), List.of());
@@ -76,5 +90,37 @@ class OutboxRelayTest {
     relay.stop();
     relay.run();
     verifyNoInteractions(publisher);
+  }
+
+  @Test
+  void stopWhileObtainingTheRowPreventsPublication() {
+    when(query.getResultList())
+        .thenAnswer(
+            call -> {
+              relay.stop();
+              return List.of(row);
+            });
+    relay.run();
+    verifyNoInteractions(publisher);
+    verify(em, never()).remove(any());
+    assertEquals(0, row.attempts());
+  }
+
+  @Test
+  void interruptWhileObtainingTheRowPreventsPublication() {
+    when(query.getResultList())
+        .thenAnswer(
+            call -> {
+              Thread.currentThread().interrupt();
+              return List.of(row);
+            });
+    try {
+      relay.run();
+      verifyNoInteractions(publisher);
+      verify(em, never()).remove(any());
+      assertTrue(Thread.currentThread().isInterrupted());
+    } finally {
+      Thread.interrupted();
+    }
   }
 }

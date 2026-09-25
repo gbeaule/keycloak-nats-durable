@@ -15,6 +15,8 @@
     <maven.compiler.release>21</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <keycloak.version>26.7.4</keycloak.version>
+    <keycloak.runtime.version>${keycloak.version}</keycloak.runtime.version>
+    <keycloak.upgrade.from>26.6.4</keycloak.upgrade.from>
     <jnats.version>2.26.3</jnats.version>
     <junit.version>5.12.2</junit.version>
     <testcontainers.version>2.0.5</testcontainers.version>
@@ -92,10 +94,39 @@
     </pluginManagement>
     <plugins>
       <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-checkstyle-plugin</artifactId>
+        <version>3.6.0</version>
+        <dependencies>
+          <dependency>
+            <groupId>com.puppycrawl.tools</groupId>
+            <artifactId>checkstyle</artifactId>
+            <version>10.26.1</version>
+          </dependency>
+        </dependencies>
+        <configuration>
+          <configLocation>google_checks.xml</configLocation>
+          <violationSeverity>warning</violationSeverity>
+          <includeTestSourceDirectory>true</includeTestSourceDirectory>
+          <consoleOutput>true</consoleOutput>
+          <linkXRef>false</linkXRef>
+        </configuration>
+        <executions>
+          <execution>
+            <id>google-java-style</id>
+            <phase>verify</phase>
+            <goals>
+              <goal>check</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
         <groupId>com.diffplug.spotless</groupId>
         <artifactId>spotless-maven-plugin</artifactId>
         <version>3.0.0</version>
         <configuration>
+          <lineEndings>UNIX</lineEndings>
           <java>
             <googleJavaFormat>
               <version>1.27.0</version>

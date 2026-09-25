@@ -1,0 +1,21 @@
+{
+  "specversion": "1.0",
+  "id": "67c9f1ad-58dc-514e-a235-cb0d0ea1d19f",
+  "source": "urn:keycloak:realm:ZGVtbw",
+  "type": "io.keycloak.admin.delete",
+  "time": "2026-09-24T12:00:00Z",
+  "datacontenttype": "application/json",
+  "dataschema": "urn:keycloak-nats:event:v1",
+  "data": {
+    "kind": "admin",
+    "realmId": "demo",
+    "outcome": "success",
+    "resourceType": "USER",
+    "operationType": "DELETE",
+    "resourcePath": "users/user-123",
+    "userId": "user-123",
+    "actorUserId": "admin-456",
+    "actorRealmId": "master",
+    "clientId": "admin-cli"
+  }
+}

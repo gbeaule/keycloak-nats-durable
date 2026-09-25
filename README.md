@@ -4,7 +4,9 @@ A Java 21 Keycloak event listener with a transactional PostgreSQL outbox, a JetS
 
 **Delivery is at least once. Database business effects can be applied once using the included consumer inbox.** Redelivery after a missing acknowledgement necessarily permits repeated delivery. Broker deduplication alone cannot make an arbitrary downstream side effect happen exactly once.
 
-Baseline: Keycloak **26.7.4**, PostgreSQL **17**, NATS Server **2.12.8**, jnats **2.26.3**, Java **21**, Maven **3.9+**. Other Keycloak versions and database engines are not claimed as supported. Keycloak's custom JPA SPI is an unsupported API; run the full suite before any Keycloak upgrade.
+The extension uses **Keycloak's existing PostgreSQL database and connection pool**. It adds an outbox table; it does not require another database instance or separate database credentials. The sample consumer's inbox belongs to the consuming application and is separate from extension installation.
+
+Compatibility targets: Keycloak **26.6.4 / 26.7.4**, PostgreSQL **17**, NATS Server **2.12.8**, jnats **2.26.3**, Java **21**, Maven **3.9+**. The accepted architecture uses Keycloak's documented event-listener and custom JPA registration APIs. See [the compatibility and upgrade policy](docs/compatibility.md): each version needs runtime testing because these upstream APIs do not promise stability.
 
 ## Guarantees
 
@@ -46,13 +48,13 @@ $env:JAVA_HOME = 'C:\Program Files\JetBrains\IntelliJ IDEA 2025.3.4\jbr'
 mvn -B -ntp -Pintegration verify
 ```
 
-Java formatting is checked during `verify`; use `mvn spotless:apply` after edits.
+Java follows **Google Java Style**, including mandatory braces, explicit imports and two-space indentation. Spotless uses Google Java Format; Checkstyle applies its full Google ruleset to production and test sources and fails on warnings. Both run during `verify`; use `mvn spotless:apply` after edits. See [the style configuration and IntelliJ workflow](docs/code-style.md).
 
 The installable JAR is `extension/target/keycloak-nats-durable-1.0.0-SNAPSHOT.jar`. NATS and its cryptographic implementation are isolated inside the provider JAR; Keycloak libraries remain provided by the server. The runnable example is `consumer-example/target/consumer-example-1.0.0-SNAPSHOT.jar`.
 
 The integration suite uses real PostgreSQL, NATS and Keycloak containers and tests account lifecycle events, failed logins, outbox rollback, stream overflow, unsafe configuration, missing consumer ACKs, database inbox atomicity, concurrent duplicate processing, broker outages, hard Keycloak restarts, two Keycloak nodes, and process death after broker acceptance before outbox commit. Logs and JUnit reports are under `integration-tests/target/`; unit reports are under `extension/target/surefire-reports/`.
 
-The [verification record](docs/testing.md) describes the 82 passing tests, executable demo checks and the limits of that evidence.
+The [verification record](docs/testing.md) records test results and their limits. [CI security](docs/ci-security.md) explains why PR builds execute untrusted code, where they run, and the protections required at repository level.
 
 ## Local demonstration
 
@@ -81,6 +83,8 @@ The named volumes preserve state across `down` and `up`. This compose stack is a
 
 All Keycloak nodes sharing the database must install the same provider and use the same stream, subject prefix and credentials. Keep the relay installed and running until any existing backlog has drained before removing the provider or its table. Re-enabling a listener cannot recover events produced while it was disabled.
 
+This works with existing PostgreSQL-backed installations: add the JAR, rebuild/restart, let the extension migration run, and enable the listener. It is not hot deployment. Other Keycloak database engines require validation before use; the demo is not a requirement to provision a new Keycloak/database. See [cluster and installation details](docs/compatibility.md#existing-installations-and-clusters).
+
 ## Configuration
 
 Environment variables are convenient in containers; matching Keycloak provider configuration keys (lowercase with hyphens, for example `nats-url`) take precedence.
@@ -94,7 +98,8 @@ Environment variables are convenient in containers; matching Keycloak provider c
 | `KND_CREDENTIALS_FILE` | unset | Mounted NATS JWT/NKey credentials file |
 | `KND_TOKEN` | unset | Alternative NATS token; mutually exclusive with credentials file |
 | `KND_TIMEOUT_MS` | `2000` | Connection and individual JetStream request timeout |
-| `KND_POLL_MS` | `500` | Delay between relay batches |
+| `KND_POLL_MS` | `500` | Minimum scan delay when no full batch is available |
+| `KND_IDLE_POLL_MAX_MS` | `5000` (at least `KND_POLL_MS`) | Maximum delay between idle/recovery scans; local commits wake the relay immediately |
 | `KND_BATCH_SIZE` | `64` | Maximum individual transactions per relay poll |
 | `KND_RETRY_INITIAL_MS` | `1000` | Initial retry ceiling, with 50–100% jitter |
 | `KND_RETRY_MAX_MS` | `60000` | Maximum retry ceiling |
@@ -104,7 +109,9 @@ Use `tls://` with a trusted server certificate; Java's standard trust/key-store 
 
 ## Event contract and consumer
 
-Subjects are `<prefix>.<base64url(UTF-8 realm ID)>.<user|admin>.<lowercase event or operation>`. Encoding is reversible and avoids wildcard injection and collisions from removing punctuation. Filtering account lifecycle operations additionally requires `data.resourceType == "USER"` and `data.userId`.
+Subjects are `<prefix>.<realmToken>.user.<event>` or `<prefix>.<realmToken>.admin.<resource>.<operation>`. The realm token is base64url without padding of the UTF-8 realm ID; built-in resource/event/operation names are lowercased. For example, `keycloak.events.ZGVtbw.admin.user.update` routes USER updates for realm ID `demo`. Inspect `outcome` and `userId` before acting.
+
+The [complete event guide](docs/events.md) includes field-by-field shapes, twelve JSON examples, every upstream enum, subject filters, privacy boundaries and migration notes for the new admin resource token.
 
 See [the versioned JSON schema](schemas/event-v1.schema.json). A disabled user is a successful `io.keycloak.admin.update` event with `data.userEnabled: false`. The flag is obtained from the user model within the original transaction; it does not depend on an admin representation. A direct deletion includes the deleted user's ID from the resource path. Nested paths such as `users/ID/role-mappings` are not mislabeled as direct account changes. Email, username, IP address, credentials, arbitrary attributes and event details are omitted; realm/user/client identifiers and admin resource paths still require appropriate access controls.
 

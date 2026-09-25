@@ -14,9 +14,11 @@ import io.nats.client.api.StreamConfiguration;
 import java.time.Duration;
 import org.postgresql.ds.PGSimpleDataSource;
 
+/** Provisions durable delivery or runs the example consumer with a transactional database inbox. */
 public final class ConsumerMain {
   private ConsumerMain() {}
 
+  /** Reads deployment settings from the environment; {@code provision} creates broker resources. */
   public static void main(String[] args) throws Exception {
     String stream = env("KND_STREAM", "KEYCLOAK_EVENTS");
     String subject = env("KND_SUBJECT_PREFIX", "keycloak.events") + ".>";
@@ -26,9 +28,12 @@ public final class ConsumerMain {
             .servers(env("KND_NATS_URL", "nats://localhost:4222").split(","))
             .connectionTimeout(Duration.ofSeconds(5))
             .maxReconnects(-1);
-    if (System.getenv("KND_CREDENTIALS_FILE") != null)
+    if (System.getenv("KND_CREDENTIALS_FILE") != null) {
       options.authHandler(Nats.credentials(System.getenv("KND_CREDENTIALS_FILE")));
-    if (System.getenv("KND_TOKEN") != null) options.token(System.getenv("KND_TOKEN").toCharArray());
+    }
+    if (System.getenv("KND_TOKEN") != null) {
+      options.token(System.getenv("KND_TOKEN").toCharArray());
+    }
     try (Connection nats = Nats.connect(options.build())) {
       if (args.length == 1 && "provision".equals(args[0])) {
         // Deliberately create-only. Changing live retention/consumer policies requires operator
@@ -104,7 +109,8 @@ public final class ConsumerMain {
         || (consumer.getInactiveThreshold() != null && !consumer.getInactiveThreshold().isZero())
         || consumer.getDeliverSubject() != null) {
       throw new IllegalStateException(
-          "Require a durable pull consumer with explicit ACKs, disk state, full history and payloads, no expiry and unlimited redelivery");
+          "Require a durable pull consumer with explicit ACKs and disk state;"
+              + " retain full history and payloads with no expiry and unlimited redelivery");
     }
   }
 }

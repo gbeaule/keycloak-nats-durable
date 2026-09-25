@@ -75,7 +75,8 @@
             </executions>
             <configuration>
               <systemPropertyVariables>
-                <keycloak.version>${keycloak.version}</keycloak.version>
+                <keycloak.version>${keycloak.runtime.version}</keycloak.version>
+                <keycloak.upgrade.from>${keycloak.upgrade.from}</keycloak.upgrade.from>
                 <extension.jar>${project.basedir}/../extension/target/keycloak-nats-durable-${project.version}.jar</extension.jar>
               </systemPropertyVariables>
             </configuration>

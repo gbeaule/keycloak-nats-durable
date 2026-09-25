@@ -2,6 +2,7 @@ package io.github.keycloaknats;
 
 import java.util.concurrent.ThreadLocalRandom;
 
+/** Bounded exponential retry delays with jitter to spread recovery work across nodes. */
 public final class RetryBackoff {
   private RetryBackoff() {}
 
@@ -12,8 +13,11 @@ public final class RetryBackoff {
   public static long delay(BridgeConfig config, long previousAttempts) {
     long ceiling = config.retryInitial().toMillis();
     for (int i = 0;
-        i < Math.min(63, Math.max(0, previousAttempts)) && ceiling < config.retryMax().toMillis();
-        i++) ceiling = Math.min(config.retryMax().toMillis(), ceiling * 2);
+        i < Math.min(Long.SIZE - 1, Math.max(0, previousAttempts))
+            && ceiling < config.retryMax().toMillis();
+        i++) {
+      ceiling = Math.min(config.retryMax().toMillis(), ceiling * 2);
+    }
     long floor = Math.max(1, ceiling / 2);
     return ThreadLocalRandom.current().nextLong(floor, ceiling + 1);
   }

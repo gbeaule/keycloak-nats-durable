@@ -1,8 +1,12 @@
 package io.github.keycloaknats;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
-import io.nats.client.api.*;
+import io.nats.client.api.DiscardPolicy;
+import io.nats.client.api.RetentionPolicy;
+import io.nats.client.api.StorageType;
+import io.nats.client.api.StreamConfiguration;
 import java.time.Duration;
 import java.util.Map;
 import java.util.function.Consumer;

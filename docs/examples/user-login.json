@@ -1,0 +1,18 @@
+{
+  "specversion": "1.0",
+  "id": "74e92a67-58f7-55f9-8617-daa56ad979a7",
+  "source": "urn:keycloak:realm:ZGVtbw",
+  "type": "io.keycloak.user.login",
+  "time": "2026-09-24T12:00:00Z",
+  "datacontenttype": "application/json",
+  "dataschema": "urn:keycloak-nats:event:v1",
+  "data": {
+    "kind": "user",
+    "realmId": "demo",
+    "outcome": "success",
+    "eventType": "LOGIN",
+    "userId": "user-123",
+    "clientId": "web-app",
+    "keycloakEventId": "source-event-123"
+  }
+}

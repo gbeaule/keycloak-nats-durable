@@ -1,0 +1,15 @@
+{
+  "specversion": "1.0",
+  "id": "cd24781a-1121-5eba-bf15-b98876af75ed",
+  "source": "urn:keycloak:realm:ZGVtbw",
+  "type": "io.keycloak.admin.action",
+  "time": "2026-09-24T12:00:00Z",
+  "datacontenttype": "application/json",
+  "dataschema": "urn:keycloak-nats:event:v1",
+  "data": {
+    "kind": "admin",
+    "realmId": "demo",
+    "outcome": "success",
+    "operationType": "ACTION"
+  }
+}

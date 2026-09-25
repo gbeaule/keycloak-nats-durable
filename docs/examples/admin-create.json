@@ -1,0 +1,22 @@
+{
+  "specversion": "1.0",
+  "id": "e0ecaabf-b075-565e-ac6b-53ce82e1ec23",
+  "source": "urn:keycloak:realm:ZGVtbw",
+  "type": "io.keycloak.admin.create",
+  "time": "2026-09-24T12:00:00Z",
+  "datacontenttype": "application/json",
+  "dataschema": "urn:keycloak-nats:event:v1",
+  "data": {
+    "kind": "admin",
+    "realmId": "demo",
+    "outcome": "success",
+    "resourceType": "USER",
+    "operationType": "CREATE",
+    "resourcePath": "users/user-123",
+    "userId": "user-123",
+    "actorUserId": "admin-456",
+    "actorRealmId": "master",
+    "clientId": "admin-cli",
+    "userEnabled": true
+  }
+}

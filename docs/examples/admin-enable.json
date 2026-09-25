@@ -1,0 +1,22 @@
+{
+  "specversion": "1.0",
+  "id": "2af63a88-898d-5948-a6fe-10af4aa123cd",
+  "source": "urn:keycloak:realm:ZGVtbw",
+  "type": "io.keycloak.admin.update",
+  "time": "2026-09-24T12:00:00Z",
+  "datacontenttype": "application/json",
+  "dataschema": "urn:keycloak-nats:event:v1",
+  "data": {
+    "kind": "admin",
+    "realmId": "demo",
+    "outcome": "success",
+    "resourceType": "USER",
+    "operationType": "UPDATE",
+    "resourcePath": "users/user-123",
+    "userId": "user-123",
+    "actorUserId": "admin-456",
+    "actorRealmId": "master",
+    "clientId": "admin-cli",
+    "userEnabled": true
+  }
+}

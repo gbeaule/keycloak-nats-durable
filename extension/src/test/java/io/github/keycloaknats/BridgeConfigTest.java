@@ -1,6 +1,9 @@
 package io.github.keycloaknats;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -23,6 +26,9 @@ class BridgeConfigTest {
     "nats-url,nats://host/path",
     "nats-url,nats://host?token=secret",
     "nats-url,nats://host:99999",
+    "nats-url,nats://host:0",
+    "nats-url,'nats://host:4222,'",
+    "nats-url,',nats://host:4222'",
     "subject-prefix,events.*",
     "subject-prefix,events..x",
     "stream,foo.bar",
@@ -33,6 +39,7 @@ class BridgeConfigTest {
     "max-payload-bytes,1",
     "max-payload-bytes,1048577",
     "poll-ms,0",
+    "idle-poll-max-ms,499",
     "timeout-ms,-1",
     "retry-max-ms,500",
     "batch-size,wat"
@@ -61,7 +68,9 @@ class BridgeConfigTest {
       for (int i = 0; i < 100; i++) {
         long delay = RetryBackoff.delay(config, attempts);
         assertTrue(delay >= 500 && delay <= 60000);
-        if (attempts >= 63) assertTrue(delay >= 30000);
+        if (attempts >= 63) {
+          assertTrue(delay >= 30000);
+        }
       }
     }
   }

@@ -1,0 +1,17 @@
+{
+  "specversion": "1.0",
+  "id": "e6a8c9ce-b0d4-5a16-88a6-7775cad41562",
+  "source": "urn:keycloak:realm:ZGVtbw",
+  "type": "io.keycloak.admin.create",
+  "time": "2026-09-24T12:00:00Z",
+  "datacontenttype": "application/json",
+  "dataschema": "urn:keycloak-nats:event:v1",
+  "data": {
+    "kind": "admin",
+    "realmId": "demo",
+    "outcome": "success",
+    "resourceType": "REALM_ROLE_MAPPING",
+    "operationType": "CREATE",
+    "resourcePath": "users/user-123/role-mappings/realm"
+  }
+}

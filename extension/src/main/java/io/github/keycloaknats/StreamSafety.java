@@ -10,6 +10,7 @@ import java.util.List;
 public final class StreamSafety {
   private StreamSafety() {}
 
+  /** Rejects stream settings that can silently expire, evict or reroute a retained event. */
   public static void validate(StreamConfiguration stream, BridgeConfig config) {
     require(config.stream().equals(stream.getName()), "Unexpected stream");
     require(
@@ -45,6 +46,8 @@ public final class StreamSafety {
   }
 
   private static void require(boolean valid, String message) {
-    if (!valid) throw new IllegalStateException(message);
+    if (!valid) {
+      throw new UnsafeStreamException(message);
+    }
   }
 }

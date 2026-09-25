@@ -1,0 +1,15 @@
+{
+  "specversion": "1.0",
+  "id": "20f4b1a6-efc7-5915-8046-f0712ac25072",
+  "source": "urn:keycloak:realm:ZGVtbw",
+  "type": "io.keycloak.user.logout",
+  "time": "2026-09-24T12:00:00Z",
+  "datacontenttype": "application/json",
+  "dataschema": "urn:keycloak-nats:event:v1",
+  "data": {
+    "kind": "user",
+    "realmId": "demo",
+    "outcome": "success",
+    "eventType": "LOGOUT"
+  }
+}

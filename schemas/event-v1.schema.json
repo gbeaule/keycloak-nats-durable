@@ -18,12 +18,38 @@
         "kind": {"enum": ["user", "admin"]}, "realmId": {"type": "string"},
         "keycloakEventId": {"type": "string"}, "userId": {"type": "string"}, "clientId": {"type": "string"},
         "outcome": {"enum": ["success", "error"]}, "error": {"type": "string"},
-        "eventType": {"type": "string"}, "operationType": {"type": "string"}, "resourceType": {"type": "string"},
+        "eventType": {"type": "string"}, "operationType": {"enum": ["CREATE", "UPDATE", "DELETE", "ACTION"]}, "resourceType": {"type": "string"},
         "resourcePath": {"type": "string"}, "actorUserId": {"type": "string"}, "actorRealmId": {"type": "string"},
         "userEnabled": {"type": "boolean", "description": "State observed during a successful direct USER create/update. Not a proof that enabled changed in this operation."}
       },
+      "allOf": [
+        {
+          "if": {"properties": {"kind": {"const": "user"}}},
+          "then": {
+            "required": ["eventType"],
+            "not": {"anyOf": [{"required": ["operationType"]}, {"required": ["resourceType"]}, {"required": ["resourcePath"]}, {"required": ["userEnabled"]}, {"required": ["actorUserId"]}, {"required": ["actorRealmId"]}]}
+          },
+          "else": {"required": ["operationType"], "not": {"required": ["eventType"]}}
+        },
+        {
+          "if": {"properties": {"outcome": {"const": "error"}}},
+          "then": {"required": ["error"], "not": {"required": ["userEnabled"]}},
+          "else": {"not": {"required": ["error"]}}
+        },
+        {
+          "if": {"required": ["userEnabled"]},
+          "then": {"required": ["userId", "resourceType", "operationType"], "properties": {"kind": {"const": "admin"}, "outcome": {"const": "success"}, "resourceType": {"const": "USER"}, "operationType": {"enum": ["CREATE", "UPDATE"]}}}
+        }
+      ],
       "additionalProperties": false
     }
   },
+  "allOf": [
+    {
+      "if": {"properties": {"data": {"properties": {"kind": {"const": "user"}}}}},
+      "then": {"properties": {"type": {"pattern": "^io\\.keycloak\\.user\\.[a-z0-9_]+$"}}},
+      "else": {"properties": {"type": {"pattern": "^io\\.keycloak\\.admin\\.(create|update|delete|action)$"}}}
+    }
+  ],
   "additionalProperties": false
 }

@@ -1,7 +1,11 @@
 package io.github.keycloaknats;
 
 import static org.awaitility.Awaitility.await;
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.keycloaknats.consumer.InboxProcessor;
@@ -14,14 +18,24 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.Executors;
-import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.MethodOrderer;
+import org.junit.jupiter.api.Order;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInfo;
+import org.junit.jupiter.api.TestMethodOrder;
 
 /**
  * Real processes, disk-backed JetStream, PostgreSQL and an installed Keycloak provider. No disabled
  * tests.
  */
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+@SuppressWarnings("checkstyle:AbbreviationAsWordInName") // Maven Failsafe discovers the IT suffix.
 class DurabilityIT extends IntegrationSupport {
   @BeforeAll
   static void start() throws Exception {
@@ -60,7 +74,7 @@ class DurabilityIT extends IntegrationSupport {
   }
 
   static JsonNode event(Message message) throws Exception {
-    return JSON.readTree(message.getData());
+    return objectMapper.readTree(message.getData());
   }
 
   @Test
@@ -70,7 +84,8 @@ class DurabilityIT extends IntegrationSupport {
         200,
         login(
                 "durable-test",
-                "grant_type=password&client_id=test-client&username=alice&password=alice-password")
+                "grant_type=password&client_id=test-client"
+                    + "&username=alice&password=alice-password")
             .statusCode());
     assertEquals(
         400,
@@ -113,7 +128,9 @@ class DurabilityIT extends IntegrationSupport {
       assertEquals(id, data.get("userId").asText());
       String op = data.get("operationType").asText();
       ops.add(op);
-      if (op.equals("UPDATE")) assertFalse(data.get("userEnabled").asBoolean());
+      if (op.equals("UPDATE")) {
+        assertFalse(data.get("userEnabled").asBoolean());
+      }
       assertFalse(data.has("representation"));
       message.ackSync(Duration.ofSeconds(2));
     }
@@ -160,7 +177,7 @@ class DurabilityIT extends IntegrationSupport {
           1, scalar("SELECT count(*) FROM user_entity WHERE id='" + id + "' AND enabled=true"));
       var user = request("GET", "/admin/realms/durable-test/users/" + id, null);
       assertEquals(200, user.statusCode());
-      assertTrue(JSON.readTree(user.body()).get("enabled").asBoolean());
+      assertTrue(objectMapper.readTree(user.body()).get("enabled").asBoolean());
       assertEquals(1, messages(), "Only the committed CREATE may be published");
     } finally {
       execute("ALTER TABLE kc_nats_outbox DROP CONSTRAINT injected_failure");
@@ -174,7 +191,9 @@ class DurabilityIT extends IntegrationSupport {
     docker.stopContainerCmd(broker.getContainerId()).withTimeout(2).exec();
     var ids = new HashSet<String>();
     try {
-      for (int i = 0; i < 5; i++) ids.add(createUser());
+      for (int i = 0; i < 5; i++) {
+        ids.add(createUser());
+      }
       assertEquals(5, scalar("SELECT count(*) FROM kc_nats_outbox"));
       restartKeycloak(); // Restarts while NATS is still unavailable.
       assertEquals(5, scalar("SELECT count(*) FROM kc_nats_outbox"));
@@ -199,9 +218,15 @@ class DurabilityIT extends IntegrationSupport {
   @Order(6)
   void crashAfterBrokerAckBeforeDatabaseCommitRetriesTheSameId() throws Exception {
     execute(
-        "CREATE FUNCTION knd_delay_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(10); RETURN OLD; END $$");
+        """
+        CREATE FUNCTION knd_delay_delete() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN PERFORM pg_sleep(10); RETURN OLD; END $$
+        """);
     execute(
-        "CREATE TRIGGER knd_delay_delete BEFORE DELETE ON kc_nats_outbox FOR EACH ROW EXECUTE FUNCTION knd_delay_delete()");
+        """
+        CREATE TRIGGER knd_delay_delete BEFORE DELETE ON kc_nats_outbox
+        FOR EACH ROW EXECUTE FUNCTION knd_delay_delete()
+        """);
     try {
       createUser();
       await()
@@ -320,11 +345,16 @@ class DurabilityIT extends IntegrationSupport {
     InboxProcessor processor = new InboxProcessor(database, DURABLE);
     try (var pool = Executors.newFixedThreadPool(8)) {
       var futures = new ArrayList<java.util.concurrent.Future<Boolean>>();
-      for (int i = 0; i < 16; i++)
+      for (int i = 0; i < 16; i++) {
         futures.add(
             pool.submit(() -> processor.process(message.getData(), processor::recordEffect)));
+      }
       int applied = 0;
-      for (var future : futures) if (future.get()) applied++;
+      for (var future : futures) {
+        if (future.get()) {
+          applied++;
+        }
+      }
       assertEquals(1, applied);
       assertEquals(1, scalar("SELECT count(*) FROM knd_effects"));
     }
@@ -343,21 +373,25 @@ class DurabilityIT extends IntegrationSupport {
     changed.put("type", "io.keycloak.user.logout");
     assertThrows(
         IllegalStateException.class,
-        () -> processor.process(JSON.writeValueAsBytes(changed), processor::recordEffect));
+        () -> processor.process(objectMapper.writeValueAsBytes(changed), processor::recordEffect));
     assertEquals(1, scalar("SELECT count(*) FROM knd_effects"));
     message.ackSync(Duration.ofSeconds(2));
   }
 
   @Test
   @Order(13)
-  void twoKeycloakNodesDrainABacklogWithoutDoublePublication() throws Exception {
+  void twoKeycloakNodesDrainBacklogWithoutDoublePublication() throws Exception {
     var second = keycloakContainer(false);
     try {
       second.start();
       try (var pool = Executors.newFixedThreadPool(6)) {
         var futures = new ArrayList<java.util.concurrent.Future<String>>();
-        for (int i = 0; i < 24; i++) futures.add(pool.submit(IntegrationSupport::createUser));
-        for (var future : futures) assertNotNull(future.get());
+        for (int i = 0; i < 24; i++) {
+          futures.add(pool.submit(IntegrationSupport::createUser));
+        }
+        for (var future : futures) {
+          assertNotNull(future.get());
+        }
       }
       drained();
       assertEquals(24, messages());
@@ -367,10 +401,46 @@ class DurabilityIT extends IntegrationSupport {
         message.ackSync(Duration.ofSeconds(2));
       }
       assertEquals(24, unique.size());
+
+      // A held row must not block either relay from delivering unrelated work.
+      // Insert committed fixtures with future due times so the test controls the locking order.
+      nats.jetStreamManagement().purgeStream(STREAM);
+      String lockedId = UUID.randomUUID().toString();
+      String freeId = UUID.randomUUID().toString();
+      long dueAt = System.currentTimeMillis() + 5000;
+      try (var lockOwner = database.getConnection()) {
+        lockOwner.setAutoCommit(false);
+        insertOutbox(lockOwner, lockedId, dueAt);
+        insertOutbox(lockOwner, freeId, dueAt + 1);
+        lockOwner.commit();
+        try (var lock =
+            lockOwner.prepareStatement("SELECT id FROM kc_nats_outbox WHERE id=? FOR UPDATE")) {
+          lock.setString(1, lockedId);
+          try (var row = lock.executeQuery()) {
+            assertTrue(row.next());
+          }
+        }
+        assertTrue(
+            System.currentTimeMillis() < dueAt,
+            "Test must acquire the lock before rows become due");
+        // Both committed rows become due while the earlier row is locked. A blocking FOR UPDATE
+        // query would hang here; SKIP LOCKED must let the later row through.
+        await().atMost(Duration.ofSeconds(10)).until(() -> messages() == 1);
+        var free = fetch(1).getFirst();
+        assertEquals(freeId, event(free).get("id").asText());
+        free.ackSync(Duration.ofSeconds(2));
+        assertEquals(1, scalar("SELECT count(*) FROM kc_nats_outbox"));
+        lockOwner.commit();
+      }
+      drained();
+      var released = fetch(1).getFirst();
+      assertEquals(lockedId, event(released).get("id").asText());
+      released.ackSync(Duration.ofSeconds(2));
     } finally {
-      if (second.getContainerId() != null)
+      if (second.getContainerId() != null) {
         java.nio.file.Files.writeString(
             java.nio.file.Path.of("target/keycloak-second-node.log"), second.getLogs());
+      }
       second.stop();
     }
   }
@@ -384,7 +454,7 @@ class DurabilityIT extends IntegrationSupport {
     var batch = fetch(2);
     assertEquals(2, batch.size());
     batch.getFirst().ackSync(Duration.ofSeconds(2));
-    String unackedId = event(batch.get(1)).get("id").asText();
+    final String unackedId = event(batch.get(1)).get("id").asText();
     nats.close();
     var docker = broker.getDockerClient();
     docker.killContainerCmd(broker.getContainerId()).withSignal("KILL").exec();
@@ -433,6 +503,130 @@ class DurabilityIT extends IntegrationSupport {
       assertEquals(1, scalar("SELECT count(*) FROM knd_effects"));
     } finally {
       nats.jetStreamManagement().updateStream(original);
+    }
+  }
+
+  @Test
+  @Order(16)
+  void uncommittedAndRolledBackRowsAreNeverPublished() throws Exception {
+    try (var transaction = database.getConnection()) {
+      transaction.setAutoCommit(false);
+      insertOutbox(transaction, UUID.randomUUID().toString(), 0);
+      await()
+          .during(Duration.ofMillis(600))
+          .atMost(Duration.ofSeconds(3))
+          .until(() -> messages() == 0);
+      transaction.rollback();
+    }
+    assertEquals(0, scalar("SELECT count(*) FROM kc_nats_outbox"));
+    await()
+        .during(Duration.ofMillis(600))
+        .atMost(Duration.ofSeconds(3))
+        .until(() -> messages() == 0);
+  }
+
+  @Test
+  @Order(17)
+  void periodicScanRecoversCommittedRowsWithoutAnyLocalWakeup() throws Exception {
+    String id = UUID.randomUUID().toString();
+    try (var transaction = database.getConnection()) {
+      transaction.setAutoCommit(false);
+      insertOutbox(transaction, id, 0);
+      transaction.commit(); // No Keycloak callback: equivalent to another node dying after commit.
+    }
+    drained();
+    var message = fetch(1).getFirst();
+    assertEquals(id, event(message).get("id").asText());
+    message.ackSync(Duration.ofSeconds(2));
+  }
+
+  @Test
+  @Order(18)
+  void outboxWritesKeepSynchronousCommitForAuthenticationOnlyTransactions() throws Exception {
+    // Keycloak can optimize ephemeral-only transactions with synchronous_commit=off.
+    // A deferred trigger observes the final setting at commit, after Hibernate callbacks.
+    execute(
+        """
+        CREATE FUNCTION knd_require_durable_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF current_setting('synchronous_commit') = 'off' THEN
+            RAISE EXCEPTION 'Outbox transaction must not use asynchronous commit';
+          END IF;
+          RETURN NULL;
+        END $$
+        """);
+    execute(
+        """
+        CREATE CONSTRAINT TRIGGER knd_require_durable_commit
+        AFTER INSERT OR UPDATE OR DELETE ON kc_nats_outbox DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW EXECUTE FUNCTION knd_require_durable_commit()
+        """);
+    try {
+      assertEquals(
+          200,
+          login(
+                  "durable-test",
+                  "grant_type=password&client_id=test-client"
+                      + "&username=alice&password=alice-password")
+              .statusCode());
+      assertEquals(
+          400,
+          login(
+                  "durable-test",
+                  "grant_type=password&client_id=test-client&username=alice&password=incorrect")
+              .statusCode());
+      drained();
+      assertEquals(
+          2, messages(), "Both authentication transactions and relay removals must commit durably");
+      for (var message : fetch(2)) {
+        message.ackSync(Duration.ofSeconds(2));
+      }
+    } finally {
+      execute("DROP TRIGGER IF EXISTS knd_require_durable_commit ON kc_nats_outbox");
+      execute("DROP FUNCTION IF EXISTS knd_require_durable_commit()");
+    }
+  }
+
+  private static void insertOutbox(java.sql.Connection transaction, String id, long dueAt)
+      throws Exception {
+    String payload =
+        objectMapper.writeValueAsString(
+            Map.of(
+                "specversion",
+                "1.0",
+                "id",
+                id,
+                "source",
+                "urn:keycloak:realm:dGVzdA",
+                "type",
+                "io.keycloak.user.login",
+                "time",
+                "2026-01-01T00:00:00Z",
+                "datacontenttype",
+                "application/json",
+                "dataschema",
+                "urn:keycloak-nats:event:v1",
+                "data",
+                Map.of(
+                    "kind",
+                    "user",
+                    "realmId",
+                    "test",
+                    "eventType",
+                    "LOGIN",
+                    "outcome",
+                    "success")));
+    try (var insert =
+        transaction.prepareStatement(
+            """
+        INSERT INTO kc_nats_outbox(id,subject,payload,created_at,next_attempt_at,attempts)
+        VALUES (?,?,?,0,?,0)
+        """)) {
+      insert.setString(1, id);
+      insert.setString(2, "keycloak.events.dGVzdA.user.login");
+      insert.setString(3, payload);
+      insert.setLong(4, dueAt);
+      insert.executeUpdate();
     }
   }
 }

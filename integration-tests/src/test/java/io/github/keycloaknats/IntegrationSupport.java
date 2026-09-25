@@ -1,13 +1,19 @@
 package io.github.keycloaknats;
 
 import static org.awaitility.Awaitility.await;
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.nats.client.Connection;
 import io.nats.client.Nats;
 import io.nats.client.Options;
-import io.nats.client.api.*;
+import io.nats.client.api.AckPolicy;
+import io.nats.client.api.ConsumerConfiguration;
+import io.nats.client.api.DeliverPolicy;
+import io.nats.client.api.DiscardPolicy;
+import io.nats.client.api.RetentionPolicy;
+import io.nats.client.api.StorageType;
+import io.nats.client.api.StreamConfiguration;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -25,18 +31,24 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 import org.testcontainers.utility.MountableFile;
 
 abstract class IntegrationSupport {
-  static final ObjectMapper JSON = new ObjectMapper();
-  static final String STREAM = "KEYCLOAK_EVENTS", DURABLE = "auth-worker";
-  static final HttpClient HTTP =
+  static final ObjectMapper objectMapper = new ObjectMapper();
+  static final String STREAM = "KEYCLOAK_EVENTS";
+  static final String DURABLE = "auth-worker";
+  static final HttpClient httpClient =
       HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
   static Network network;
   static PostgreSQLContainer postgres;
-  static GenericContainer<?> broker, keycloak;
+  static GenericContainer<?> broker;
+  static GenericContainer<?> keycloak;
   static Connection nats;
   static PGSimpleDataSource database;
   static String adminToken;
 
   static void startInfrastructure() throws Exception {
+    startInfrastructure(System.getProperty("keycloak.version", "26.7.4"));
+  }
+
+  static void startInfrastructure(String initialVersion) throws Exception {
     network = Network.newNetwork();
     postgres =
         new PostgreSQLContainer("postgres:17.6-alpine")
@@ -61,7 +73,7 @@ abstract class IntegrationSupport {
     database.setPassword(postgres.getPassword());
     connectNats();
     provision();
-    keycloak = keycloakContainer(true);
+    keycloak = keycloakContainer(true, initialVersion);
     try {
       keycloak.start();
     } finally {
@@ -71,9 +83,12 @@ abstract class IntegrationSupport {
   }
 
   static GenericContainer<?> keycloakContainer(boolean importRealm) {
+    return keycloakContainer(importRealm, System.getProperty("keycloak.version", "26.7.4"));
+  }
+
+  static GenericContainer<?> keycloakContainer(boolean importRealm, String version) {
     var container =
-        new GenericContainer<>(
-                "quay.io/keycloak/keycloak:" + System.getProperty("keycloak.version", "26.7.4"))
+        new GenericContainer<>("quay.io/keycloak/keycloak:" + version)
             .withNetwork(network)
             .withExposedPorts(8080)
             .withEnv(
@@ -88,6 +103,7 @@ abstract class IntegrationSupport {
                     Map.entry("KND_MIN_REPLICAS", "1"),
                     Map.entry("KND_TIMEOUT_MS", "500"),
                     Map.entry("KND_POLL_MS", "50"),
+                    Map.entry("KND_IDLE_POLL_MAX_MS", "200"),
                     Map.entry("KND_RETRY_INITIAL_MS", "100"),
                     Map.entry("KND_RETRY_MAX_MS", "1000")))
             .withCopyFileToContainer(
@@ -96,14 +112,17 @@ abstract class IntegrationSupport {
                 "/opt/keycloak/providers/nats-durable.jar")
             .waitingFor(Wait.forHttp("/realms/durable-test").forStatusCode(200))
             .withStartupTimeout(Duration.ofMinutes(3));
-    if (importRealm)
+    if (importRealm) {
       container.withCopyFileToContainer(
           MountableFile.forClasspathResource("realm.json"), "/opt/keycloak/data/import/realm.json");
+    }
     return container.withCommand("start-dev", "--import-realm", "--cache=ispn");
   }
 
   static void connectNats() throws Exception {
-    if (nats != null) nats.close();
+    if (nats != null) {
+      nats.close();
+    }
     nats =
         Nats.connect(
             new Options.Builder()
@@ -168,7 +187,7 @@ abstract class IntegrationSupport {
   }
 
   static HttpResponse<String> request(String method, String path, Object body) throws Exception {
-    return HTTP.send(
+    return httpClient.send(
         HttpRequest.newBuilder(URI.create(base() + path))
             .timeout(Duration.ofSeconds(15))
             .header("Authorization", "Bearer " + adminToken)
@@ -177,13 +196,13 @@ abstract class IntegrationSupport {
                 method,
                 body == null
                     ? HttpRequest.BodyPublishers.noBody()
-                    : HttpRequest.BodyPublishers.ofString(JSON.writeValueAsString(body)))
+                    : HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(body)))
             .build(),
         HttpResponse.BodyHandlers.ofString());
   }
 
   static HttpResponse<String> login(String realm, String form) throws Exception {
-    return HTTP.send(
+    return httpClient.send(
         HttpRequest.newBuilder(
                 URI.create(base() + "/realms/" + realm + "/protocol/openid-connect/token"))
             .timeout(Duration.ofSeconds(10))
@@ -199,7 +218,7 @@ abstract class IntegrationSupport {
             "master",
             "grant_type=password&client_id=admin-cli&username=admin&password=admin-password");
     assertEquals(200, result.statusCode(), result.body());
-    adminToken = JSON.readTree(result.body()).get("access_token").asText();
+    adminToken = objectMapper.readTree(result.body()).get("access_token").asText();
   }
 
   static String createUser() throws Exception {
@@ -248,7 +267,8 @@ abstract class IntegrationSupport {
         .ignoreExceptions()
         .until(
             () ->
-                HTTP.send(
+                httpClient
+                        .send(
                             HttpRequest.newBuilder(URI.create(base() + "/realms/durable-test"))
                                 .timeout(Duration.ofSeconds(2))
                                 .GET()
@@ -261,21 +281,33 @@ abstract class IntegrationSupport {
 
   static void saveLogs() throws Exception {
     Files.createDirectories(Path.of("target"));
-    if (keycloak != null && keycloak.getContainerId() != null)
+    if (keycloak != null && keycloak.getContainerId() != null) {
       Files.writeString(Path.of("target/keycloak.log"), keycloak.getLogs());
-    if (broker != null && broker.getContainerId() != null)
+    }
+    if (broker != null && broker.getContainerId() != null) {
       Files.writeString(Path.of("target/nats.log"), broker.getLogs());
+    }
   }
 
   static void stopInfrastructure() throws Exception {
     try {
       saveLogs();
     } finally {
-      if (nats != null) nats.close();
-      if (keycloak != null) keycloak.stop();
-      if (broker != null) broker.stop();
-      if (postgres != null) postgres.stop();
-      if (network != null) network.close();
+      if (nats != null) {
+        nats.close();
+      }
+      if (keycloak != null) {
+        keycloak.stop();
+      }
+      if (broker != null) {
+        broker.stop();
+      }
+      if (postgres != null) {
+        postgres.stop();
+      }
+      if (network != null) {
+        network.close();
+      }
     }
   }
 }

@@ -1,7 +1,14 @@
 package io.github.keycloaknats;
 
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 import jakarta.persistence.EntityManager;
 import java.util.Map;
@@ -10,13 +17,16 @@ import org.junit.jupiter.api.Test;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.events.admin.OperationType;
 import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.KeycloakTransaction;
 import org.keycloak.models.KeycloakTransactionManager;
+import org.mockito.ArgumentCaptor;
 
 class DurableEventListenerTest {
   KeycloakSession session;
   EntityManager em;
   KeycloakTransactionManager tx;
   DurableEventListener listener;
+  Runnable wakeRelay;
 
   @BeforeEach
   void setup() {
@@ -28,7 +38,8 @@ class DurableEventListenerTest {
     var jpa = mock(JpaConnectionProvider.class);
     when(session.getProvider(JpaConnectionProvider.class)).thenReturn(jpa);
     when(jpa.getEntityManager()).thenReturn(em);
-    listener = new DurableEventListener(session, BridgeConfig.from(Map.of()));
+    wakeRelay = mock(Runnable.class);
+    listener = new DurableEventListener(session, BridgeConfig.from(Map.of()), wakeRelay);
   }
 
   @Test
@@ -74,5 +85,36 @@ class DurableEventListenerTest {
     listener.onEvent(EventEnvelopeTest.admin(OperationType.DELETE), false);
     verify(session, never()).users();
     verify(em).persist(any());
+  }
+
+  @Test
+  void actionDoesNotClaimAnEnablementObservation() {
+    listener.onEvent(EventEnvelopeTest.admin(OperationType.ACTION), false);
+    verify(session, never()).users();
+    var captured = ArgumentCaptor.forClass(OutboxEvent.class);
+    verify(em).persist(captured.capture());
+    assertFalse(captured.getValue().payload().contains("userEnabled"));
+  }
+
+  @Test
+  void coalescesEventsAndWakesOnlyAfterSuccessfulCommit() {
+    listener.onEvent(EventEnvelopeTest.login());
+    listener.onEvent(EventEnvelopeTest.login());
+    verifyNoInteractions(wakeRelay);
+    var callback = ArgumentCaptor.forClass(KeycloakTransaction.class);
+    verify(tx).enlistAfterCompletion(callback.capture());
+    callback.getValue().begin();
+    callback.getValue().commit();
+    verify(wakeRelay).run();
+  }
+
+  @Test
+  void rolledBackTransactionDoesNotWakeRelay() {
+    listener.onEvent(EventEnvelopeTest.login());
+    var callback = ArgumentCaptor.forClass(KeycloakTransaction.class);
+    verify(tx).enlistAfterCompletion(callback.capture());
+    callback.getValue().begin();
+    callback.getValue().rollback();
+    verifyNoInteractions(wakeRelay);
   }
 }

@@ -43,8 +43,27 @@
       <version>5.18.0</version>
       <scope>test</scope>
     </dependency>
+    <dependency>
+      <groupId>com.networknt</groupId>
+      <artifactId>json-schema-validator</artifactId>
+      <version>1.5.9</version>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
   <build>
+    <testResources>
+      <testResource>
+        <directory>src/test/resources</directory>
+      </testResource>
+      <testResource>
+        <directory>../schemas</directory>
+        <targetPath>schemas</targetPath>
+      </testResource>
+      <testResource>
+        <directory>../docs/examples</directory>
+        <targetPath>examples</targetPath>
+      </testResource>
+    </testResources>
     <plugins>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>

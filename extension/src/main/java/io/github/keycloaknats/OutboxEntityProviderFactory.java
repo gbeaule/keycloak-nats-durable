@@ -7,6 +7,7 @@ import org.keycloak.connections.jpa.entityprovider.JpaEntityProviderFactory;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.KeycloakSessionFactory;
 
+/** Registers the outbox entity and Liquibase changelog in Keycloak's persistence unit. */
 public final class OutboxEntityProviderFactory implements JpaEntityProviderFactory {
   @Override
   public JpaEntityProvider create(KeycloakSession session) {

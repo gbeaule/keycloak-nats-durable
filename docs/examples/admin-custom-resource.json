@@ -1,0 +1,17 @@
+{
+  "specversion": "1.0",
+  "id": "076a858f-8f07-5556-bd01-86fd56ce9833",
+  "source": "urn:keycloak:realm:ZGVtbw",
+  "type": "io.keycloak.admin.update",
+  "time": "2026-09-24T12:00:00Z",
+  "datacontenttype": "application/json",
+  "dataschema": "urn:keycloak-nats:event:v1",
+  "data": {
+    "kind": "admin",
+    "realmId": "demo",
+    "outcome": "success",
+    "resourceType": "risk.policy *>",
+    "operationType": "UPDATE",
+    "resourcePath": "risk/policy-123"
+  }
+}

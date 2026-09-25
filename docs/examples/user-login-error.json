@@ -1,0 +1,17 @@
+{
+  "specversion": "1.0",
+  "id": "30c88420-b4c4-54bf-8560-15c17cd5198e",
+  "source": "urn:keycloak:realm:ZGVtbw",
+  "type": "io.keycloak.user.login_error",
+  "time": "2026-09-24T12:00:00Z",
+  "datacontenttype": "application/json",
+  "dataschema": "urn:keycloak-nats:event:v1",
+  "data": {
+    "kind": "user",
+    "realmId": "demo",
+    "outcome": "error",
+    "eventType": "LOGIN_ERROR",
+    "clientId": "web-app",
+    "error": "invalid_user_credentials"
+  }
+}
