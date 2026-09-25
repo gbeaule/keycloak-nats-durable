@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:keycloak-nats:event:v1",
+  "title": "Keycloak durable event envelope v1",
+  "type": "object",
+  "required": ["specversion", "id", "source", "type", "time", "datacontenttype", "dataschema", "data"],
+  "properties": {
+    "specversion": {"const": "1.0"},
+    "id": {"type": "string", "format": "uuid", "description": "Stable transport ID; also sent as Nats-Msg-Id. Persist this in the consumer inbox."},
+    "source": {"type": "string", "pattern": "^urn:keycloak:realm:[A-Za-z0-9_-]+$"},
+    "type": {"type": "string", "pattern": "^io\\.keycloak\\.(user|admin)\\.[a-z0-9_]+$"},
+    "time": {"type": "string", "format": "date-time"},
+    "datacontenttype": {"const": "application/json"},
+    "dataschema": {"const": "urn:keycloak-nats:event:v1"},
+    "data": {
+      "type": "object", "required": ["kind", "realmId", "outcome"],
+      "properties": {
+        "kind": {"enum": ["user", "admin"]}, "realmId": {"type": "string"},
+        "keycloakEventId": {"type": "string"}, "userId": {"type": "string"}, "clientId": {"type": "string"},
+        "outcome": {"enum": ["success", "error"]}, "error": {"type": "string"},
+        "eventType": {"type": "string"}, "operationType": {"type": "string"}, "resourceType": {"type": "string"},
+        "resourcePath": {"type": "string"}, "actorUserId": {"type": "string"}, "actorRealmId": {"type": "string"},
+        "userEnabled": {"type": "boolean", "description": "State observed during a successful direct USER create/update. Not a proof that enabled changed in this operation."}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

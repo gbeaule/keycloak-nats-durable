@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.6.xsd">
+  <changeSet id="nats-outbox-1" author="keycloak-nats-durable">
+    <createTable tableName="KC_NATS_OUTBOX">
+      <column name="ID" type="VARCHAR(36)">
+        <constraints primaryKey="true" primaryKeyName="PK_KC_NATS_OUTBOX" nullable="false"/>
+      </column>
+      <column name="SUBJECT" type="VARCHAR(512)">
+        <constraints nullable="false"/>
+      </column>
+      <column name="PAYLOAD" type="CLOB">
+        <constraints nullable="false"/>
+      </column>
+      <column name="CREATED_AT" type="BIGINT">
+        <constraints nullable="false"/>
+      </column>
+      <column name="NEXT_ATTEMPT_AT" type="BIGINT">
+        <constraints nullable="false"/>
+      </column>
+      <column name="ATTEMPTS" type="BIGINT" defaultValueNumeric="0">
+        <constraints nullable="false"/>
+      </column>
+      <column name="LAST_ERROR" type="VARCHAR(128)"/>
+    </createTable>
+    <createIndex tableName="KC_NATS_OUTBOX" indexName="IDX_KC_NATS_OUTBOX_DUE">
+      <column name="NEXT_ATTEMPT_AT"/>
+      <column name="CREATED_AT"/>
+      <column name="ID"/>
+    </createIndex>
+  </changeSet>
+</databaseChangeLog>

@@ -1,0 +1,26 @@
+name: verify
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - run: mvn -B -ntp -Pintegration verify
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-and-jars
+          path: |
+            **/target/surefire-reports/**
+            **/target/failsafe-reports/**
+            integration-tests/target/*.log
+            extension/target/keycloak-nats-durable-*.jar
+            consumer-example/target/consumer-example-*.jar

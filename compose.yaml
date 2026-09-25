@@ -1,0 +1,67 @@
+name: keycloak-nats-durable
+services:
+  postgres:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: keycloak-local-only
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./deploy/postgres-init.sql:/docker-entrypoint-initdb.d/consumer.sql:ro
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U keycloak"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  nats:
+    image: nats:2.12.8-alpine
+    command: [-c, /etc/nats/nats.conf]
+    ports: ["127.0.0.1:4222:4222", "127.0.0.1:8222:8222"]
+    volumes:
+      - ./deploy/nats.conf:/etc/nats/nats.conf:ro
+      - nats-data:/data/jetstream
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, "http://localhost:8222/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  provision:
+    build: {context: ., dockerfile: deploy/Dockerfile.consumer}
+    command: [provision]
+    environment:
+      KND_NATS_URL: nats://nats:4222
+      KND_MIN_REPLICAS: 1
+    depends_on:
+      nats: {condition: service_healthy}
+  keycloak:
+    build: {context: ., dockerfile: deploy/Dockerfile.keycloak}
+    command: [start-dev, --import-realm]
+    ports: ["127.0.0.1:8080:8080"]
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: keycloak-local-only
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin-local-only
+      KND_NATS_URL: nats://nats:4222
+      KND_MIN_REPLICAS: 1
+    volumes:
+      - ./deploy/realm.json:/opt/keycloak/data/import/realm.json:ro
+    depends_on:
+      postgres: {condition: service_healthy}
+      provision: {condition: service_completed_successfully}
+  consumer:
+    build: {context: ., dockerfile: deploy/Dockerfile.consumer}
+    environment:
+      KND_NATS_URL: nats://nats:4222
+      KND_CONSUMER_DB_URL: jdbc:postgresql://postgres:5432/consumer
+      KND_CONSUMER_DB_USER: consumer
+      KND_CONSUMER_DB_PASSWORD: consumer-local-only
+    depends_on:
+      postgres: {condition: service_healthy}
+      provision: {condition: service_completed_successfully}
+volumes:
+  postgres-data:
+  nats-data:
