@@ -22,13 +22,13 @@ flowchart LR
     H -->|Commit then confirmed ACK| E
 ```
 
-* The account change and event are committed together. A capture failure marks the Keycloak transaction rollback-only; Keycloak otherwise catches listener exceptions. NATS can be unavailable while account operations continue and events accumulate in PostgreSQL.
+* For events selected by the capture policy, the account change and event are committed together. A capture failure marks the Keycloak transaction rollback-only; Keycloak otherwise catches listener exceptions. NATS can be unavailable while account operations continue and events accumulate in PostgreSQL.
 * The relay publishes only committed rows, and deletes a row only after a successful publish acknowledgement from the configured stream. PostgreSQL row locks with `SKIP LOCKED` coordinate multiple Keycloak nodes without leases or clock-based ownership. A dead process releases its locks through database connection recovery.
 * A crash between publish and outbox commit can republish the same ID. `Nats-Msg-Id` deduplicates inside the stream's rolling window. The consumer's permanent inbox covers repeats outside that window, concurrent redelivery, and crashes after business commit but before ACK.
 * Consumers use explicit acknowledgements, a durable name and unlimited redelivery. Workers for one application share that durable name and the same inbox database. Only acknowledge after successful processing; the example uses `ackSync`.
 * Events are retried indefinitely with bounded exponential backoff and jitter. No outbox expiry, retry-count deletion, automatic purge, or silent dead-letter drop is implemented. Stream expiry and lossy eviction policies are rejected. Full streams push back into the database.
 
-These guarantees cover events that reach this listener in a committed Keycloak database transaction. They require durable storage and the listener to be enabled. They do not cover external LDAP/IdP changes, direct SQL edits, imports or custom extensions that emit no event, a request killed before it reaches the event emitter, loss of every durable replica, or an external mutation outside Keycloak's database transaction. A rolled-back success operation has no success event. Keycloak error events can be emitted in their own transaction.
+These guarantees cover selected events that reach this listener in a committed Keycloak database transaction. They require durable storage and the listener to be enabled. They do not cover external LDAP/IdP changes, direct SQL edits, imports or custom extensions that emit no event, a request killed before it reaches the event emitter, loss of every durable replica, or an external mutation outside Keycloak's database transaction. A rolled-back success operation has no success event. Keycloak error events can be emitted in their own transaction.
 
 Events are **not globally or per-user ordered** across retries and concurrent nodes. `userEnabled` is observed state, not a transition or a monotonically increasing version. For a current-state authorization projection, reconcile with Keycloak; do not let an older enable/update message undo a later deletion or disablement. The example records an effect ledger rather than building an unsafe ordered projection.
 
@@ -55,6 +55,8 @@ The installable JAR is `extension/target/keycloak-nats-durable-1.0.0-SNAPSHOT.ja
 The integration suite uses real PostgreSQL, NATS and Keycloak containers and tests account lifecycle events, failed logins, outbox rollback, stream overflow, unsafe configuration, missing consumer ACKs, database inbox atomicity, concurrent duplicate processing, broker outages, hard Keycloak restarts, two Keycloak nodes, and process death after broker acceptance before outbox commit. Logs and JUnit reports are under `integration-tests/target/`; unit reports are under `extension/target/surefire-reports/`.
 
 The [verification record](docs/testing.md) records test results and their limits. [CI security](docs/ci-security.md) explains why PR builds execute untrusted code, where they run, and the protections required at repository level.
+
+The additional failure suites exercise live capture-policy replacement, mounted mutual TLS, certificate rejection, NATS leader and quorum loss, surviving Keycloak-node recovery, and retry storage behavior. The [external listener comparison](docs/listener-comparison.md) explains why direct webhooks cannot replace the transactional outbox with equivalent guarantees.
 
 ## Local demonstration
 
@@ -94,7 +96,7 @@ Environment variables are convenient in containers; matching Keycloak provider c
 | `KND_NATS_URL` | `nats://localhost:4222` | Comma-separated `nats://` or `tls://` servers; no inline credentials |
 | `KND_STREAM` | `KEYCLOAK_EVENTS` | Expected stream; every publish verifies it |
 | `KND_SUBJECT_PREFIX` | `keycloak.events` | Must exactly match the stream's sole subject `<prefix>.>` |
-| `KND_MIN_REPLICAS` | `3` | Minimum stream replicas; demo and tests explicitly use `1` |
+| `KND_MIN_REPLICAS` | `3` | Minimum stream replicas; single-node demo explicitly uses `1` |
 | `KND_CREDENTIALS_FILE` | unset | Mounted NATS JWT/NKey credentials file |
 | `KND_TOKEN` | unset | Alternative NATS token; mutually exclusive with credentials file |
 | `KND_TIMEOUT_MS` | `2000` | Connection and individual JetStream request timeout |
@@ -104,8 +106,17 @@ Environment variables are convenient in containers; matching Keycloak provider c
 | `KND_RETRY_INITIAL_MS` | `1000` | Initial retry ceiling, with 50–100% jitter |
 | `KND_RETRY_MAX_MS` | `60000` | Maximum retry ceiling |
 | `KND_MAX_PAYLOAD_BYTES` | `65536` | Capture byte limit; exceeding it rolls back the transaction |
+| `KND_FILTER_FILE` | unset (capture all) | Mounted JSON capture policy, reloaded without restart |
+| `KND_FILTER_RELOAD_MS` | `1000` | Policy polling interval; 100–60000 milliseconds |
+| `KND_TLS_CA_FILE` | unset (JVM roots) | PEM CA bundle; requires all `tls://` servers |
+| `KND_TLS_CERT_FILE` | unset | PEM client certificate chain for mutual TLS |
+| `KND_TLS_KEY_FILE` | unset | Paired unencrypted PEM client key: PKCS#8, RSA PKCS#1 or EC SEC1 |
 
-Use `tls://` with a trusted server certificate; Java's standard trust/key-store settings can supply private CA and client certificates. Certificate verification is never deliberately disabled. Keep credentials in mounted secrets rather than command lines or source control.
+TLS is optional: use `nats://` servers with no `KND_TLS_*` settings for plaintext, or `tls://` on every seed to enable TLS. With TLS enabled, both certificate trust and hostnames are verified. Publisher, provisioner and consumer accept the same mounted PEM files, with private-key parsing handled by Bouncy Castle. Keep credentials in mounted secrets rather than command lines or source control. See [capture filters, TLS mounts and HA deployment](docs/configuration.md), including [disabled-only](config/events-disabled-only.json) and [all-events](config/events-all.json) policies. Invalid initial filters fail startup; invalid reloads keep the last valid policy. Reloads never discard already captured events.
+
+The capture policy is also optional; without it, all emitted events are captured. JetStream WorkQueue retention keeps messages even with no consumer defined, so subject subscriptions alone do not remove irrelevant events. Use capture filtering to avoid storing types that the deployment will never need. See [what happens when nobody is listening](docs/configuration.md#when-nobody-is-listening).
+
+The outbox is initialized and upgraded automatically through the packaged Liquibase changelog; it needs no separate `initdb` folder. Confirmed delivery immediately deletes its row. PostgreSQL autovacuum reclaims reusable space, and retries only update metadata. See [database initialization and retention](docs/database.md) for capacity planning and safe cleanup boundaries.
 
 ## Event contract and consumer
 

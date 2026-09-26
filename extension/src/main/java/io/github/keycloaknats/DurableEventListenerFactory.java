@@ -17,6 +17,7 @@ import org.keycloak.models.utils.PostMigrationEvent;
 public final class DurableEventListenerFactory implements EventListenerProviderFactory {
   private static final Logger logger = Logger.getLogger(DurableEventListenerFactory.class);
   private BridgeConfig config;
+  private ReloadingEventFilter filter;
   private ExecutorService executor;
   private final RelayWakeup wakeup = new RelayWakeup();
   private OutboxRelay relay;
@@ -26,6 +27,7 @@ public final class DurableEventListenerFactory implements EventListenerProviderF
   @Override
   public void init(Config.Scope scope) {
     config = BridgeConfig.from(scope);
+    filter = new ReloadingEventFilter(config.filterFile());
   }
 
   @Override
@@ -35,7 +37,7 @@ public final class DurableEventListenerFactory implements EventListenerProviderF
 
   @Override
   public EventListenerProvider create(KeycloakSession session) {
-    return new DurableEventListener(session, config, wakeup::signal);
+    return new DurableEventListener(session, config, wakeup::signal, filter::current);
   }
 
   @Override
@@ -53,6 +55,7 @@ public final class DurableEventListenerFactory implements EventListenerProviderF
       return;
     }
     publisher = new JetStreamPublisher(config);
+    filter.start(config.filterReloadInterval().toMillis());
     relay =
         new OutboxRelay(
             work ->
@@ -87,6 +90,9 @@ public final class DurableEventListenerFactory implements EventListenerProviderF
         relay.stop();
       }
       wakeup.close();
+      if (filter != null) {
+        filter.close();
+      }
       stoppingExecutor = executor;
       stoppingPublisher = publisher;
     }

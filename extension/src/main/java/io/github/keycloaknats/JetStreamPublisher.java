@@ -92,7 +92,7 @@ public final class JetStreamPublisher implements EventPublisher {
     throw new IOException("Publisher closed while connecting");
   }
 
-  private Options connectionOptions() {
+  private Options connectionOptions() throws IOException {
     NatsDiagnostics diagnostics = new NatsDiagnostics();
     Options.Builder options =
         new Options.Builder()
@@ -108,6 +108,15 @@ public final class JetStreamPublisher implements EventPublisher {
     }
     if (config.token() != null) {
       options.token(config.token().toCharArray());
+    }
+    if (config.tls().enabled()) {
+      try {
+        options.sslContext(config.tls().createContext());
+        // Preserve the configured DNS identity for SNI and certificate hostname verification.
+        options.hostnameResolveMode(Options.HostnameResolveMode.HappyEyeballs);
+      } catch (java.security.GeneralSecurityException e) {
+        throw new IOException("Cannot load verified NATS TLS configuration");
+      }
     }
     return options.build();
   }

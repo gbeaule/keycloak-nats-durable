@@ -587,6 +587,92 @@ class DurabilityIT extends IntegrationSupport {
     }
   }
 
+  @Test
+  @Order(19)
+  void retriesDoNotRewritePayloadAndVacuumSettingsAreInstalled() throws Exception {
+    assertEquals(
+        1,
+        scalar(
+            """
+        SELECT count(*) FROM pg_class WHERE oid = 'kc_nats_outbox'::regclass
+          AND reloptions @> ARRAY['autovacuum_vacuum_scale_factor=0.02',
+                                   'autovacuum_vacuum_threshold=50']
+        """));
+    assertEquals(
+        1,
+        scalar(
+            """
+        SELECT count(*) FROM pg_class WHERE oid =
+          (SELECT reltoastrelid FROM pg_class WHERE oid = 'kc_nats_outbox'::regclass)
+          AND reloptions @> ARRAY['autovacuum_vacuum_scale_factor=0.02']
+        """));
+    execute(
+        """
+        CREATE FUNCTION knd_reject_payload_rewrite() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION 'retry must not rewrite immutable event columns'; END $$;
+        CREATE TRIGGER knd_immutable_payload BEFORE UPDATE OF payload, subject, created_at
+        ON kc_nats_outbox FOR EACH ROW EXECUTE FUNCTION knd_reject_payload_rewrite();
+        """);
+    var docker = broker.getDockerClient();
+    docker.stopContainerCmd(broker.getContainerId()).withTimeout(1).exec();
+    try {
+      String id = UUID.randomUUID().toString();
+      String padding =
+          java.util.stream.IntStream.range(0, 1000)
+              .mapToObj(ignored -> UUID.randomUUID().toString())
+              .collect(java.util.stream.Collectors.joining());
+      String payload = objectMapper.writeValueAsString(Map.of("id", id, "padding", padding));
+      String insertSql =
+          """
+          INSERT INTO kc_nats_outbox (id, subject, payload, created_at, next_attempt_at, attempts)
+          VALUES (?, 'keycloak.events.test.user.login', ?, 0, 0, 0)
+          """;
+      try (var db = database.getConnection();
+          var insert = db.prepareStatement(insertSql)) {
+        insert.setString(1, id);
+        insert.setString(2, payload);
+        insert.executeUpdate();
+      }
+      await()
+          .atMost(Duration.ofSeconds(15))
+          .until(() -> scalar("SELECT count(*) FROM kc_nats_outbox WHERE attempts >= 3") == 1);
+      assertEquals(1, scalar("SELECT count(*) FROM kc_nats_outbox"));
+      docker.startContainerCmd(broker.getContainerId()).exec();
+      connectNats();
+      drained();
+      var delivered = fetch(1);
+      assertEquals(1, delivered.size());
+      assertEquals(
+          payload,
+          new String(delivered.getFirst().getData(), java.nio.charset.StandardCharsets.UTF_8));
+      delivered.getFirst().ackSync(Duration.ofSeconds(2));
+      assertEquals(0, messages());
+    } finally {
+      execute(
+          "DROP TRIGGER knd_immutable_payload ON kc_nats_outbox;"
+              + " DROP FUNCTION knd_reject_payload_rewrite()");
+      if (!broker.isRunning()) {
+        docker.startContainerCmd(broker.getContainerId()).exec();
+      }
+      connectNats();
+    }
+  }
+
+  @Test
+  @Order(20)
+  void messagesWaitForConsumerCreatedAfterPublication() throws Exception {
+    assertTrue(nats.jetStreamManagement().deleteConsumer(STREAM, DURABLE));
+    final String userId = createUser();
+    drained();
+    assertEquals(1, messages(), "A stream must retain publications with no consumer defined");
+    consumer();
+    var delivered = fetch(1);
+    assertEquals(1, delivered.size());
+    assertEquals(userId, event(delivered.getFirst()).path("data").path("userId").asText());
+    delivered.getFirst().ackSync(Duration.ofSeconds(2));
+    await().atMost(Duration.ofSeconds(5)).until(() -> messages() == 0);
+  }
+
   private static void insertOutbox(java.sql.Connection transaction, String id, long dueAt)
       throws Exception {
     String payload =

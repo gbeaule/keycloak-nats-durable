@@ -1,6 +1,6 @@
 # Event contract
 
-Every emitted message has one CloudEvents 1.0 envelope and one of two data shapes: **user** or **admin**. The listener does not have a configurable event allowlist: it captures every event Keycloak sends to it for an enabled realm. An enum being listed does not guarantee Keycloak emits it for every operation or external storage provider. Deprecated upstream enums remain representable.
+Every emitted message has one CloudEvents 1.0 envelope and one of two data shapes: **user** or **admin**. By default, the listener captures every event Keycloak sends to it for an enabled realm. A [hot-reloaded capture policy](configuration.md#choose-events-before-storing-them) can select user event types, admin resources/operations and observed user enablement before events enter the outbox. An enum being listed does not guarantee Keycloak emits it for every operation or external storage provider. Deprecated upstream enums remain representable.
 
 See the [JSON Schema](../schemas/event-v1.schema.json), [complete type/resource catalogue](event-catalogue.md) and [machine-readable catalogue](../schemas/keycloak-catalogue-26.7.4.json). Tests serialize every user event type and every built-in admin resource/operation combination, validate their shape, and check the catalogue against the compiled Keycloak enums. This is shape coverage; real Keycloak integration tests exercise login, failed login, account creation, disablement and deletion.
 

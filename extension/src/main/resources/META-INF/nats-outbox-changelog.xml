@@ -28,4 +28,7 @@
       <column name="ID"/>
     </createIndex>
   </changeSet>
+  <changeSet id="nats-outbox-2-vacuum" author="keycloak-nats-durable" dbms="postgresql">
+    <customChange class="io.github.keycloaknats.OutboxVacuumMigration"/>
+  </changeSet>
 </databaseChangeLog>

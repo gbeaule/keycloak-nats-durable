@@ -1,5 +1,6 @@
 package io.github.keycloaknats;
 
+import io.github.keycloaknats.tls.TlsConfig;
 import java.net.URI;
 import java.time.Duration;
 import java.util.Arrays;
@@ -21,7 +22,10 @@ public record BridgeConfig(
     Duration retryMax,
     int maxPayloadBytes,
     String credentialsFile,
-    String token) {
+    String token,
+    TlsConfig tls,
+    String filterFile,
+    Duration filterReloadInterval) {
   /** Reads provider settings, falling back to matching environment variables. */
   public static BridgeConfig from(Config.Scope scope) {
     return read(key -> scope.get(key, System.getenv(envName(key))));
@@ -39,8 +43,9 @@ public record BridgeConfig(
           return value == null || value.isBlank() ? null : value.trim();
         };
     int pollMillis = number(get, "poll-ms", 500);
+    String[] servers = value(get, "nats-url", "nats://localhost:4222").split(",", -1);
     return new BridgeConfig(
-        value(get, "nats-url", "nats://localhost:4222").split(",", -1),
+        servers,
         value(get, "stream", "KEYCLOAK_EVENTS"),
         value(get, "subject-prefix", "keycloak.events"),
         number(get, "min-replicas", 3),
@@ -52,7 +57,10 @@ public record BridgeConfig(
         Duration.ofMillis(number(get, "retry-max-ms", 60000)),
         number(get, "max-payload-bytes", 65536),
         get.apply("credentials-file"),
-        get.apply("token"));
+        get.apply("token"),
+        TlsConfig.from(servers, get),
+        get.apply("filter-file"),
+        Duration.ofMillis(number(get, "filter-reload-ms", 1000)));
   }
 
   /** Validates all limits and defensively copies the server list. */
@@ -95,6 +103,16 @@ public record BridgeConfig(
     }
     if (credentialsFile != null && token != null) {
       throw new IllegalArgumentException("Choose credentials-file or token, not both");
+    }
+    boolean allTls = Arrays.stream(servers).allMatch(server -> server.startsWith("tls://"));
+    boolean anyTls = Arrays.stream(servers).anyMatch(server -> server.startsWith("tls://"));
+    if (tls == null || anyTls != allTls || tls.enabled() != allTls) {
+      throw new IllegalArgumentException("TLS settings must match every NATS server");
+    }
+    if (filterReloadInterval == null
+        || filterReloadInterval.toMillis() < 100
+        || filterReloadInterval.toMillis() > 60000) {
+      throw new IllegalArgumentException("filter-reload-ms must be 100..60000");
     }
   }
 

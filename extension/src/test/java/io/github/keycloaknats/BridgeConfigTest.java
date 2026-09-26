@@ -17,6 +17,8 @@ class BridgeConfigTest {
     assertEquals(3, c.minReplicas());
     assertEquals("KEYCLOAK_EVENTS", c.stream());
     assertEquals(65536, c.maxPayloadBytes());
+    assertFalse(c.tls().enabled());
+    assertEquals("nats://localhost:4222", c.servers()[0]);
   }
 
   @ParameterizedTest
@@ -42,7 +44,12 @@ class BridgeConfigTest {
     "idle-poll-max-ms,499",
     "timeout-ms,-1",
     "retry-max-ms,500",
-    "batch-size,wat"
+    "batch-size,wat",
+    "filter-reload-ms,99",
+    "filter-reload-ms,60001",
+    "tls-ca-file,/certs/ca.pem",
+    "tls-key-file,/certs/key.pem",
+    "nats-url,'tls://host:4222,nats://backup:4222'"
   })
   void invalidSettingsAreRejected(String key, String value) {
     assertThrows(IllegalArgumentException.class, () -> BridgeConfig.from(Map.of(key, value)));
@@ -52,7 +59,7 @@ class BridgeConfigTest {
   void neverPrintsSecretsAndDefensivelyCopiesServers() {
     var config =
         BridgeConfig.from(
-            Map.of("token", "secret-value", "nats-url", "tls://nats:4222,nats://backup:4222"));
+            Map.of("token", "secret-value", "nats-url", "tls://nats:4222,tls://backup:4222"));
     assertFalse(config.toString().contains("secret-value"));
     config.servers()[0] = "changed";
     assertEquals("tls://nats:4222", config.servers()[0]);

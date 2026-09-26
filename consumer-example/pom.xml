@@ -9,6 +9,11 @@
   <artifactId>consumer-example</artifactId>
   <dependencies>
     <dependency>
+      <groupId>io.github.keycloaknats</groupId>
+      <artifactId>nats-transport</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
       <groupId>io.nats</groupId>
       <artifactId>jnats</artifactId>
     </dependency>

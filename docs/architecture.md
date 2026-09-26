@@ -12,8 +12,9 @@ The [26.7.4 EventBuilder](https://github.com/keycloak/keycloak/blob/26.7.4/serve
 
 * [ebbot-ai/keycloak-nats](https://github.com/ebbot-ai/keycloak-nats): reviewed `NATSEventListenerProvider` and its factory. It demonstrates subject construction and direct JetStream publishing. Its reviewed implementation logs publish failures and uses a no-op listener when initial connection fails. It does not provide a transactional outbox or preserve failed publishes across restart. This project uses an independent implementation.
 * [p2-inc/keycloak-events](https://github.com/p2-inc/keycloak-events): reviewed `SenderEventListenerProvider`, the listener base, and the documented user lifecycle mechanism. Its sender uses scheduled in-memory retry tasks. The user-removal provider mechanism also highlights that admin events do not cover every possible storage-provider change. We adopt neither its code nor its runtime dependency; event coverage is stated explicitly.
+* [cevheri/keycloak-custom-event-listener](listener-comparison.md): reviewed the listener, HTTP client and `initdb` script at a pinned commit. Synchronous webhook delivery with logged failures does not preserve unsent events across restart or coordinate delivery with database commit. Its smaller persistence API footprint does not provide equivalent durable guarantees.
 
-The review informed the failure model and tests, rather than copying source or depending on either project.
+The review informed the failure model and tests. This project does not copy source or depend on these projects.
 
 ## Publisher coordination
 

@@ -1,0 +1,4 @@
+{
+  "userEvents": ["*"],
+  "adminEvents": [{"resourceType": "*", "operations": ["*"]}]
+}

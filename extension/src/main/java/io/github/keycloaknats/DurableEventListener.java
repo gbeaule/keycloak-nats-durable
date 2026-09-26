@@ -15,23 +15,41 @@ public final class DurableEventListener implements EventListenerProvider {
   private final KeycloakSession session;
   private final EventEnvelope envelopes;
   private final Runnable wakeRelay;
+  private final java.util.function.Supplier<EventFilter> filter;
   private boolean wakeupEnlisted;
 
   /** Binds capture to this request's session and a notification issued only after commit. */
   public DurableEventListener(KeycloakSession session, BridgeConfig config, Runnable wakeRelay) {
+    this(session, config, wakeRelay, EventFilter::all);
+  }
+
+  DurableEventListener(
+      KeycloakSession session,
+      BridgeConfig config,
+      Runnable wakeRelay,
+      java.util.function.Supplier<EventFilter> filter) {
     this.session = session;
     this.envelopes = new EventEnvelope(config);
     this.wakeRelay = wakeRelay;
+    this.filter = filter;
   }
 
   @Override
   public void onEvent(Event event) {
-    persist(() -> envelopes.user(event));
+    persist(() -> filter.get().accepts(event) ? envelopes.user(event) : null);
   }
 
   @Override
   public void onEvent(AdminEvent event, boolean includeRepresentation) {
-    persist(() -> envelopes.admin(event, enabledState(event)));
+    persist(
+        () -> {
+          EventFilter policy = filter.get();
+          if (!policy.mayAccept(event)) {
+            return null;
+          }
+          Boolean enabled = enabledState(event);
+          return policy.accepts(event, enabled) ? envelopes.admin(event, enabled) : null;
+        });
   }
 
   private Boolean enabledState(AdminEvent event) {
@@ -52,11 +70,15 @@ public final class DurableEventListener implements EventListenerProvider {
 
   private void persist(java.util.function.Supplier<OutboxEvent> event) {
     try {
+      OutboxEvent captured = event.get();
+      if (captured == null) {
+        return;
+      }
       if (!session.getTransactionManager().isActive()) {
         throw new IllegalStateException("An active Keycloak transaction is required");
       }
       var em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-      em.persist(event.get());
+      em.persist(captured);
       // Detect database rejection while the request is still inside the listener boundary.
       em.flush();
       enlistWakeup();

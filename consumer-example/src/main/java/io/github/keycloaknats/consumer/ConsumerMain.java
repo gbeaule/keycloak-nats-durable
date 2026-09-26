@@ -1,5 +1,6 @@
 package io.github.keycloaknats.consumer;
 
+import io.github.keycloaknats.tls.TlsConfig;
 import io.nats.client.Connection;
 import io.nats.client.Nats;
 import io.nats.client.Options;
@@ -23,11 +24,24 @@ public final class ConsumerMain {
     String stream = env("KND_STREAM", "KEYCLOAK_EVENTS");
     String subject = env("KND_SUBJECT_PREFIX", "keycloak.events") + ".>";
     String durable = env("KND_CONSUMER", "auth-worker");
+    String[] servers = env("KND_NATS_URL", "nats://localhost:4222").split(",", -1);
+    TlsConfig tls =
+        TlsConfig.from(
+            servers,
+            key ->
+                System.getenv("KND_" + key.replace('-', '_').toUpperCase(java.util.Locale.ROOT)));
     Options.Builder options =
         new Options.Builder()
-            .servers(env("KND_NATS_URL", "nats://localhost:4222").split(","))
+            .servers(servers)
             .connectionTimeout(Duration.ofSeconds(5))
             .maxReconnects(-1);
+    if (tls.enabled()) {
+      options.sslContext(tls.createContext());
+      options.hostnameResolveMode(Options.HostnameResolveMode.HappyEyeballs);
+    }
+    if (System.getenv("KND_CREDENTIALS_FILE") != null && System.getenv("KND_TOKEN") != null) {
+      throw new IllegalArgumentException("Choose credentials-file or token, not both");
+    }
     if (System.getenv("KND_CREDENTIALS_FILE") != null) {
       options.authHandler(Nats.credentials(System.getenv("KND_CREDENTIALS_FILE")));
     }

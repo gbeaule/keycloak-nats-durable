@@ -49,6 +49,12 @@ abstract class IntegrationSupport {
   }
 
   static void startInfrastructure(String initialVersion) throws Exception {
+    startInfrastructure(initialVersion, container -> {});
+  }
+
+  static void startInfrastructure(
+      String initialVersion, java.util.function.Consumer<GenericContainer<?>> configureKeycloak)
+      throws Exception {
     network = Network.newNetwork();
     postgres =
         new PostgreSQLContainer("postgres:17.6-alpine")
@@ -74,6 +80,7 @@ abstract class IntegrationSupport {
     connectNats();
     provision();
     keycloak = keycloakContainer(true, initialVersion);
+    configureKeycloak.accept(keycloak);
     try {
       keycloak.start();
     } finally {
@@ -187,8 +194,14 @@ abstract class IntegrationSupport {
   }
 
   static HttpResponse<String> request(String method, String path, Object body) throws Exception {
+    return requestTo(keycloak, method, path, body);
+  }
+
+  static HttpResponse<String> requestTo(
+      GenericContainer<?> node, String method, String path, Object body) throws Exception {
+    String address = "http://" + node.getHost() + ":" + currentPort(node, 8080);
     return httpClient.send(
-        HttpRequest.newBuilder(URI.create(base() + path))
+        HttpRequest.newBuilder(URI.create(address + path))
             .timeout(Duration.ofSeconds(15))
             .header("Authorization", "Bearer " + adminToken)
             .header("Content-Type", "application/json")
@@ -222,8 +235,13 @@ abstract class IntegrationSupport {
   }
 
   static String createUser() throws Exception {
+    return createUserOn(keycloak);
+  }
+
+  static String createUserOn(GenericContainer<?> node) throws Exception {
     var result =
-        request(
+        requestTo(
+            node,
             "POST",
             "/admin/realms/durable-test/users",
             Map.of("username", "user-" + UUID.randomUUID(), "enabled", true));

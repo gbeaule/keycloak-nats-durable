@@ -13,13 +13,13 @@ public class OutboxEvent {
   @Column(name = "ID", length = 36, nullable = false)
   private String id;
 
-  @Column(name = "SUBJECT", length = 512, nullable = false)
+  @Column(name = "SUBJECT", length = 512, nullable = false, updatable = false)
   private String subject;
 
-  @Column(name = "PAYLOAD", columnDefinition = "text", nullable = false)
+  @Column(name = "PAYLOAD", columnDefinition = "text", nullable = false, updatable = false)
   private String payload;
 
-  @Column(name = "CREATED_AT", nullable = false)
+  @Column(name = "CREATED_AT", nullable = false, updatable = false)
   private long createdAt;
 
   @Column(name = "NEXT_ATTEMPT_AT", nullable = false)

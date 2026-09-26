@@ -51,4 +51,12 @@ The identified implementation races have regression coverage. The publish/commit
 
 The implementation requires PostgreSQL; it does not silently claim compatibility with every database Keycloak supports. The outbox shares Keycloak's database, schema configuration and pool. Consumers needing durable exactly-once database effects also need an inbox in their application's transactional database; that is a consumer requirement, not another Keycloak database service.
 
-The local suite exercises one NATS process and two Keycloak nodes. Three-broker quorum failures, power-loss behavior, production TLS/JWT credentials, capacity under sustained load, restoration of multiple stores and external/federated user storage remain deployment-specific validation work. These are not claimed as tested. See [the verification record](testing.md).
+The expanded suite includes a three-broker NATS cluster with client and route mutual TLS, leader failure, quorum loss, durable ACK state, and two Keycloak nodes. Power-loss behavior, deployment-specific TLS/JWT credentials, capacity under sustained load, database failover, restoration of multiple stores and external/federated user storage still require deployment-specific validation. See [the verification record](testing.md) for which runs passed.
+
+## Capture, transport and storage review
+
+The [external webhook listener review](listener-comparison.md) confirms that avoiding custom JPA alone would weaken durability. Capture filtering now occurs before persistence; a complete immutable policy is swapped on valid reload, and invalid reloads retain the previous policy. Backlog delivery is independent of the current capture policy.
+
+Optional TLS loads mounted PEM trust roots and paired client credentials through a shared transport module. Bouncy Castle handles private-key PEM parsing and conversion; the JDK handles certificates, key managers and TLS. The Bouncy Castle LTS modules are version-aligned and isolated inside the provider. Hostname verification is explicitly enabled, and NATS uses DNS-preserving resolution so the intended server name survives into the handshake. Tests reject untrusted certificates, mismatched hostnames and missing client certificates. Plaintext remains supported without certificate settings.
+
+The schema remains owned by Liquibase. A new changeset tunes PostgreSQL outbox/TOAST autovacuum, while JPA marks payload, subject and capture time non-updatable so retries cannot rewrite them. A database trigger in the integration test rejects any retry UPDATE that mentions those columns, including a same-value assignment. ACKed rows are removed immediately; pending events and permanent consumer deduplication records do not receive a destructive time-based trim.

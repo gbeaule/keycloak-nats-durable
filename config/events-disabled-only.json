@@ -1,0 +1,6 @@
+{
+  "userEvents": [],
+  "adminEvents": [
+    {"resourceType": "USER", "operations": ["UPDATE"], "userEnabled": false}
+  ]
+}

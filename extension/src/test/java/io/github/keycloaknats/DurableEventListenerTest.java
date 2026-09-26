@@ -43,6 +43,17 @@ class DurableEventListenerTest {
   }
 
   @Test
+  void excludedEventsDoNotTouchDatabaseOrObserveUsers() throws Exception {
+    var none = EventFilterTest.parse("{\"userEvents\":[],\"adminEvents\":[]}");
+    listener =
+        new DurableEventListener(session, BridgeConfig.from(Map.of()), wakeRelay, () -> none);
+    listener.onEvent(EventEnvelopeTest.login());
+    listener.onEvent(EventEnvelopeTest.admin(OperationType.UPDATE), false);
+    verifyNoInteractions(em, tx, wakeRelay);
+    verify(session, never()).users();
+  }
+
+  @Test
   void insertsIntoRequestTransactionWithoutNetworkOrCommit() {
     listener.onEvent(EventEnvelopeTest.login());
     verify(em).persist(any(OutboxEvent.class));

@@ -12,6 +12,8 @@ The documented [event listener contract](https://www.keycloak.org/docs-api/26.7.
 
 Adding the outbox entity to that same entity manager makes the event and account change one database commit. An after-commit NATS callback alone leaves a crash gap, and publishing before commit can expose rolled-back account changes.
 
+The [review of cevheri/keycloak-custom-event-listener](listener-comparison.md) found direct synchronous webhook delivery without durable retries or commit coordination. Its smaller API footprint does not preserve the required guarantees. The outbox's migration remains the schema authority; a separate `initdb` script is not required.
+
 ## Version policy
 
 CI runs the same provider code and dependency baseline against Keycloak **26.6.4** and **26.7.4**, on PostgreSQL 17 and Java 21. The Maven compile baseline is `keycloak.version` (currently 26.7.4); the test server image is controlled separately by `keycloak.runtime.version`. Exact local results are recorded in [testing](testing.md). Entries in CI are compatibility targets until the corresponding run passes; untested versions, other database engines, vendor distributions and mixed-version Keycloak rolling upgrades are not implied.

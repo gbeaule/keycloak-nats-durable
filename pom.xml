@@ -7,6 +7,7 @@
   <packaging>pom</packaging>
   <name>Keycloak NATS Durable</name>
   <modules>
+    <module>nats-transport</module>
     <module>extension</module>
     <module>consumer-example</module>
     <module>integration-tests</module>
@@ -18,6 +19,7 @@
     <keycloak.runtime.version>${keycloak.version}</keycloak.runtime.version>
     <keycloak.upgrade.from>26.6.4</keycloak.upgrade.from>
     <jnats.version>2.26.3</jnats.version>
+    <bouncycastle.version>2.73.13</bouncycastle.version>
     <junit.version>5.12.2</junit.version>
     <testcontainers.version>2.0.5</testcontainers.version>
   </properties>
@@ -48,6 +50,21 @@
         <groupId>io.nats</groupId>
         <artifactId>jnats</artifactId>
         <version>${jnats.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.bouncycastle</groupId>
+        <artifactId>bcprov-lts8on</artifactId>
+        <version>${bouncycastle.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.bouncycastle</groupId>
+        <artifactId>bcutil-lts8on</artifactId>
+        <version>${bouncycastle.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.bouncycastle</groupId>
+        <artifactId>bcpkix-lts8on</artifactId>
+        <version>${bouncycastle.version}</version>
       </dependency>
       <dependency>
         <groupId>org.postgresql</groupId>
@@ -83,7 +100,7 @@
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-shade-plugin</artifactId>
-          <version>3.6.0</version>
+          <version>3.6.2</version>
         </plugin>
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
