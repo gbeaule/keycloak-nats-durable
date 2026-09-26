@@ -14,6 +14,7 @@ import io.nats.client.api.DiscardPolicy;
 import io.nats.client.api.RetentionPolicy;
 import io.nats.client.api.StorageType;
 import io.nats.client.api.StreamConfiguration;
+import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -23,6 +24,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Consumer;
 import org.postgresql.ds.PGSimpleDataSource;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.Network;
@@ -150,17 +152,31 @@ abstract class IntegrationSupport {
   }
 
   static void connectNats() throws Exception {
+    connectNats(options -> {});
+  }
+
+  static void connectNats(Consumer<Options.Builder> configure) throws Exception {
     if (nats != null) {
       nats.close();
+      nats = null;
     }
-    nats =
-        Nats.connect(
-            new Options.Builder()
-                .server(natsUrl())
-                .maxReconnects(-1)
-                .errorListener(new io.nats.client.ErrorListener() {})
-                .connectionTimeout(Duration.ofSeconds(2))
-                .build());
+    // Raw Docker starts bypass Testcontainers' readiness wait. Reconnect settings only apply
+    // after the initial connection succeeds, and a restart can change the mapped host port.
+    await("NATS to accept connections")
+        .atMost(Duration.ofSeconds(15))
+        .pollDelay(Duration.ZERO)
+        .ignoreExceptionsInstanceOf(IOException.class)
+        .untilAsserted(
+            () -> {
+              var options =
+                  new Options.Builder()
+                      .server(natsUrl())
+                      .maxReconnects(-1)
+                      .errorListener(new io.nats.client.ErrorListener() {})
+                      .connectionTimeout(Duration.ofSeconds(2));
+              configure.accept(options);
+              nats = Nats.connect(options.build());
+            });
   }
 
   static int currentPort(GenericContainer<?> container, int port) {

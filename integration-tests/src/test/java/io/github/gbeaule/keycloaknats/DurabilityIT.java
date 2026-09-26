@@ -200,10 +200,7 @@ class DurabilityIT extends IntegrationSupport {
     } finally {
       docker.startContainerCmd(broker.getContainerId()).exec();
     }
-    await()
-        .atMost(Duration.ofSeconds(15))
-        .ignoreExceptions()
-        .untilAsserted(IntegrationSupport::connectNats);
+    connectNats();
     drained();
     assertEquals(5, messages());
     var received = new HashSet<String>();
@@ -459,10 +456,7 @@ class DurabilityIT extends IntegrationSupport {
     var docker = broker.getDockerClient();
     docker.killContainerCmd(broker.getContainerId()).withSignal("KILL").exec();
     docker.startContainerCmd(broker.getContainerId()).exec();
-    await()
-        .atMost(Duration.ofSeconds(15))
-        .ignoreExceptions()
-        .untilAsserted(IntegrationSupport::connectNats);
+    connectNats();
     assertEquals(1, messages());
     var redelivered = fetch(1).getFirst();
     assertEquals(unackedId, event(redelivered).get("id").asText());
