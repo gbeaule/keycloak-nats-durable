@@ -1,0 +1,93 @@
+package io.github.gbeaule.keycloaknats;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.networknt.schema.JsonSchema;
+import com.networknt.schema.JsonSchemaFactory;
+import com.networknt.schema.SpecVersion;
+import java.io.IOException;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.stream.Collectors;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.keycloak.events.EventType;
+import org.keycloak.events.admin.OperationType;
+import org.keycloak.events.admin.ResourceType;
+
+class EventSchemaTest {
+  private static final ObjectMapper objectMapper = new ObjectMapper();
+  private static final JsonSchema eventSchema =
+      JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V202012)
+          .getSchema(EventSchemaTest.class.getResourceAsStream("/schemas/event-v1.schema.json"));
+
+  static void assertValid(JsonNode event) {
+    var errors = eventSchema.validate(event);
+    assertTrue(errors.isEmpty(), errors::toString);
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "user-login",
+        "user-login-error",
+        "user-minimal",
+        "admin-create",
+        "admin-disable",
+        "admin-enable",
+        "admin-delete",
+        "admin-action",
+        "admin-error",
+        "admin-nested-resource",
+        "admin-custom-resource",
+        "admin-minimal"
+      })
+  void documentationExamplesConformToSchema(String example) throws IOException {
+    try (var input = getClass().getResourceAsStream("/examples/" + example + ".json")) {
+      assertNotNull(input, "Missing documentation example: " + example);
+      assertValid(objectMapper.readTree(input));
+    }
+  }
+
+  @Test
+  void schemaRejectsMixedFamiliesAndInvalidStateClaims() throws IOException {
+    ObjectNode event =
+        (ObjectNode)
+            objectMapper.readTree(getClass().getResourceAsStream("/examples/user-login.json"));
+    ((ObjectNode) event.get("data")).put("operationType", "UPDATE");
+    assertFalse(eventSchema.validate(event).isEmpty());
+    event =
+        (ObjectNode)
+            objectMapper.readTree(getClass().getResourceAsStream("/examples/admin-delete.json"));
+    ((ObjectNode) event.get("data")).put("userEnabled", false);
+    assertFalse(eventSchema.validate(event).isEmpty());
+  }
+
+  @Test
+  void publishedCatalogueContainsEveryEnumInCompileBaseline() throws IOException {
+    var catalogue =
+        objectMapper.readTree(
+            getClass().getResourceAsStream("/schemas/keycloak-catalogue-26.7.4.json"));
+    assertEquals(enumNames(EventType.values()), names(catalogue.get("userEventTypes")));
+    assertEquals(enumNames(ResourceType.values()), names(catalogue.get("adminResourceTypes")));
+    assertEquals(enumNames(OperationType.values()), names(catalogue.get("adminOperationTypes")));
+  }
+
+  private static Set<String> enumNames(Enum<?>[] values) {
+    return Arrays.stream(values).map(Enum::name).collect(Collectors.toSet());
+  }
+
+  private static Set<String> names(JsonNode values) {
+    Set<String> names = new HashSet<>();
+    values.forEach(value -> names.add(value.asText()));
+    return names;
+  }
+}

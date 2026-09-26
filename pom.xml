@@ -1,11 +1,22 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd" child.project.url.inherit.append.path="false">
   <modelVersion>4.0.0</modelVersion>
-  <groupId>io.github.keycloaknats</groupId>
+  <groupId>io.github.gbeaule</groupId>
   <artifactId>keycloak-nats-durable-parent</artifactId>
   <version>1.0.0-SNAPSHOT</version>
   <packaging>pom</packaging>
   <name>Keycloak NATS Durable</name>
+  <description>Durable Keycloak events over NATS JetStream with a transactional outbox.</description>
+  <url>https://github.com/gbeaule/keycloak-nats-durable</url>
+  <scm child.scm.connection.inherit.append.path="false" child.scm.developerConnection.inherit.append.path="false" child.scm.url.inherit.append.path="false">
+    <connection>scm:git:https://github.com/gbeaule/keycloak-nats-durable.git</connection>
+    <developerConnection>scm:git:ssh://git@github.com/gbeaule/keycloak-nats-durable.git</developerConnection>
+    <url>https://github.com/gbeaule/keycloak-nats-durable</url>
+  </scm>
+  <issueManagement>
+    <system>GitHub</system>
+    <url>https://github.com/gbeaule/keycloak-nats-durable/issues</url>
+  </issueManagement>
   <modules>
     <module>nats-transport</module>
     <module>extension</module>

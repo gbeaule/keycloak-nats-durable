@@ -29,6 +29,8 @@
     </createIndex>
   </changeSet>
   <changeSet id="nats-outbox-2-vacuum" author="keycloak-nats-durable" dbms="postgresql">
-    <customChange class="io.github.keycloaknats.OutboxVacuumMigration"/>
+    <!-- Accept the checksum from before the package rename; the generated SQL is unchanged. -->
+    <validCheckSum>9:0865fbeca5c396e9cd44e1b50720d5ca</validCheckSum>
+    <customChange class="io.github.gbeaule.keycloaknats.OutboxVacuumMigration"/>
   </changeSet>
 </databaseChangeLog>

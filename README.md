@@ -2,6 +2,8 @@
 
 A Java 21 Keycloak event listener with a transactional PostgreSQL outbox, a JetStream relay, and an example consumer with a transactional inbox. Account creation, disablement, deletion, login, login failures, logout and other events emitted by Keycloak use the same pipeline.
 
+Source: [gbeaule/keycloak-nats-durable](https://github.com/gbeaule/keycloak-nats-durable). Maven artifacts use the group `io.github.gbeaule`, and Java packages use the prefix `io.github.gbeaule.keycloaknats`.
+
 **Delivery is at least once. Database business effects can be applied once using the included consumer inbox.** Redelivery after a missing acknowledgement necessarily permits repeated delivery. Broker deduplication alone cannot make an arbitrary downstream side effect happen exactly once.
 
 The extension uses **Keycloak's existing PostgreSQL database and connection pool**. It adds an outbox table; it does not require another database instance or separate database credentials. The sample consumer's inbox belongs to the consuming application and is separate from extension installation.

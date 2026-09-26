@@ -2,9 +2,19 @@
 
 Verified locally on 2026-09-25 using Windows 11, Docker Desktop / Docker Engine 29.8.0, Maven 3.9.6 and IntelliJ's Java 21.0.10 runtime. Tests use Keycloak 26.6.4 and 26.7.4, PostgreSQL 17.6 and NATS 2.12.8. Testcontainers 2.0.5 manages isolated containers and cleans them up.
 
+## Repository namespace follow-up
+
+The move to Maven group `io.github.gbeaule` and Java package prefix `io.github.gbeaule.keycloaknats` passed all **324 unit tests** and **2 targeted integration tests**, with no failures, errors or skips. `CustomSchemaIT` verifies installation and restart in a quoted PostgreSQL schema on Keycloak 26.7.4; `UpgradeIT` preserves pending events across a Keycloak 26.6.4 → 26.7.4 replacement. The new `OutboxChangelogTest` verifies that the renamed migration accepts its previous checksum and rejects unrelated checksums.
+
+```sh
+mvn -B -ntp clean -Pintegration '-Dit.test=UpgradeIT,CustomSchemaIT' verify
+```
+
+The clean build passed Spotless and Checkstyle. Inspection of the provider and consumer JARs confirmed the updated Maven coordinates, service registrations, relocated dependencies and consumer entry point, with no classes under the previous package prefix. The Maven log is `.work/package-rename-verify.log`. The full integration matrix below predates this namespace change.
+
 ## PEM library follow-up
 
-The latest change replaces manual private-key PEM decoding with Bouncy Castle LTS 2.73.13, aligning `bcprov`, `bcutil` and `bcpkix`. Maven Shade 3.6.2 handles the dependency's newer multi-release class files. TLS remains optional, and the default capture policy still includes all events.
+This earlier change replaces manual private-key PEM decoding with Bouncy Castle LTS 2.73.13, aligning `bcprov`, `bcutil` and `bcpkix`. Maven Shade 3.6.2 handles the dependency's newer multi-release class files. TLS remains optional, and the default capture policy still includes all events.
 
 All **323 unit tests** pass: 12 transport, 301 extension and 10 consumer tests. The transport cases perform mutual-TLS handshakes and exchange application data using RSA and EC PKCS#8, RSA PKCS#1 and EC SEC1 keys. They also reject malformed, encrypted, multiple, public-only, empty and oversized keys, and check plaintext/default-trust configuration. Certificates and keys are generated for the tests.
 
@@ -77,7 +87,7 @@ Concurrency regressions use latches and controlled blocking to exercise commits 
 25. Initialize the extension in a quoted, non-public PostgreSQL schema, verify its maintenance settings and absence from `public`, then hard-restart Keycloak with NATS down and recover the retained event.
 26. Publish over plaintext NATS with no consumer defined, verify the outbox drains into the stream, create a consumer afterward and verify the retained message is delivered and removed only after ACK. Added in the PEM follow-up.
 
-See [DurabilityIT](../integration-tests/src/test/java/io/github/keycloaknats/DurabilityIT.java), [UpgradeIT](../integration-tests/src/test/java/io/github/keycloaknats/UpgradeIT.java), [FilteringIT](../integration-tests/src/test/java/io/github/keycloaknats/FilteringIT.java), [NatsClusterIT](../integration-tests/src/test/java/io/github/keycloaknats/NatsClusterIT.java), [CustomSchemaIT](../integration-tests/src/test/java/io/github/keycloaknats/CustomSchemaIT.java) and the [test infrastructure](../integration-tests/src/test/java/io/github/keycloaknats/IntegrationSupport.java). Tests do not use `disabledWithoutDocker` or silently skip unavailable infrastructure. Read JUnit XML under `integration-tests/target/failsafe-reports` and logs under `integration-tests/target` for a local run's evidence. Upgrade source and target logs have separate filenames.
+See [DurabilityIT](../integration-tests/src/test/java/io/github/gbeaule/keycloaknats/DurabilityIT.java), [UpgradeIT](../integration-tests/src/test/java/io/github/gbeaule/keycloaknats/UpgradeIT.java), [FilteringIT](../integration-tests/src/test/java/io/github/gbeaule/keycloaknats/FilteringIT.java), [NatsClusterIT](../integration-tests/src/test/java/io/github/gbeaule/keycloaknats/NatsClusterIT.java), [CustomSchemaIT](../integration-tests/src/test/java/io/github/gbeaule/keycloaknats/CustomSchemaIT.java) and the [test infrastructure](../integration-tests/src/test/java/io/github/gbeaule/keycloaknats/IntegrationSupport.java). Tests do not use `disabledWithoutDocker` or silently skip unavailable infrastructure. Read JUnit XML under `integration-tests/target/failsafe-reports` and logs under `integration-tests/target` for a local run's evidence. Upgrade source and target logs have separate filenames.
 
 The cluster tests generate temporary certificates and protect both client and broker-route connections with mutual TLS. They wait for stream and durable-consumer leadership independently: those Raft groups recover separately. Confirmed ACKs are followed by an eventual stream-removal check, because WorkQueue deletion can trail the consumer ACK. These readiness checks preserve the exact-ID, message-count and retained-outbox assertions.
 
