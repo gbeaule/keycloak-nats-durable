@@ -231,18 +231,7 @@ class ProductionModeIT extends IntegrationSupport {
   }
 
   private static void connectAdmin() throws Exception {
-    if (nats != null) {
-      nats.close();
-    }
-    nats =
-        Nats.connect(
-            new Options.Builder()
-                .server(natsUrl())
-                .authHandler(Nats.credentials(credentials.file("admin")))
-                .maxReconnects(-1)
-                .connectionTimeout(Duration.ofSeconds(2))
-                .errorListener(new io.nats.client.ErrorListener() {})
-                .build());
+    connectNats(options -> options.authHandler(Nats.credentials(credentials.file("admin"))));
   }
 
   private static void loginSecureAdmin() throws Exception {
