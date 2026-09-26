@@ -17,6 +17,7 @@ class BridgeConfigTest {
     assertEquals(3, c.minReplicas());
     assertEquals("KEYCLOAK_EVENTS", c.stream());
     assertEquals(65536, c.maxPayloadBytes());
+    assertEquals(1, c.relayWorkers());
     assertFalse(c.tls().enabled());
     assertEquals("nats://localhost:4222", c.servers()[0]);
   }
@@ -38,6 +39,8 @@ class BridgeConfigTest {
     "min-replicas,6",
     "batch-size,0",
     "batch-size,1001",
+    "relay-workers,0",
+    "relay-workers,17",
     "max-payload-bytes,1",
     "max-payload-bytes,1048577",
     "poll-ms,0",

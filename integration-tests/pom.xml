@@ -4,7 +4,7 @@
   <parent>
     <groupId>io.github.gbeaule</groupId>
     <artifactId>keycloak-nats-durable-parent</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
+    <version>${revision}</version>
   </parent>
   <artifactId>integration-tests</artifactId>
   <dependencies>
@@ -59,6 +59,35 @@
   </dependencies>
   <profiles>
     <profile>
+      <id>performance</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-failsafe-plugin</artifactId>
+            <executions>
+              <execution>
+                <goals>
+                  <goal>integration-test</goal>
+                  <goal>verify</goal>
+                </goals>
+              </execution>
+            </executions>
+            <configuration>
+              <includes>
+                <include>**/ThroughputBenchmark.java</include>
+              </includes>
+              <systemPropertyVariables>
+                <keycloak.version>${keycloak.runtime.version}</keycloak.version>
+                <postgres.image>${postgres.image}</postgres.image>
+                <extension.jar>${project.basedir}/../extension/target/keycloak-nats-durable-${project.version}.jar</extension.jar>
+              </systemPropertyVariables>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+    <profile>
       <id>integration</id>
       <build>
         <plugins>
@@ -77,6 +106,7 @@
               <systemPropertyVariables>
                 <keycloak.version>${keycloak.runtime.version}</keycloak.version>
                 <keycloak.upgrade.from>${keycloak.upgrade.from}</keycloak.upgrade.from>
+                <postgres.image>${postgres.image}</postgres.image>
                 <extension.jar>${project.basedir}/../extension/target/keycloak-nats-durable-${project.version}.jar</extension.jar>
               </systemPropertyVariables>
             </configuration>

@@ -1,5 +1,93 @@
 # Verification record
 
+## Review-comment follow-up, 2026-09-26
+
+The final build passed **388 Java unit tests** (34 transport, 319 provider, 35 consumer), Spotless and
+Checkstyle, with zero failures, errors or skips. Five Python regression tests passed for release
+identity validation, manifest packaging with image tags and both inventories, and security-policy
+classification. All environment access now goes through the shared reader; a packaged Windows probe
+also verified case-insensitive variable lookup and preservation of whitespace in credentials.
+
+| PostgreSQL version | Passing integration scenarios | Coverage |
+|---|---:|---|
+| 14.24 | 18 | Older-major compatibility selection |
+| 15.19 | 18 | Older-major compatibility selection |
+| 16.15 | 18 | Older-major compatibility selection |
+| 17.11 | 18 | Older-major compatibility selection |
+| 18.6 | 13 | Consumer deadlines, progress, quarantine/drop, replay and permissions |
+
+The older-major selection uses Keycloak 26.7.4 and covers the 13 consumer scenarios, custom-schema
+installation/restart, three transaction/retry/vacuum scenarios and the persisted-outbox upgrade from
+Keycloak 26.6.4. PostgreSQL 14 initially exposed its default PUBLIC schema CREATE privilege; the test
+now explicitly revokes it before checking the restricted role. Its five other cases passed initially,
+and the 13 consumer cases passed on rerun. The table combines those disjoint passing results.
+
+The packaged Compose smoke passed account capture, a single transactional effect, restart, metrics,
+quarantine listing and the outbox report. Its containers and volumes were removed. JAR inspection
+confirmed that capture-policy examples are not embedded. The scan passed under the owner's revised
+policy with **0 blocking and 30 advisory records**, retaining upstream severities. These container
+runs preceded the final Windows-only lookup correction; the final unit suite and packaged Windows
+probe verify that correction. Dependency versions and image bases are unchanged from the scan.
+
+Reports, logs, exact PostgreSQL image identities, scan inventories and artifact hashes are under
+`.work/review-comments-evidence/`. `artifact-sha256.json` identifies the container-tested artifacts;
+`final-artifact-sha256.json` identifies the final native-lookup build. The full cluster/physical-recovery
+matrix below belongs to the earlier hardening run and was not repeated for this configuration refactor.
+
+## Production hardening before review follow-up, 2026-09-26
+
+The hardening baseline uses PostgreSQL **18.6** and NATS **2.15.0**, pinned by digest, with PostgreSQL
+`fsync` and `synchronous_commit` enabled. Both full runtime matrices passed, with zero failures,
+errors or skips, plus Spotless and Checkstyle:
+
+| Keycloak runtime | Unit tests passed | Integration tests passed |
+|---|---:|---:|
+| 26.6.4 | 382 | 41 |
+| 26.7.4 | 382 | 41 |
+
+The suite includes
+the existing transaction/cluster/upgrade cases, live realm/client/outcome/topic filtering, consumer
+deadlines and recovery, optimized HTTPS/JWT startup, coordinated database/broker restore and fenced
+synchronous PostgreSQL promotion. Reports and artifact hashes are in
+`.work/hardening-evidence/keycloak-26.6.4/` and `.work/hardening-evidence/keycloak-26.7.4/`, with logs
+`.work/hardening-full-26.6.4.log` and `.work/hardening-full-26.7.4.log`. The older runtime used an
+isolated `1.0.0` packaging fixture; the latest used the default snapshot version. The latest runtime
+also tests the offline 26.6.4-to-26.7.4 upgrade; the older target tests same-version replacement.
+
+A final consumer follow-up passed all 382 unit tests and **13 consumer integration tests**, including
+the two additional cases for a restricted runtime database role and a policy change after a lost ACK.
+Together with the full run, this covers **43 distinct integration scenarios**. Fresh CycloneDX
+inventories, Spotless and Checkstyle also passed. Evidence is in
+`.work/hardening-evidence/final-consumer/` and `.work/hardening-final-consumer.log`.
+Both full matrices preceded the final consumer recovery guard and those two additional cases; the
+follow-up verifies that common consumer code against PostgreSQL and NATS. Provider code was unchanged.
+
+The final packaged Compose stack created an account, produced one transactional effect, exposed
+working metrics/readiness, ran quarantine listing and the outbox collector, and preserved the effect
+after a consumer restart. The worker ran as UID 10001. Its disposable containers and volumes were
+removed; the result is `.work/compose-smoke-result.json`. Production HTTPS is covered separately by
+the optimized-image test, since Compose remains a development example.
+
+Explicit `1.0.0` packaging and matching-version SBOM/manifest checks passed in an isolated fixture.
+Fresh and incremental JAR builds produced identical hashes after enabling JAR recreation before
+shading. The exact final snapshot artifacts also reproduced byte for byte on a second package:
+
+| Artifact | SHA-256 |
+|---|---|
+| Provider | `662653d5545b76f2b72ad3132214306badebe238f8854e8661cd981556530fe4` |
+| Consumer | `b8b46d8d9800fc8a1e44e782c5a2a7a18f8440eb99d7e3604a4b75f36d6c0b7e` |
+
+The original security scan completed and returned a failing gate under the original policy;
+it was not a scanner/network failure. Reports are preserved under `.work/hardening-evidence/security/`.
+The owner subsequently accepted upstream image findings as advisory. Current policy and follow-up
+results are recorded in [the security assessment](security-findings.md).
+
+The [performance benchmark](performance.md), [production and recovery drills](recovery-drills.md),
+[release verification](releases.md) and [security assessment](security-findings.md) describe separate
+checks and their limits. Accepted upstream findings remain visible in reports.
+The records below describe earlier baselines; their PostgreSQL/NATS versions and test totals are
+historical.
+
 Verified locally on 2026-09-25 using Windows 11, Docker Desktop / Docker Engine 29.8.0, Maven 3.9.6 and IntelliJ's Java 21.0.10 runtime. Tests use Keycloak 26.6.4 and 26.7.4, PostgreSQL 17.6 and NATS 2.12.8. Testcontainers 2.0.5 manages isolated containers and cleans them up.
 
 ## Repository namespace follow-up

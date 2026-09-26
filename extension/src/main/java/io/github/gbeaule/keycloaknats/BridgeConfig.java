@@ -1,5 +1,6 @@
 package io.github.gbeaule.keycloaknats;
 
+import io.github.gbeaule.keycloaknats.config.Environment;
 import io.github.gbeaule.keycloaknats.tls.TlsConfig;
 import java.net.URI;
 import java.time.Duration;
@@ -18,6 +19,7 @@ public record BridgeConfig(
     Duration pollInterval,
     Duration idlePollMax,
     int batchSize,
+    int relayWorkers,
     Duration retryInitial,
     Duration retryMax,
     int maxPayloadBytes,
@@ -28,7 +30,8 @@ public record BridgeConfig(
     Duration filterReloadInterval) {
   /** Reads provider settings, falling back to matching environment variables. */
   public static BridgeConfig from(Config.Scope scope) {
-    return read(key -> scope.get(key, System.getenv(envName(key))));
+    Environment environment = Environment.system();
+    return read(key -> scope.get(key, environment.optional(envName(key))));
   }
 
   /** Reads explicit settings with the same validation and defaults as provider configuration. */
@@ -53,6 +56,7 @@ public record BridgeConfig(
         Duration.ofMillis(pollMillis),
         Duration.ofMillis(number(get, "idle-poll-max-ms", Math.max(pollMillis, 5000))),
         number(get, "batch-size", 64),
+        number(get, "relay-workers", 1),
         Duration.ofMillis(number(get, "retry-initial-ms", 1000)),
         Duration.ofMillis(number(get, "retry-max-ms", 60000)),
         number(get, "max-payload-bytes", 65536),
@@ -85,6 +89,9 @@ public record BridgeConfig(
     }
     if (batchSize < 1 || batchSize > 1000) {
       throw new IllegalArgumentException("batch-size must be 1..1000");
+    }
+    if (relayWorkers < 1 || relayWorkers > 16) {
+      throw new IllegalArgumentException("relay-workers must be 1..16");
     }
     if (maxPayloadBytes < 1024 || maxPayloadBytes > 1048576) {
       throw new IllegalArgumentException("max-payload-bytes must be 1024..1048576");
@@ -158,7 +165,7 @@ public record BridgeConfig(
 
   /** Maps a provider key such as {@code poll-ms} to {@code KND_POLL_MS}. */
   public static String envName(String key) {
-    return "KND_" + key.replace('-', '_').toUpperCase(java.util.Locale.ROOT);
+    return Environment.name(key);
   }
 
   private static String value(Function<String, String> get, String key, String fallback) {

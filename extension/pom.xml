@@ -4,7 +4,7 @@
   <parent>
     <groupId>io.github.gbeaule</groupId>
     <artifactId>keycloak-nats-durable-parent</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
+    <version>${revision}</version>
   </parent>
   <artifactId>keycloak-nats-durable</artifactId>
   <dependencies>

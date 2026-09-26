@@ -1,14 +1,14 @@
 # Keycloak → NATS durable events
 
-A Java 21 Keycloak event listener with a transactional PostgreSQL outbox, a JetStream relay, and an example consumer with a transactional inbox. Account creation, disablement, deletion, login, login failures, logout and other events emitted by Keycloak use the same pipeline.
+A Java 21 Keycloak event listener that durably publishes events to NATS JetStream through a transactional PostgreSQL outbox. Account creation, disablement, deletion, login, login failures, logout and other events emitted by Keycloak use the same pipeline. An optional receiver example demonstrates transactional deduplication.
 
 Source: [gbeaule/keycloak-nats-durable](https://github.com/gbeaule/keycloak-nats-durable). Maven artifacts use the group `io.github.gbeaule`, and Java packages use the prefix `io.github.gbeaule.keycloaknats`.
 
-**Delivery is at least once. Database business effects can be applied once using the included consumer inbox.** Redelivery after a missing acknowledgement necessarily permits repeated delivery. Broker deduplication alone cannot make an arbitrary downstream side effect happen exactly once.
+**Delivery is at least once.** Receiving applications use the event ID to deduplicate repeated deliveries. Redelivery after a missing acknowledgement necessarily permits repeated delivery. The optional example demonstrates an inbox and database effect committed together; broker deduplication alone cannot make an arbitrary downstream side effect happen exactly once.
 
-The extension uses **Keycloak's existing PostgreSQL database and connection pool**. It adds an outbox table; it does not require another database instance or separate database credentials. The sample consumer's inbox belongs to the consuming application and is separate from extension installation.
+The extension uses **Keycloak's existing PostgreSQL database and connection pool**. It adds an outbox table; it does not require another database instance or separate database credentials. Users receive standard NATS JetStream messages in their own applications, using any compatible NATS client. The optional `consumer-example` demonstrates acknowledgements and deduplication in a separate database; it is not part of provider installation and does not require users to modify this repository.
 
-Compatibility targets: Keycloak **26.6.4 / 26.7.4**, PostgreSQL **17**, NATS Server **2.12.8**, jnats **2.26.3**, Java **21**, Maven **3.9+**. The accepted architecture uses Keycloak's documented event-listener and custom JPA registration APIs. See [the compatibility and upgrade policy](docs/compatibility.md): each version needs runtime testing because these upstream APIs do not promise stability.
+Compatibility targets: Keycloak **26.6.4 / 26.7.4**, PostgreSQL **14–18** within the selected Keycloak version's support policy, NATS Server **2.15.0**, jnats **2.26.3**, Java **21**, Maven **3.9+**. PostgreSQL **18.6** is the default demo/full-test baseline, not a required major version. The accepted architecture uses Keycloak's documented event-listener and custom JPA registration APIs. See [the compatibility and upgrade policy](docs/compatibility.md) for exact test coverage and the limitations of these upstream APIs.
 
 ## Guarantees
 
@@ -19,20 +19,20 @@ flowchart LR
     C --> D[Relay locks one committed row]
     D --> E[(JetStream file stream)]
     E -->|Publish ACK| F[Delete outbox row and commit]
-    E --> G[Shared durable pull consumer]
-    G --> H[(Inbox ID + business effect in one transaction)]
-    H -->|Commit then confirmed ACK| E
+    E --> G[Your application using a NATS client]
+    G --> H[Process and deduplicate]
+    H -->|Successful processing then ACK| E
 ```
 
 * For events selected by the capture policy, the account change and event are committed together. A capture failure marks the Keycloak transaction rollback-only; Keycloak otherwise catches listener exceptions. NATS can be unavailable while account operations continue and events accumulate in PostgreSQL.
 * The relay publishes only committed rows, and deletes a row only after a successful publish acknowledgement from the configured stream. PostgreSQL row locks with `SKIP LOCKED` coordinate multiple Keycloak nodes without leases or clock-based ownership. A dead process releases its locks through database connection recovery.
-* A crash between publish and outbox commit can republish the same ID. `Nats-Msg-Id` deduplicates inside the stream's rolling window. The consumer's permanent inbox covers repeats outside that window, concurrent redelivery, and crashes after business commit but before ACK.
-* Consumers use explicit acknowledgements, a durable name and unlimited redelivery. Workers for one application share that durable name and the same inbox database. Only acknowledge after successful processing; the example uses `ackSync`.
+* A crash between publish and outbox commit can republish the same ID. `Nats-Msg-Id` deduplicates inside the stream's rolling window. Receivers handle duplicates outside that window and after a lost processing ACK. The example demonstrates a permanent inbox for this purpose.
+* Consumers use explicit acknowledgements, a durable name and unlimited redelivery. Workers for one application share its durable name and deduplication state. Only acknowledge after successful processing; the example uses `ackSync`.
 * Events are retried indefinitely with bounded exponential backoff and jitter. No outbox expiry, retry-count deletion, automatic purge, or silent dead-letter drop is implemented. Stream expiry and lossy eviction policies are rejected. Full streams push back into the database.
 
 These guarantees cover selected events that reach this listener in a committed Keycloak database transaction. They require durable storage and the listener to be enabled. They do not cover external LDAP/IdP changes, direct SQL edits, imports or custom extensions that emit no event, a request killed before it reaches the event emitter, loss of every durable replica, or an external mutation outside Keycloak's database transaction. A rolled-back success operation has no success event. Keycloak error events can be emitted in their own transaction.
 
-Events are **not globally or per-user ordered** across retries and concurrent nodes. `userEnabled` is observed state, not a transition or a monotonically increasing version. For a current-state authorization projection, reconcile with Keycloak; do not let an older enable/update message undo a later deletion or disablement. The example records an effect ledger rather than building an unsafe ordered projection.
+Events are **not globally or per-user ordered** across retries and concurrent nodes. Per-user ordering is feasible with coordinated capture sequences, publication and consumer processing; it is not currently a setting. See [the ordering design and tradeoffs](docs/ordering.md). `userEnabled` is observed state, not a transition or a monotonically increasing version. For a current-state authorization projection, reconcile with Keycloak; do not let an older enable/update message undo a later deletion or disablement.
 
 ## Build and test
 
@@ -105,6 +105,7 @@ Environment variables are convenient in containers; matching Keycloak provider c
 | `KND_POLL_MS` | `500` | Minimum scan delay when no full batch is available |
 | `KND_IDLE_POLL_MAX_MS` | `5000` (at least `KND_POLL_MS`) | Maximum delay between idle/recovery scans; local commits wake the relay immediately |
 | `KND_BATCH_SIZE` | `64` | Maximum individual transactions per relay poll |
+| `KND_RELAY_WORKERS` | `1` | Concurrent relay workers per node, 1–16; budget one database connection and NATS connection per active worker |
 | `KND_RETRY_INITIAL_MS` | `1000` | Initial retry ceiling, with 50–100% jitter |
 | `KND_RETRY_MAX_MS` | `60000` | Maximum retry ceiling |
 | `KND_MAX_PAYLOAD_BYTES` | `65536` | Capture byte limit; exceeding it rolls back the transaction |
@@ -116,7 +117,12 @@ Environment variables are convenient in containers; matching Keycloak provider c
 
 TLS is optional: use `nats://` servers with no `KND_TLS_*` settings for plaintext, or `tls://` on every seed to enable TLS. With TLS enabled, both certificate trust and hostnames are verified. Publisher, provisioner and consumer accept the same mounted PEM files, with private-key parsing handled by Bouncy Castle. Keep credentials in mounted secrets rather than command lines or source control. See [capture filters, TLS mounts and HA deployment](docs/configuration.md), including [disabled-only](config/events-disabled-only.json) and [all-events](config/events-all.json) policies. Invalid initial filters fail startup; invalid reloads keep the last valid policy. Reloads never discard already captured events.
 
-The capture policy is also optional; without it, all emitted events are captured. JetStream WorkQueue retention keeps messages even with no consumer defined, so subject subscriptions alone do not remove irrelevant events. Use capture filtering to avoid storing types that the deployment will never need. See [what happens when nobody is listening](docs/configuration.md#when-nobody-is-listening).
+The capture policy is also optional; without it, all emitted events are captured. It supports realm
+IDs, client IDs, outcomes, NATS subject patterns, user event types and admin operations. JetStream
+WorkQueue retention keeps messages even with no consumer defined, so subject subscriptions alone do
+not remove irrelevant events. Use [capture filtering](docs/configuration.md#choose-events-before-storing-them)
+to avoid accepting types that the deployment will never need. Backlog capacity, thresholds and
+monitoring belong to the deployment owner.
 
 The outbox is initialized and upgraded automatically through the packaged Liquibase changelog; it needs no separate `initdb` folder. Confirmed delivery immediately deletes its row. PostgreSQL autovacuum reclaims reusable space, and retries only update metadata. See [database initialization and retention](docs/database.md) for capacity planning and safe cleanup boundaries.
 
@@ -132,11 +138,26 @@ See [the versioned JSON schema](schemas/event-v1.schema.json). A disabled user i
 # Set KND_NATS_URL, KND_MIN_REPLICAS and credentials for your deployment first.
 java -jar consumer-example/target/consumer-example-1.0.0-SNAPSHOT.jar provision
 # Also set KND_CONSUMER_DB_URL, KND_CONSUMER_DB_USER, KND_CONSUMER_DB_PASSWORD.
+java -jar consumer-example/target/consumer-example-1.0.0-SNAPSHOT.jar migrate
 java -jar consumer-example/target/consumer-example-1.0.0-SNAPSHOT.jar
 ```
 
 `KND_CONSUMER` defaults to `auth-worker`; `KND_STREAM_MAX_BYTES` defaults to 1 GiB when provisioning. The example defaults to WorkQueue retention: multiple instances share one durable consumer, and ACK removes a message. For independent applications that each need all events, provision a Limits stream and one durable/inbox namespace per application instead. Disable expiry, keep DiscardNew, and explicitly manage retention only after all applications have processed the retained history.
 
-Replace `InboxProcessor.recordEffect` with your business operation using the supplied JDBC transaction. Never do an unprotected HTTP call, send email, or commit another database independently inside that handler and assume exactly-once effects. Use the destination's idempotency key support, or another transactional outbox, for external side effects. Keep inbox entries at least as long as an event can be replayed; indefinite retention is the safe default.
+The consumer has configurable database/processing deadlines, progress ACKs, periodic status reports
+and an optional `/metrics` and `/health/ready` endpoint. Failed messages retry by default. Explicit
+subject-scoped quarantine and dropping policies, including disabled-by-default age shedding, are
+described in [consumer operations](docs/consumer.md). Automatic schema creation is opt-in outside
+Compose. The default demo/test database is PostgreSQL 18.6; supported existing databases may stay on
+their current major version. Moving a 17.x volume to 18 requires an
+[explicit major-version upgrade](docs/postgres-upgrade.md).
+
+`InboxProcessor.recordEffect` only writes the demo's effect ledger so its durability can be tested. It is not an extension point users must edit. Receiving applications subscribe to JetStream, process the CloudEvent and acknowledge it after success. They own their business logic and deduplication. The example illustrates one approach: commit an inbox ID and a database effect in one transaction. External HTTP/email effects need their own idempotency or transactional outbox strategy; broker delivery alone cannot make them exactly once.
 
 Design decisions and reviewed upstream sources: [architecture and research](docs/architecture.md). Capacity, alerting, failure diagnosis and recovery: [operations](docs/operations.md).
+
+Production tools and evidence: [monitoring](docs/monitoring.md),
+[throughput measurements](docs/performance.md), [recovery drills](docs/recovery-drills.md), and
+[release/SBOM procedures](docs/releases.md). The [security baseline assessment](docs/security-findings.md)
+records owner-accepted upstream image findings. The security gate still checks dependencies shipped
+by this project; upstream server images remain unchanged.

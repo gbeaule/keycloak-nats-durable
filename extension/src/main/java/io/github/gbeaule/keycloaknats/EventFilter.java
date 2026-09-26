@@ -23,6 +23,7 @@ final class EventFilter {
           .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
   private final Set<String> userEvents;
   private final List<AdminRule> adminEvents;
+  private final CaptureScope scope;
 
   private record AdminRule(String resource, Set<String> operations, Boolean userEnabled) {
     boolean matches(AdminEvent event) {
@@ -31,18 +32,21 @@ final class EventFilter {
     }
   }
 
-  private EventFilter(Set<String> userEvents, List<AdminRule> adminEvents) {
+  private EventFilter(Set<String> userEvents, List<AdminRule> adminEvents, CaptureScope scope) {
     this.userEvents = Set.copyOf(userEvents);
     this.adminEvents = List.copyOf(adminEvents);
+    this.scope = scope;
   }
 
   static EventFilter all() {
-    return new EventFilter(Set.of("*"), List.of(new AdminRule("*", Set.of("*"), null)));
+    return new EventFilter(
+        Set.of("*"), List.of(new AdminRule("*", Set.of("*"), null)), CaptureScope.all());
   }
 
   static EventFilter parse(byte[] bytes) throws IOException {
     JsonNode root = objectMapper.readTree(bytes);
-    fields(root, Set.of("userEvents", "adminEvents"));
+    fields(
+        root, Set.of("userEvents", "adminEvents", "realmIds", "clientIds", "outcomes", "subjects"));
     Set<String> users = names(root.get("userEvents"), EventType.class);
     JsonNode admins = root.get("adminEvents");
     require(admins != null && admins.isArray(), "adminEvents must be an array");
@@ -72,26 +76,33 @@ final class EventFilter {
       }
       rules.add(new AdminRule(type, operations, enabled));
     }
-    return new EventFilter(users, rules);
+    return new EventFilter(users, rules, CaptureScope.parse(root));
   }
 
-  boolean accepts(Event event) {
-    return userEvents.contains("*") || userEvents.contains(event.getType().name());
+  boolean accepts(Event event, String subject) {
+    return (userEvents.contains("*") || userEvents.contains(event.getType().name()))
+        && scope.accepts(event.getRealmId(), event.getClientId(), event.getError(), subject);
   }
 
-  boolean accepts(AdminEvent event, Boolean enabled) {
-    return adminEvents.stream()
-        .anyMatch(
-            rule ->
-                rule.matches(event)
-                    && (rule.userEnabled() == null
-                        || (event.getError() == null
-                            && EventEnvelope.targetUserId(event) != null
-                            && rule.userEnabled().equals(enabled))));
+  boolean accepts(AdminEvent event, Boolean enabled, String subject) {
+    return inScope(event, subject)
+        && adminEvents.stream()
+            .anyMatch(
+                rule ->
+                    rule.matches(event)
+                        && (rule.userEnabled() == null
+                            || (event.getError() == null
+                                && EventEnvelope.targetUserId(event) != null
+                                && rule.userEnabled().equals(enabled))));
   }
 
-  boolean mayAccept(AdminEvent event) {
-    return adminEvents.stream().anyMatch(rule -> rule.matches(event));
+  boolean mayAccept(AdminEvent event, String subject) {
+    return inScope(event, subject) && adminEvents.stream().anyMatch(rule -> rule.matches(event));
+  }
+
+  private boolean inScope(AdminEvent event, String subject) {
+    String client = event.getAuthDetails() == null ? null : event.getAuthDetails().getClientId();
+    return scope.accepts(event.getRealmId(), client, event.getError(), subject);
   }
 
   private static void fields(JsonNode node, Set<String> allowed) {

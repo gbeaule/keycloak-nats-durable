@@ -36,7 +36,6 @@ import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.Network;
 import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.images.builder.Transferable;
-import org.testcontainers.postgresql.PostgreSQLContainer;
 import org.testcontainers.utility.MountableFile;
 
 /**
@@ -55,7 +54,7 @@ class NatsClusterIT extends IntegrationSupport {
     certificates = new TestCertificates(certificatesDirectory);
     network = Network.newNetwork();
     postgres =
-        new PostgreSQLContainer("postgres:17.6-alpine")
+        postgresContainer()
             .withDatabaseName("keycloak")
             .withUsername("keycloak")
             .withPassword("integration-password")
@@ -93,7 +92,7 @@ class NatsClusterIT extends IntegrationSupport {
           """
               .formatted(i, i);
       var node =
-          new GenericContainer<>("nats:2.12.8-alpine")
+          new GenericContainer<>(IntegrationSupport.NATS_IMAGE)
               .withNetwork(network)
               .withNetworkAliases("nats" + i)
               .withExposedPorts(4222)

@@ -1,0 +1,8 @@
+{
+  "realmIds": ["replace-with-realm-id"],
+  "clientIds": ["*"],
+  "outcomes": ["success", "error"],
+  "subjects": ["keycloak.events.*.user.>", "keycloak.events.*.admin.user.>"],
+  "userEvents": ["LOGIN", "LOGIN_ERROR", "LOGOUT", "REGISTER"],
+  "adminEvents": [{"resourceType": "USER", "operations": ["CREATE", "UPDATE", "DELETE"]}]
+}

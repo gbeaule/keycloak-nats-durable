@@ -1,0 +1,56 @@
+name: release-candidate
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Immutable major.minor.patch candidate version
+        required: true
+        type: string
+# Builds a reviewable bundle. Publishing/tag protection is owned by repository maintainers.
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Verify release tooling
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+      - name: Validate release identity
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          RELEASE_REF: ${{ github.ref_name }}
+          RELEASE_REF_TYPE: ${{ github.ref_type }}
+        run: python3 scripts/release-identity.py
+      - name: Build fresh artifacts, integration evidence and SBOMs
+        run: >-
+          mvn -B -ntp -Pintegration,sbom "-Drevision=$RELEASE_VERSION"
+          "-Dproject.build.outputTimestamp=$SOURCE_DATE_EPOCH" verify
+      - name: Scan dependencies and images using the repository security policy
+        run: python3 scripts/security-check.py --version "$RELEASE_VERSION"
+      - name: Package checksummed candidate
+        # Project dependency findings block packaging; upstream server findings are advisory.
+        if: success()
+        run: python3 scripts/release-manifest.py --version "$RELEASE_VERSION" --commit "$GITHUB_SHA"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: release-candidate-${{ github.sha }}-${{ github.run_id }}
+          retention-days: 90
+          path: |
+            target/release/**
+            target/security/*.json
+            **/target/bom.json
+            **/target/runtime-bom.json
+            **/target/surefire-reports/**
+            **/target/failsafe-reports/**
+            integration-tests/target/*.log

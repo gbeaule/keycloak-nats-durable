@@ -36,7 +36,11 @@ public final class DurableEventListener implements EventListenerProvider {
 
   @Override
   public void onEvent(Event event) {
-    persist(() -> filter.get().accepts(event) ? envelopes.user(event) : null);
+    persist(
+        () ->
+            filter.get().accepts(event, envelopes.userSubject(event))
+                ? envelopes.user(event)
+                : null);
   }
 
   @Override
@@ -44,11 +48,12 @@ public final class DurableEventListener implements EventListenerProvider {
     persist(
         () -> {
           EventFilter policy = filter.get();
-          if (!policy.mayAccept(event)) {
+          String subject = envelopes.adminSubject(event);
+          if (!policy.mayAccept(event, subject)) {
             return null;
           }
           Boolean enabled = enabledState(event);
-          return policy.accepts(event, enabled) ? envelopes.admin(event, enabled) : null;
+          return policy.accepts(event, enabled, subject) ? envelopes.admin(event, enabled) : null;
         });
   }
 

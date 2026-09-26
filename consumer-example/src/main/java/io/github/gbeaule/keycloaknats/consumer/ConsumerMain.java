@@ -1,7 +1,9 @@
 package io.github.gbeaule.keycloaknats.consumer;
 
-import io.github.gbeaule.keycloaknats.tls.TlsConfig;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.gbeaule.keycloaknats.jetstream.StreamPolicy;
 import io.nats.client.Connection;
+import io.nats.client.JetStreamOptions;
 import io.nats.client.Nats;
 import io.nats.client.Options;
 import io.nats.client.PullSubscribeOptions;
@@ -13,103 +15,206 @@ import io.nats.client.api.RetentionPolicy;
 import io.nats.client.api.StorageType;
 import io.nats.client.api.StreamConfiguration;
 import java.time.Duration;
-import org.postgresql.ds.PGSimpleDataSource;
 
-/** Provisions durable delivery or runs the example consumer with a transactional database inbox. */
+/** Runs the bounded inbox consumer and explicit provisioning, migration and recovery commands. */
 public final class ConsumerMain {
   private ConsumerMain() {}
 
-  /** Reads deployment settings from the environment; {@code provision} creates broker resources. */
-  public static void main(String[] args) throws Exception {
-    String stream = env("KND_STREAM", "KEYCLOAK_EVENTS");
-    String subject = env("KND_SUBJECT_PREFIX", "keycloak.events") + ".>";
-    String durable = env("KND_CONSUMER", "auth-worker");
-    String[] servers = env("KND_NATS_URL", "nats://localhost:4222").split(",", -1);
-    TlsConfig tls =
-        TlsConfig.from(
-            servers,
-            key ->
-                System.getenv("KND_" + key.replace('-', '_').toUpperCase(java.util.Locale.ROOT)));
-    Options.Builder options =
-        new Options.Builder()
-            .servers(servers)
-            .connectionTimeout(Duration.ofSeconds(5))
-            .maxReconnects(-1);
-    if (tls.enabled()) {
-      options.sslContext(tls.createContext());
-      options.hostnameResolveMode(Options.HostnameResolveMode.HappyEyeballs);
+  /** All credentials come from environment settings, never command arguments or diagnostic text. */
+  public static void main(String[] args) {
+    try {
+      run(args);
+    } catch (InterruptedException stopped) {
+      Thread.currentThread().interrupt();
+    } catch (Exception failure) {
+      System.err.println(
+          "Consumer stopped; failure category=" + failure.getClass().getSimpleName());
+      System.exit(1);
     }
-    if (System.getenv("KND_CREDENTIALS_FILE") != null && System.getenv("KND_TOKEN") != null) {
-      throw new IllegalArgumentException("Choose credentials-file or token, not both");
+  }
+
+  private static void run(String[] args) throws Exception {
+    String command = args.length == 0 ? "run" : args[0];
+    if (!java.util.Set.of("run", "provision", "migrate", "quarantine-list", "quarantine-replay")
+            .contains(command)
+        || ("quarantine-replay".equals(command)
+            ? args.length != 3
+            : "quarantine-list".equals(command) ? args.length > 2 : args.length > 1)) {
+      System.err.println(
+          "Usage: [run|provision|migrate|quarantine-list [limit]"
+              + "|quarantine-replay stream sequence]");
+      throw new IllegalArgumentException("Invalid command");
     }
-    if (System.getenv("KND_CREDENTIALS_FILE") != null) {
-      options.authHandler(Nats.credentials(System.getenv("KND_CREDENTIALS_FILE")));
+    ConsumerConfig config = ConsumerConfig.system();
+    ConsumerSettings settings = config.settings();
+    try (var database =
+        ConsumerDatabase.pool(
+            config.database(settings.processing()), settings.processing(), config.poolSize())) {
+      execute(args, command, settings, config, database);
     }
-    if (System.getenv("KND_TOKEN") != null) {
-      options.token(System.getenv("KND_TOKEN").toCharArray());
+  }
+
+  private static void execute(
+      String[] args,
+      String command,
+      ConsumerSettings settings,
+      ConsumerConfig config,
+      javax.sql.DataSource database)
+      throws Exception {
+    final String stream = config.stream();
+    final String subject = config.subjectPrefix() + ".>";
+    final String durable = config.durable();
+    if ("migrate".equals(command)) {
+      InboxProcessor.initialize(database);
+      System.out.println("Consumer schema migrated.");
+      return;
     }
-    try (Connection nats = Nats.connect(options.build())) {
-      if (args.length == 1 && "provision".equals(args[0])) {
-        // Deliberately create-only. Changing live retention/consumer policies requires operator
-        // review.
-        nats.jetStreamManagement()
-            .addStream(
-                StreamConfiguration.builder()
-                    .name(stream)
-                    .subjects(subject)
-                    .storageType(StorageType.File)
-                    .retentionPolicy(RetentionPolicy.WorkQueue)
-                    .discardPolicy(DiscardPolicy.New)
-                    .maxAge(Duration.ZERO)
-                    .maxBytes(Long.parseLong(env("KND_STREAM_MAX_BYTES", "1073741824")))
-                    .replicas(Integer.parseInt(env("KND_MIN_REPLICAS", "3")))
-                    .duplicateWindow(Duration.ofMinutes(2))
-                    .build());
-        nats.jetStreamManagement()
-            .createConsumer(
-                stream,
-                ConsumerConfiguration.builder()
-                    .durable(durable)
-                    .filterSubject(subject)
-                    .ackPolicy(AckPolicy.Explicit)
-                    .deliverPolicy(DeliverPolicy.All)
-                    .ackWait(Duration.ofSeconds(30))
-                    .maxDeliver(-1)
-                    .maxAckPending(1000)
-                    .build());
-        System.out.println("Provisioned stream and durable consumer.");
+    var quarantine = new QuarantineStore(database, durable, settings.processing());
+    if ("quarantine-list".equals(command)) {
+      int limit = args.length == 2 ? Integer.parseInt(args[1]) : 100;
+      System.out.println(new ObjectMapper().writeValueAsString(quarantine.pending(limit)));
+      return;
+    }
+    try (Connection nats = connect(config.nats())) {
+      JetStreamOptions requests =
+          JetStreamOptions.builder()
+              .requestTimeout(Duration.ofMillis(settings.ackTimeoutMs()))
+              .build();
+      if ("provision".equals(command)) {
+        provision(nats, requests, stream, subject, durable, settings, config);
+        return;
+      }
+      if ("quarantine-replay".equals(command)) {
+        StreamPolicy.validate(
+            nats.jetStreamManagement(requests).getStreamInfo(args[1]).getConfiguration(),
+            args[1],
+            config.subjectPrefix(),
+            config.minReplicas(),
+            0);
+        boolean replayed =
+            quarantine.replay(nats.jetStream(requests), args[1], Long.parseLong(args[2]));
+        System.out.println(
+            replayed
+                ? "Replay published; original event bytes and ID preserved."
+                : "Replay remains pending; retry after the stream deduplication window.");
         return;
       }
       var consumerConfig =
-          nats.jetStreamManagement().getConsumerInfo(stream, durable).getConsumerConfiguration();
+          nats.jetStreamManagement(requests)
+              .getConsumerInfo(stream, durable)
+              .getConsumerConfiguration();
       validateConsumer(consumerConfig);
-      PGSimpleDataSource database = new PGSimpleDataSource();
-      database.setURL(env("KND_CONSUMER_DB_URL", "jdbc:postgresql://localhost:5432/consumer"));
-      database.setUser(env("KND_CONSUMER_DB_USER", "consumer"));
-      database.setPassword(env("KND_CONSUMER_DB_PASSWORD", ""));
-      InboxProcessor.initialize(database);
-      InboxProcessor processor = new InboxProcessor(database, durable);
+      settings.validateProgress(consumerConfig);
+      if (settings.autoMigrate()) {
+        InboxProcessor.initialize(database);
+      }
+      checkSchema(database);
+      InboxProcessor processor = new InboxProcessor(database, durable, settings.processing());
       var subscription =
-          nats.jetStream().subscribe(null, PullSubscribeOptions.bind(stream, durable));
-      while (!Thread.currentThread().isInterrupted()) {
-        for (var message : subscription.fetch(1, Duration.ofSeconds(2))) {
-          try {
-            processor.process(message.getData(), processor::recordEffect);
-            message.ackSync(Duration.ofSeconds(5));
-          } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return;
-          } catch (Exception e) {
-            // No ACK on failure. NATS redelivers after AckWait, including a crash after DB commit.
-            System.err.println("Event pending; failure category=" + e.getClass().getSimpleName());
+          nats.jetStream(requests).subscribe(null, PullSubscribeOptions.bind(stream, durable));
+      Thread main = Thread.currentThread();
+      Thread shutdown = new Thread(main::interrupt, "knd-consumer-shutdown");
+      Runtime.getRuntime().addShutdownHook(shutdown);
+      try (var monitor =
+              new ConsumerMonitor(settings, () -> nats.getStatus() == Connection.Status.CONNECTED);
+          var worker = new ConsumerWorker(processor, quarantine, settings, monitor)) {
+        System.out.println(
+            "Consumer running; failure_action="
+                + settings.failures().action()
+                + " deadline_ms="
+                + settings.processing().deadlineMs());
+        while (!Thread.currentThread().isInterrupted()) {
+          for (var message : subscription.fetch(1, Duration.ofSeconds(2))) {
+            worker.handle(message, processor::recordEffect);
           }
+        }
+      } finally {
+        subscription.unsubscribe();
+        try {
+          Runtime.getRuntime().removeShutdownHook(shutdown);
+        } catch (IllegalStateException shuttingDown) {
+          // The hook already interrupted this thread during JVM shutdown.
         }
       }
     }
   }
 
-  private static String env(String name, String fallback) {
-    return System.getenv().getOrDefault(name, fallback);
+  private static void checkSchema(javax.sql.DataSource database) throws Exception {
+    try (var db = database.getConnection();
+        var query = db.createStatement()) {
+      query.execute("SELECT consumer_name,event_id,payload_hash FROM knd_inbox LIMIT 0");
+      query.execute("SELECT consumer_name,disposition,replayed_at FROM knd_quarantine LIMIT 0");
+    }
+  }
+
+  private static Connection connect(ConsumerConfig.NatsSettings config) throws Exception {
+    Options.Builder options =
+        new Options.Builder()
+            .servers(config.servers())
+            .connectionTimeout(Duration.ofSeconds(5))
+            .maxReconnects(-1)
+            .reconnectBufferSize(0)
+            .errorListener(
+                new io.nats.client.ErrorListener() {
+                  @Override
+                  public void errorOccurred(Connection connection, String error) {
+                    System.err.println("Consumer NATS server error; inspect server diagnostics");
+                  }
+
+                  @Override
+                  public void exceptionOccurred(Connection connection, Exception exception) {
+                    System.err.println("Consumer NATS connection exception");
+                  }
+                });
+    if (config.tls().enabled()) {
+      options.sslContext(config.tls().createContext());
+      options.hostnameResolveMode(Options.HostnameResolveMode.HappyEyeballs);
+    }
+    if (config.credentialsFile() != null) {
+      options.authHandler(Nats.credentials(config.credentialsFile()));
+    }
+    if (config.token() != null) {
+      options.token(config.token().toCharArray());
+    }
+    return Nats.connect(options.build());
+  }
+
+  private static void provision(
+      Connection nats,
+      JetStreamOptions requests,
+      String stream,
+      String subject,
+      String durable,
+      ConsumerSettings settings,
+      ConsumerConfig config)
+      throws Exception {
+    // Create-only. Changing live retention or consumer policies is an explicit operator operation.
+    nats.jetStreamManagement(requests)
+        .addStream(
+            StreamConfiguration.builder()
+                .name(stream)
+                .subjects(subject)
+                .storageType(StorageType.File)
+                .retentionPolicy(RetentionPolicy.WorkQueue)
+                .discardPolicy(DiscardPolicy.New)
+                .maxAge(Duration.ZERO)
+                .maxBytes(config.streamMaxBytes())
+                .replicas(config.minReplicas())
+                .duplicateWindow(Duration.ofMinutes(2))
+                .build());
+    nats.jetStreamManagement(requests)
+        .createConsumer(
+            stream,
+            ConsumerConfiguration.builder()
+                .durable(durable)
+                .filterSubject(subject)
+                .ackPolicy(AckPolicy.Explicit)
+                .deliverPolicy(DeliverPolicy.All)
+                .ackWait(Duration.ofMillis(settings.ackWaitMs()))
+                .maxDeliver(-1)
+                .maxAckPending(settings.maxAckPending())
+                .build());
+    System.out.println("Provisioned stream and durable consumer.");
   }
 
   static void validateConsumer(ConsumerConfiguration consumer) {

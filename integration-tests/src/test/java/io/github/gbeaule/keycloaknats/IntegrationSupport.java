@@ -28,12 +28,21 @@ import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.Network;
 import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.postgresql.PostgreSQLContainer;
+import org.testcontainers.utility.DockerImageName;
 import org.testcontainers.utility.MountableFile;
 
 abstract class IntegrationSupport {
   static final ObjectMapper objectMapper = new ObjectMapper();
   static final String STREAM = "KEYCLOAK_EVENTS";
   static final String DURABLE = "auth-worker";
+  static final String NATS_IMAGE =
+      "nats:2.15.0-alpine@sha256:"
+          + "ac8f88a6494bffc2c2a5289a0ca61cb28a9145c11ba5677cf24265d07f46d8d4";
+  static final String POSTGRES_IMAGE =
+      System.getProperty(
+          "postgres.image",
+          "postgres:18.6-alpine@sha256:"
+              + "77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873");
   static final HttpClient httpClient =
       HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
   static Network network;
@@ -43,6 +52,14 @@ abstract class IntegrationSupport {
   static Connection nats;
   static PGSimpleDataSource database;
   static String adminToken;
+
+  static PostgreSQLContainer postgresContainer() {
+    // Testcontainers 2.x needs explicit compatibility for a tag plus immutable digest.
+    // Its PostgreSQL default also disables fsync, which is unsuitable for durability evidence.
+    return new PostgreSQLContainer(
+            DockerImageName.parse(POSTGRES_IMAGE).asCompatibleSubstituteFor("postgres"))
+        .withCommand("postgres", "-c", "fsync=on", "-c", "synchronous_commit=on");
+  }
 
   static void startInfrastructure() throws Exception {
     startInfrastructure(System.getProperty("keycloak.version", "26.7.4"));
@@ -57,14 +74,14 @@ abstract class IntegrationSupport {
       throws Exception {
     network = Network.newNetwork();
     postgres =
-        new PostgreSQLContainer("postgres:17.6-alpine")
+        postgresContainer()
             .withDatabaseName("keycloak")
             .withUsername("keycloak")
             .withPassword("integration-password")
             .withNetwork(network)
             .withNetworkAliases("postgres");
     broker =
-        new GenericContainer<>("nats:2.12.8-alpine")
+        new GenericContainer<>(IntegrationSupport.NATS_IMAGE)
             .withNetwork(network)
             .withNetworkAliases("nats")
             .withExposedPorts(4222)
@@ -94,31 +111,37 @@ abstract class IntegrationSupport {
   }
 
   static GenericContainer<?> keycloakContainer(boolean importRealm, String version) {
-    var container =
-        new GenericContainer<>("quay.io/keycloak/keycloak:" + version)
-            .withNetwork(network)
-            .withExposedPorts(8080)
-            .withEnv(
-                Map.ofEntries(
-                    Map.entry("KC_DB", "postgres"),
-                    Map.entry("KC_DB_URL", "jdbc:postgresql://postgres:5432/keycloak"),
-                    Map.entry("KC_DB_USERNAME", "keycloak"),
-                    Map.entry("KC_DB_PASSWORD", "integration-password"),
-                    Map.entry("KC_BOOTSTRAP_ADMIN_USERNAME", "admin"),
-                    Map.entry("KC_BOOTSTRAP_ADMIN_PASSWORD", "admin-password"),
-                    Map.entry("KND_NATS_URL", "nats://nats:4222"),
-                    Map.entry("KND_MIN_REPLICAS", "1"),
-                    Map.entry("KND_TIMEOUT_MS", "500"),
-                    Map.entry("KND_POLL_MS", "50"),
-                    Map.entry("KND_IDLE_POLL_MAX_MS", "200"),
-                    Map.entry("KND_RETRY_INITIAL_MS", "100"),
-                    Map.entry("KND_RETRY_MAX_MS", "1000")))
-            .withCopyFileToContainer(
-                MountableFile.forHostPath(
-                    Path.of(System.getProperty("extension.jar")).toAbsolutePath()),
-                "/opt/keycloak/providers/nats-durable.jar")
-            .waitingFor(Wait.forHttp("/realms/durable-test").forStatusCode(200))
-            .withStartupTimeout(Duration.ofMinutes(3));
+    return configureKeycloakContainer(
+        new GenericContainer<>("quay.io/keycloak/keycloak:" + version), importRealm, true);
+  }
+
+  static GenericContainer<?> configureKeycloakContainer(
+      GenericContainer<?> container, boolean importRealm, boolean copyProvider) {
+    container
+        .withNetwork(network)
+        .withExposedPorts(8080)
+        .withEnv(
+            Map.ofEntries(
+                Map.entry("KC_DB", "postgres"),
+                Map.entry("KC_DB_URL", "jdbc:postgresql://postgres:5432/keycloak"),
+                Map.entry("KC_DB_USERNAME", "keycloak"),
+                Map.entry("KC_DB_PASSWORD", "integration-password"),
+                Map.entry("KC_BOOTSTRAP_ADMIN_USERNAME", "admin"),
+                Map.entry("KC_BOOTSTRAP_ADMIN_PASSWORD", "admin-password"),
+                Map.entry("KND_NATS_URL", "nats://nats:4222"),
+                Map.entry("KND_MIN_REPLICAS", "1"),
+                Map.entry("KND_TIMEOUT_MS", "500"),
+                Map.entry("KND_POLL_MS", "50"),
+                Map.entry("KND_IDLE_POLL_MAX_MS", "200"),
+                Map.entry("KND_RETRY_INITIAL_MS", "100"),
+                Map.entry("KND_RETRY_MAX_MS", "1000")))
+        .waitingFor(Wait.forHttp("/realms/durable-test").forStatusCode(200))
+        .withStartupTimeout(Duration.ofMinutes(3));
+    if (copyProvider) {
+      container.withCopyFileToContainer(
+          MountableFile.forHostPath(Path.of(System.getProperty("extension.jar")).toAbsolutePath()),
+          "/opt/keycloak/providers/nats-durable.jar");
+    }
     if (importRealm) {
       container.withCopyFileToContainer(
           MountableFile.forClasspathResource("realm.json"), "/opt/keycloak/data/import/realm.json");

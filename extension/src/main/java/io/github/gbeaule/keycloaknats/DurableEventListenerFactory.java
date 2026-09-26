@@ -1,8 +1,12 @@
 package io.github.gbeaule.keycloaknats;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.jboss.logging.Logger;
 import org.keycloak.Config;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
@@ -13,15 +17,15 @@ import org.keycloak.models.KeycloakSessionFactory;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.models.utils.PostMigrationEvent;
 
-/** Registers request listeners and owns one relay worker for this Keycloak node. */
+/** Registers request listeners and owns a bounded relay pool for this Keycloak node. */
 public final class DurableEventListenerFactory implements EventListenerProviderFactory {
   private static final Logger logger = Logger.getLogger(DurableEventListenerFactory.class);
   private BridgeConfig config;
   private ReloadingEventFilter filter;
   private ExecutorService executor;
-  private final RelayWakeup wakeup = new RelayWakeup();
-  private OutboxRelay relay;
-  private EventPublisher publisher;
+  private final List<RelayWakeup> wakeups = new CopyOnWriteArrayList<>();
+  private final List<OutboxRelay> relays = new ArrayList<>();
+  private final List<EventPublisher> publishers = new ArrayList<>();
   private boolean closed;
 
   @Override
@@ -37,7 +41,8 @@ public final class DurableEventListenerFactory implements EventListenerProviderF
 
   @Override
   public EventListenerProvider create(KeycloakSession session) {
-    return new DurableEventListener(session, config, wakeup::signal, filter::current);
+    return new DurableEventListener(
+        session, config, () -> wakeups.forEach(RelayWakeup::signal), filter::current);
   }
 
   @Override
@@ -54,55 +59,62 @@ public final class DurableEventListenerFactory implements EventListenerProviderF
     if (executor != null || closed) {
       return;
     }
-    publisher = new JetStreamPublisher(config);
     filter.start(config.filterReloadInterval().toMillis());
-    relay =
-        new OutboxRelay(
-            work ->
-                KeycloakModelUtils.runJobInTransactionWithResult(
-                    factory,
-                    session ->
-                        work.apply(
-                            session.getProvider(JpaConnectionProvider.class).getEntityManager())),
-            publisher,
-            config);
+    AtomicInteger workerNumber = new AtomicInteger();
     executor =
-        Executors.newSingleThreadExecutor(
+        Executors.newFixedThreadPool(
+            config.relayWorkers(),
             work -> {
-              Thread thread = new Thread(work, "keycloak-nats-outbox");
+              Thread thread =
+                  new Thread(work, "keycloak-nats-outbox-" + workerNumber.incrementAndGet());
               thread.setDaemon(true);
               return thread;
             });
-    executor.execute(new RelayWorker(relay, wakeup, config));
-    logger.infof("NATS durable outbox relay started; stream=%s", config.stream());
+    for (int i = 0; i < config.relayWorkers(); i++) {
+      EventPublisher publisher = new JetStreamPublisher(config);
+      RelayWakeup wakeup = new RelayWakeup();
+      OutboxRelay relay =
+          new OutboxRelay(
+              work ->
+                  KeycloakModelUtils.runJobInTransactionWithResult(
+                      factory,
+                      session ->
+                          work.apply(
+                              session.getProvider(JpaConnectionProvider.class).getEntityManager())),
+              publisher,
+              config);
+      publishers.add(publisher);
+      wakeups.add(wakeup);
+      relays.add(relay);
+      executor.execute(new RelayWorker(relay, wakeup, config));
+    }
+    logger.infof(
+        "NATS durable outbox relay started; stream=%s workers=%d",
+        config.stream(), config.relayWorkers());
   }
 
   @Override
   public void close() {
     ExecutorService stoppingExecutor;
-    EventPublisher stoppingPublisher;
+    List<EventPublisher> stoppingPublishers;
     synchronized (this) {
       if (closed) {
         return;
       }
       closed = true;
-      if (relay != null) {
-        relay.stop();
-      }
-      wakeup.close();
+      relays.forEach(OutboxRelay::stop);
+      wakeups.forEach(RelayWakeup::close);
       if (filter != null) {
         filter.close();
       }
       stoppingExecutor = executor;
-      stoppingPublisher = publisher;
+      stoppingPublishers = List.copyOf(publishers);
     }
     // Do not hold the lifecycle monitor while closing sockets or waiting for the worker.
     if (stoppingExecutor != null) {
       stoppingExecutor.shutdownNow();
     }
-    if (stoppingPublisher != null) {
-      stoppingPublisher.close();
-    }
+    stoppingPublishers.forEach(EventPublisher::close);
     if (stoppingExecutor != null) {
       try {
         if (!stoppingExecutor.awaitTermination(5, TimeUnit.SECONDS)) {

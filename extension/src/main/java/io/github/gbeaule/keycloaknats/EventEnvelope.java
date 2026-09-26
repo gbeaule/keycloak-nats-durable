@@ -27,6 +27,21 @@ public final class EventEnvelope {
     this.config = config;
   }
 
+  /** Returns the routing subject without serializing or allocating an event identity. */
+  public String userSubject(Event event) {
+    return subject(event.getRealmId(), "user." + event.getType().name().toLowerCase(Locale.ROOT));
+  }
+
+  /** Returns the admin routing subject before looking up observed user state. */
+  public String adminSubject(AdminEvent event) {
+    return subject(
+        event.getRealmId(),
+        "admin."
+            + resourceToken(event.getResourceTypeAsString())
+            + "."
+            + event.getOperationType().name().toLowerCase(Locale.ROOT));
+  }
+
   /** Creates a user event with a new identity that is persisted for all relay retries. */
   public OutboxEvent user(Event event) {
     Map<String, Object> data = common("user", event.getId(), event.getRealmId(), event.getError());
@@ -75,17 +90,8 @@ public final class EventEnvelope {
       String realm, String typeSuffix, String subjectSuffix, long time, Map<String, Object> data) {
     // Optional fields are omitted from the wire format, rather than encoded as JSON null.
     data.values().removeIf(Objects::isNull);
-    if (realm == null || realm.isBlank()) {
-      throw new IllegalArgumentException("Event realm is required");
-    }
-    String realmToken =
-        Base64.getUrlEncoder()
-            .withoutPadding()
-            .encodeToString(realm.getBytes(StandardCharsets.UTF_8));
-    String subject = config.subjectPrefix() + "." + realmToken + "." + subjectSuffix;
-    if (subject.length() > 512) {
-      throw new IllegalArgumentException("Event subject exceeds storage limit");
-    }
+    String realmToken = realmToken(realm);
+    String subject = subject(realm, subjectSuffix);
     String id = UUID.randomUUID().toString();
     Map<String, Object> envelope = new LinkedHashMap<>();
     envelope.put("specversion", "1.0");
@@ -120,6 +126,23 @@ public final class EventEnvelope {
               .withoutPadding()
               .encodeToString(resourceType.getBytes(StandardCharsets.UTF_8));
     }
+  }
+
+  private String subject(String realm, String suffix) {
+    String result = config.subjectPrefix() + "." + realmToken(realm) + "." + suffix;
+    if (result.length() > 512) {
+      throw new IllegalArgumentException("Event subject exceeds storage limit");
+    }
+    return result;
+  }
+
+  private static String realmToken(String realm) {
+    if (realm == null || realm.isBlank()) {
+      throw new IllegalArgumentException("Event realm is required");
+    }
+    return Base64.getUrlEncoder()
+        .withoutPadding()
+        .encodeToString(realm.getBytes(StandardCharsets.UTF_8));
   }
 
   private static Map<String, Object> common(String kind, String id, String realm, String error) {

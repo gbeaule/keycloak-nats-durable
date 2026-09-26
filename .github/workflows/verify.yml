@@ -46,7 +46,7 @@ jobs:
   test:
     needs: versions
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -75,3 +75,36 @@ jobs:
             integration-tests/target/*.log
             extension/target/keycloak-nats-durable-*.jar
             consumer-example/target/consumer-example-*.jar
+  postgres-compatibility:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        # PostgreSQL 18 runs the full Keycloak matrix above. Track supported older major lines too.
+        postgres: ['14', '15', '16', '17']
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Verify older PostgreSQL with the current Keycloak baseline
+        env:
+          POSTGRES_MAJOR: ${{ matrix.postgres }}
+        run: >-
+          mvn -B -ntp -Pintegration "-Dpostgres.image=postgres:$POSTGRES_MAJOR-alpine"
+          '-Dit.test=ConsumerHardeningIT,CustomSchemaIT,UpgradeIT,DurabilityIT#uncommittedAndRolledBackRowsAreNeverPublished+outboxWritesKeepSynchronousCommitForAuthenticationOnlyTransactions+retriesDoNotRewritePayloadAndVacuumSettingsAreInstalled'
+          verify
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: postgres-compatibility-${{ matrix.postgres }}
+          retention-days: 7
+          path: |
+            **/target/surefire-reports/**
+            **/target/failsafe-reports/**
+            integration-tests/target/*.log

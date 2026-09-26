@@ -16,7 +16,26 @@ The [review of cevheri/keycloak-custom-event-listener](listener-comparison.md) f
 
 ## Version policy
 
-CI runs the same provider code and dependency baseline against Keycloak **26.6.4** and **26.7.4**, on PostgreSQL 17 and Java 21. The Maven compile baseline is `keycloak.version` (currently 26.7.4); the test server image is controlled separately by `keycloak.runtime.version`. Exact local results are recorded in [testing](testing.md). Entries in CI are compatibility targets until the corresponding run passes; untested versions, other database engines, vendor distributions and mixed-version Keycloak rolling upgrades are not implied.
+CI runs the same provider code and dependency baseline against Keycloak **26.6.4** and **26.7.4**, on PostgreSQL 18.6 and Java 21. The Maven compile baseline is `keycloak.version` (currently 26.7.4); the test server image is controlled separately by `keycloak.runtime.version`. Exact local results are recorded in [testing](testing.md). Entries in CI are compatibility targets until the corresponding run passes; untested versions, other database engines, vendor distributions and mixed-version Keycloak rolling upgrades are not implied.
+
+PostgreSQL 18 is not an installation requirement. The extension uses the database already configured
+for Keycloak and performs no PostgreSQL-major-version gate. Target PostgreSQL **14, 15, 16, 17 and 18**
+where the selected Keycloak release and PostgreSQL vendor support that major; use its maintained minor
+release. The current [Keycloak database matrix](https://www.keycloak.org/server/db) lists 14–18.
+Older unsupported majors and other database engines are outside this compatibility claim.
+
+The full runtime matrix uses 18.6. A separate CI job exercises 14–17 with the current Keycloak baseline:
+schema installation, transactional rollback and synchronous commit, retry/vacuum settings, consumer
+deadlines/recovery, and persisted-outbox upgrade. These targeted checks do not imply that every
+database/Keycloak combination has run the full cluster and physical-recovery suite. The selected
+image is configurable for local verification, including a deployment's exact minor or digest:
+
+```sh
+mvn -B -ntp -Pintegration -Dpostgres.image=postgres:17-alpine verify
+```
+
+The versioned Compose image is a demonstration default. Keep an existing supported production
+database; a major upgrade is optional and uses a separate [migration procedure](postgres-upgrade.md).
 
 ```sh
 mvn -B -ntp -Pintegration -Dkeycloak.runtime.version=26.6.4 verify

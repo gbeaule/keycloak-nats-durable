@@ -1,3 +1,11 @@
-FROM quay.io/keycloak/keycloak:26.7.4
-COPY --chown=keycloak:keycloak extension/target/keycloak-nats-durable-1.0.0-SNAPSHOT.jar /opt/keycloak/providers/nats-durable.jar
-RUN /opt/keycloak/bin/kc.sh build --db=postgres
+ARG KEYCLOAK_IMAGE=quay.io/keycloak/keycloak:26.7.4@sha256:82a77884f3af238beab1e7afd63b5f530e1b5c0590bd7aa60b40a40463e29b2c
+FROM ${KEYCLOAK_IMAGE}
+ARG ARTIFACT_VERSION=1.0.0-SNAPSHOT
+ARG VCS_REF=development
+LABEL org.opencontainers.image.source="https://github.com/gbeaule/keycloak-nats-durable" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.version="${ARTIFACT_VERSION}"
+COPY --chown=keycloak:keycloak extension/target/keycloak-nats-durable-${ARTIFACT_VERSION}.jar /opt/keycloak/providers/nats-durable.jar
+# Fixed provider mtime prevents Docker timestamp rounding from invalidating an optimized build.
+RUN touch -m --date=@1743465600 /opt/keycloak/providers/nats-durable.jar && \
+    /opt/keycloak/bin/kc.sh build --db=postgres --health-enabled=true --metrics-enabled=true

@@ -54,6 +54,22 @@ class DurableEventListenerTest {
   }
 
   @Test
+  void realmAndTopicExclusionsAvoidPersistenceAndUserLookups() throws Exception {
+    var policy =
+        EventFilterTest.parse(
+            """
+        {"realmIds":["other-realm"],"subjects":["keycloak.events.*.user.login"],
+         "userEvents":["*"],"adminEvents":[{"resourceType":"*","operations":["*"]}]}
+        """);
+    listener =
+        new DurableEventListener(session, BridgeConfig.from(Map.of()), wakeRelay, () -> policy);
+    listener.onEvent(EventEnvelopeTest.login());
+    listener.onEvent(EventEnvelopeTest.admin(OperationType.UPDATE), false);
+    verifyNoInteractions(em, tx, wakeRelay);
+    verify(session, never()).users();
+  }
+
+  @Test
   void insertsIntoRequestTransactionWithoutNetworkOrCommit() {
     listener.onEvent(EventEnvelopeTest.login());
     verify(em).persist(any(OutboxEvent.class));

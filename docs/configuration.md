@@ -1,8 +1,24 @@
 # Capture policy, TLS and HA
 
+## Configuration ownership
+
+The shared [`Environment`](../nats-transport/src/main/java/io/github/gbeaule/keycloaknats/config/Environment.java)
+is the only process-environment reader. The provider's names, defaults and Keycloak SPI precedence
+live in [`BridgeConfig`](../extension/src/main/java/io/github/gbeaule/keycloaknats/BridgeConfig.java).
+The separate example consumer, provisioner and collector load their names and defaults through
+[`ConsumerConfig`](../consumer-example/src/main/java/io/github/gbeaule/keycloaknats/consumer/ConsumerConfig.java).
+They load settings at startup; runtime classes receive typed, validated values. The shared reader
+preserves the platform's native environment-name lookup, including case insensitivity on Windows.
+Keeping the two application loaders separate avoids making a NATS receiver depend on Keycloak APIs.
+Worker policy records validate values but delegate environment loading to that central consumer loader.
+
 ## Choose events before storing them
 
 The capture policy is optional. Leave `KND_FILTER_FILE` unset to capture all events emitted to this listener. To exclude irrelevant events before they use outbox or broker space, set `KND_FILTER_FILE=/etc/knd/events.json` and mount that file's **directory** read-only. `KND_FILTER_RELOAD_MS` defaults to 1000 (range 100–60000). Only the capture policy is hot-reloaded; connection, routing and relay settings require a restart.
+
+The `config/events-*.json` files, including `events-scoped.json`, are optional examples in the source
+repository. They are not packaged in the JARs, images or candidate bundle, or loaded automatically.
+Copy/edit a policy and supply its path explicitly. The scoped example's realm ID is a placeholder.
 
 For successful direct USER updates observed with `enabled=false`, use [events-disabled-only.json](../config/events-disabled-only.json):
 
@@ -18,6 +34,24 @@ For successful direct USER updates observed with `enabled=false`, use [events-di
 Keycloak emits USER UPDATE, without a separate disable-transition event. This policy also includes other updates to an already disabled user. It excludes failed operations and events without a direct user state observation. Include `CREATE` as well if users created disabled matter. Detecting actual transitions requires a separate transactional state history; arrival order is insufficient.
 
 Both top-level arrays are required. Empty arrays exclude that category. `userEvents` accepts exact uppercase Keycloak event names, or `["*"]` for all. Each admin rule requires `resourceType` and `operations`. Rules are combined with OR; conditions in a rule are combined with AND. Resource types accept an exact uppercase built-in name, `*`, or `custom:NAME` for a custom resource. Operations accept `CREATE`, `UPDATE`, `DELETE`, `ACTION`, or `["*"]`. Optional `userEnabled` must be a boolean and is allowed only for USER CREATE/UPDATE. Unknown fields, misspelled built-ins, duplicate keys/values, mixed wildcard lists, trailing JSON, missing arrays and files over 64 KiB are rejected. [events-all.json](../config/events-all.json) shows an explicit all-events policy.
+
+Optional top-level scope arrays narrow those rules further. Every specified dimension must match;
+omitted dimensions include everything and an empty array excludes everything. Existing policies keep
+their existing meaning.
+
+| Field | Matches |
+| --- | --- |
+| `realmIds` | Exact, immutable Keycloak realm IDs, or `["*"]` |
+| `clientIds` | User event client ID or admin actor's client ID, or `["*"]`; a missing client matches only the wildcard |
+| `outcomes` | `success`, `error`, or `["*"]` |
+| `subjects` | Full NATS subject patterns; `*` matches one token and terminal `>` matches one or more |
+
+Use [events-scoped.json](../config/events-scoped.json) as a starting point for a realm and event-family
+policy. Realm names are not IDs; read the realm's `id` from the admin API. Subject realm tokens use the
+existing encoded ID contract, so `realmIds` is usually clearer for selecting named tenants while
+`subjects` selects topics such as `keycloak.events.*.user.login`. These are capture-time filters;
+realm/client IDs and topics are not automatically added as monitoring labels. Scope checks happen
+before envelope serialization and admin user-state lookups. The policy remains bounded to 64 KiB.
 
 Write a complete replacement in the same directory and atomically rename it over `events.json`. A background thread reopens the path and compares content, so same-timestamp replacements and projected-volume symlink changes are detected. Avoid Kubernetes `subPath` mounts, which do not receive projected updates. Each callback uses one immutable snapshot. Excluded events are neither serialized nor inserted, and excluded admin categories avoid user lookups. Changes affect future capture; previously committed outbox events always drain using their original subject and bytes.
 

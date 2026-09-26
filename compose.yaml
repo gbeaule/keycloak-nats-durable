@@ -1,13 +1,13 @@
 name: keycloak-nats-durable
 services:
   postgres:
-    image: postgres:17.6-alpine
+    image: postgres:18.6-alpine
     environment:
       POSTGRES_DB: keycloak
       POSTGRES_USER: keycloak
       POSTGRES_PASSWORD: keycloak-local-only
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - postgres-data:/var/lib/postgresql
       - ./deploy/postgres-init.sql:/docker-entrypoint-initdb.d/consumer.sql:ro
     healthcheck:
       test: [CMD-SHELL, "pg_isready -U keycloak"]
@@ -15,7 +15,7 @@ services:
       timeout: 2s
       retries: 30
   nats:
-    image: nats:2.12.8-alpine
+    image: nats:2.15.0-alpine
     command: [-c, /etc/nats/nats.conf]
     ports: ["127.0.0.1:4222:4222", "127.0.0.1:8222:8222"]
     volumes:
@@ -59,6 +59,11 @@ services:
       KND_CONSUMER_DB_URL: jdbc:postgresql://postgres:5432/consumer
       KND_CONSUMER_DB_USER: consumer
       KND_CONSUMER_DB_PASSWORD: consumer-local-only
+      KND_CONSUMER_AUTO_MIGRATE: "true"
+      KND_CONSUMER_HEALTH_BIND: 0.0.0.0
+      KND_CONSUMER_HEALTH_PORT: 8081
+    ports: ["127.0.0.1:8081:8081"]
+    restart: unless-stopped
     depends_on:
       postgres: {condition: service_healthy}
       provision: {condition: service_completed_successfully}

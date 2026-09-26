@@ -31,7 +31,7 @@ class ReloadingEventFilterTest {
     FileTime timestamp = Files.getLastModifiedTime(file);
     try (var filter = new ReloadingEventFilter(file.toString())) {
       EventFilter first = filter.current();
-      assertTrue(first.accepts(EventEnvelopeTest.login()));
+      assertTrue(EventFilterTest.accepts(first, EventEnvelopeTest.login()));
       Path next = directory.resolve("next.json");
       Files.writeString(next, "{\"userEvents\":[\"LOGOUT\"],\"adminEvents\":[]}");
       Files.setLastModifiedTime(next, timestamp);
@@ -39,7 +39,7 @@ class ReloadingEventFilterTest {
       filter.reload();
       EventFilter second = filter.current();
       assertNotSame(first, second);
-      assertFalse(second.accepts(EventEnvelopeTest.login()));
+      assertFalse(EventFilterTest.accepts(second, EventEnvelopeTest.login()));
       Files.writeString(file, "{\"userEvents\":[");
       filter.reload();
       assertSame(second, filter.current());
@@ -51,9 +51,9 @@ class ReloadingEventFilterTest {
       assertSame(second, filter.current());
       Files.writeString(file, "{\"userEvents\":[\"*\"],\"adminEvents\":[]}");
       filter.reload();
-      assertTrue(filter.current().accepts(EventEnvelopeTest.login()));
+      assertTrue(EventFilterTest.accepts(filter.current(), EventEnvelopeTest.login()));
       // An in-flight callback holding the old immutable snapshot stays consistent.
-      assertFalse(second.accepts(EventEnvelopeTest.login()));
+      assertFalse(EventFilterTest.accepts(second, EventEnvelopeTest.login()));
     }
   }
 }

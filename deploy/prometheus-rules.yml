@@ -1,0 +1,40 @@
+# Starting points only: the Keycloak/application owner sets thresholds, routing and storage budgets.
+# Collect each outbox once per database (not once per Keycloak replica).
+groups:
+  - name: keycloak-nats-delivery
+    rules:
+      - alert: KeycloakOutboxDeliveryDelayed
+        expr: knd_outbox_oldest_age_seconds > 120
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Keycloak event delivery is behind the example latency budget"
+          description: "Inspect relay errors, stream capacity and quorum; keep Keycloak readiness separate."
+      - alert: KeycloakOutboxCollectionFailed
+        expr: knd_outbox_scrape_success == 0 or time() - knd_outbox_collected_at_timestamp_seconds > 180
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Outbox monitoring is failing or stale"
+      - alert: KeycloakConsumerRetrying
+        expr: increase(knd_consumer_retries_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Consumer processing repeatedly fails"
+      - alert: KeycloakConsumerRecoveryAction
+        expr: increase(knd_consumer_quarantined_total[5m]) + increase(knd_consumer_dropped_total[5m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Consumer quarantined or discarded events under an explicit policy"
+      - alert: KeycloakConsumerUnavailable
+        expr: knd_consumer_ready == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Consumer is disconnected, stopped or beyond its processing bound"

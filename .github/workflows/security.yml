@@ -1,0 +1,40 @@
+name: security
+on:
+  push:
+  pull_request:
+  schedule:
+    # Every Monday at 08:17 UTC (minute, hour, day of month, month, day of week).
+    - cron: '17 8 * * 1'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: security-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  dependencies-and-images:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Verify release tooling
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+      - name: Build artifacts and inventory
+        run: mvn -B -ntp -Psbom verify
+      - name: Scan dependencies and deployment images
+        run: python3 scripts/security-check.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: security-${{ github.sha }}-${{ github.run_id }}
+          retention-days: 30
+          path: |
+            **/target/bom.json
+            **/target/runtime-bom.json
+            target/security/*.json

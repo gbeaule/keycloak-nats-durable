@@ -3,7 +3,7 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>io.github.gbeaule</groupId>
   <artifactId>keycloak-nats-durable-parent</artifactId>
-  <version>1.0.0-SNAPSHOT</version>
+  <version>${revision}</version>
   <packaging>pom</packaging>
   <name>Keycloak NATS Durable</name>
   <description>Durable Keycloak events over NATS JetStream with a transactional outbox.</description>
@@ -24,18 +24,27 @@
     <module>integration-tests</module>
   </modules>
   <properties>
+    <revision>1.0.0-SNAPSHOT</revision>
+    <project.build.outputTimestamp>2026-09-26T00:00:00Z</project.build.outputTimestamp>
     <maven.compiler.release>21</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <keycloak.version>26.7.4</keycloak.version>
     <keycloak.runtime.version>${keycloak.version}</keycloak.runtime.version>
     <keycloak.upgrade.from>26.6.4</keycloak.upgrade.from>
+    <postgres.image>postgres:18.6-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873</postgres.image>
     <jnats.version>2.26.3</jnats.version>
+    <hikaricp.version>7.1.0</hikaricp.version>
     <bouncycastle.version>2.73.13</bouncycastle.version>
     <junit.version>5.12.2</junit.version>
     <testcontainers.version>2.0.5</testcontainers.version>
   </properties>
   <dependencyManagement>
     <dependencies>
+      <dependency>
+        <groupId>com.zaxxer</groupId>
+        <artifactId>HikariCP</artifactId>
+        <version>${hikaricp.version}</version>
+      </dependency>
       <dependency>
         <groupId>org.junit</groupId>
         <artifactId>junit-bom</artifactId>
@@ -112,6 +121,15 @@
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-shade-plugin</artifactId>
           <version>3.6.2</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-jar-plugin</artifactId>
+          <version>3.3.0</version>
+          <configuration>
+            <!-- Shade must never consume a prior shaded output on an incremental build. -->
+            <forceCreation>true</forceCreation>
+          </configuration>
         </plugin>
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
@@ -199,4 +217,42 @@
       </plugin>
     </plugins>
   </build>
+  <profiles>
+    <profile>
+      <id>sbom</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.cyclonedx</groupId>
+            <artifactId>cyclonedx-maven-plugin</artifactId>
+            <version>2.9.3</version>
+            <executions>
+              <execution>
+                <id>complete-inventory</id>
+                <phase>verify</phase>
+                <goals><goal>makeAggregateBom</goal></goals>
+              </execution>
+              <execution>
+                <id>bundled-runtime-inventory</id>
+                <phase>verify</phase>
+                <goals><goal>makeAggregateBom</goal></goals>
+                <configuration>
+                  <includeProvidedScope>false</includeProvidedScope>
+                  <outputName>runtime-bom</outputName>
+                  <classifier>runtime-cyclonedx</classifier>
+                </configuration>
+              </execution>
+            </executions>
+            <configuration>
+              <schemaVersion>1.6</schemaVersion>
+              <includeTestScope>false</includeTestScope>
+              <includeProvidedScope>true</includeProvidedScope>
+              <includeBomSerialNumber>false</includeBomSerialNumber>
+              <outputFormat>json</outputFormat>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
 </project>

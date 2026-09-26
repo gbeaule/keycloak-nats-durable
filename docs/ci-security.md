@@ -11,3 +11,9 @@ Do not move this job to a self-hosted runner connected to private services. Do n
 Running an untrusted build still allows outbound network traffic, consumption of CI minutes and reading anything supplied to that runner. The timeout and cancellation settings limit ordinary resource use but do not prevent malicious computation. These restrictions are appropriate for public test builds with disposable infrastructure; they are not an unrestricted security guarantee.
 
 Manual candidate-version testing uses the same isolated jobs and permissions. Its input is read as data through an environment variable, validated as an explicit `major.minor.patch` release, then passed to Maven as one quoted argument. It is never interpolated into shell source. The separate matrix job also uses a hosted VM, read-only permissions and checkout with credential persistence disabled. This input check prevents accidental argument/script injection; it does not make PR-provided build code trusted.
+
+The security and release-candidate workflows use the same hosted-runner and read-only permission
+boundary. Security scanning builds proposed Dockerfiles as untrusted code, with no publishing
+credentials. The candidate workflow rebuilds source and packages hashes/SBOMs; it does not consume PR
+artifacts or publish a release. See [release and patching procedures](releases.md). Administrator-owned
+branch/tag protections and required status checks remain necessary outside these workflow files.

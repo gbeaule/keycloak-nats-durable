@@ -1,9 +1,9 @@
 **
 !extension/
 !extension/target/
-!extension/target/keycloak-nats-durable-1.0.0-SNAPSHOT.jar
+!extension/target/keycloak-nats-durable-*.jar
 !consumer-example/
 !consumer-example/target/
-!consumer-example/target/consumer-example-1.0.0-SNAPSHOT.jar
+!consumer-example/target/consumer-example-*.jar
 !deploy/
 !deploy/Dockerfile.*

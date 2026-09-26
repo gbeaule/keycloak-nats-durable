@@ -4,10 +4,14 @@
   <parent>
     <groupId>io.github.gbeaule</groupId>
     <artifactId>keycloak-nats-durable-parent</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
+    <version>${revision}</version>
   </parent>
   <artifactId>nats-transport</artifactId>
   <dependencies>
+    <dependency>
+      <groupId>io.nats</groupId>
+      <artifactId>jnats</artifactId>
+    </dependency>
     <dependency>
       <groupId>org.bouncycastle</groupId>
       <artifactId>bcpkix-lts8on</artifactId>

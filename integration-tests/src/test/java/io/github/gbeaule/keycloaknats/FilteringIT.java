@@ -43,6 +43,7 @@ class FilteringIT extends IntegrationSupport {
 
   @Test
   void reloadFiltersBeforeCaptureWithoutDroppingPreviouslyCommittedEvents() throws Exception {
+    replace(ALL, true);
     drained();
     nats.jetStreamManagement().purgeStream(STREAM);
     var docker = broker.getDockerClient();
@@ -119,6 +120,50 @@ class FilteringIT extends IntegrationSupport {
         docker.startContainerCmd(broker.getContainerId()).exec();
       }
     }
+  }
+
+  @Test
+  void realmClientOutcomeAndSubjectScopeApplyToLiveAuthentication() throws Exception {
+    drained();
+    nats.jetStreamManagement().purgeStream(STREAM);
+    String realm =
+        objectMapper
+            .readTree(request("GET", "/admin/realms/durable-test", null).body())
+            .path("id")
+            .asText();
+    var policy = new java.util.LinkedHashMap<String, Object>();
+    policy.put("userEvents", java.util.List.of("LOGIN", "LOGIN_ERROR"));
+    policy.put("adminEvents", java.util.List.of());
+    policy.put("realmIds", java.util.List.of(realm));
+    policy.put("clientIds", java.util.List.of("test-client"));
+    policy.put("outcomes", java.util.List.of("error"));
+    policy.put("subjects", java.util.List.of("keycloak.events.*.user.>"));
+    var docker = broker.getDockerClient();
+    docker.stopContainerCmd(broker.getContainerId()).withTimeout(1).exec();
+    try {
+      replace(objectMapper.writeValueAsString(policy), true);
+      assertEquals(200, login("durable-test", loginForm("alice-password")).statusCode());
+      assertEquals(0, scalar("SELECT count(*) FROM kc_nats_outbox"));
+      assertEquals(400, login("durable-test", loginForm("wrong-password")).statusCode());
+      assertEquals(1, scalar("SELECT count(*) FROM kc_nats_outbox"));
+      for (String dimension : java.util.List.of("realmIds", "clientIds", "subjects")) {
+        var excluded = new java.util.LinkedHashMap<>(policy);
+        excluded.put(dimension, java.util.List.of("excluded"));
+        replace(objectMapper.writeValueAsString(excluded), true);
+        assertEquals(400, login("durable-test", loginForm("wrong-password")).statusCode());
+        assertEquals(1, scalar("SELECT count(*) FROM kc_nats_outbox"));
+      }
+      replace(ALL, true);
+    } finally {
+      docker.startContainerCmd(broker.getContainerId()).exec();
+      connectNats();
+    }
+    drained();
+    assertEquals(1, messages(), "Only the matching failed authentication was captured");
+  }
+
+  private static String loginForm(String password) {
+    return "grant_type=password&client_id=test-client&username=alice&password=" + password;
   }
 
   private static void replace(String json, boolean valid) throws Exception {

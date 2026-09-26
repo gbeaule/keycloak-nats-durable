@@ -8,11 +8,18 @@ Keep PostgreSQL `fsync` enabled and `synchronous_commit` set for durable commits
 
 TLS is optional: choose `nats://` for plaintext or `tls://` for verified TLS. Use TLS when the deployment requires transport encryption, and configure realm-appropriate NATS permissions independently. The Keycloak publisher needs publish access to its event subjects and the configured stream-info API, and subscribe access to its request reply inbox. It needs no stream/consumer create, update, purge or delete permission. Provision resources with a separate administrative identity. Consumers need their consumer-info, pull-next and acknowledgement subjects plus their reply inboxes. Do not allow unrelated publishers to reuse event IDs. Credentials and payloads are not intentionally logged by this provider.
 
-The provided sample consumer's automatic DDL is convenient for the demo; use a migration identity and provision its tables separately when production identities cannot create tables. Each logical consumer must share its inbox across worker replicas. Do not clear inbox rows as a restart procedure.
+The sample consumer requires explicit migrations by default; Compose opts into automatic DDL for the
+demo. Use a migration identity to provision production tables. Each logical consumer must share its
+inbox across worker replicas. Do not clear inbox rows as a restart procedure. See the
+[consumer settings and recovery commands](consumer.md) for deadlines, progress ACKs and monitoring.
 
 ## Monitoring
 
 Poll the outbox independently of Keycloak readiness. Alert on queue growth, oldest event age, repeated failures, database free space, NATS storage free space, lost quorum, disconnected clients, consumer pending messages and redeliveries. Store metrics in your monitoring system and set thresholds from the application's delivery latency requirement.
+
+The packaged [read-only collector and example alert rules](monitoring.md) provide JSON/Prometheus
+output, optional realm/topic scopes, bounded queries and owner-defined exit thresholds. They do not
+change admission policy, delete events or control Keycloak readiness.
 
 ```sql
 SELECT count(*) AS pending,
@@ -50,14 +57,41 @@ Use a [capture policy](configuration.md#choose-events-before-storing-them) to av
 | Inbox ID has different payload | Investigate publisher identity reuse or data corruption. The consumer refuses to treat different content as a processed duplicate. |
 | Database unavailable | Restore it; Keycloak account changes cannot safely proceed without the shared transaction. |
 
-There is no automatic dead-letter sink. If the application needs one, durably write the original event and reason to a quarantine store before acknowledging, monitor that store, and provide a replay process that retains the event ID. An ACK, TERM, purge, stream/consumer deletion, TTL or manual outbox deletion can abandon work; do not use those as routine error handling.
+Retry remains the default. The example consumer provides an opt-in, subject-scoped quarantine or
+discard policy, with a committed recovery copy or discard audit before ACK. It also supports explicit
+age-based load shedding, disabled by default. See [consumer recovery](consumer.md#retry-quarantine-and-explicit-loss)
+for the settings and replay command. Database outages and timeouts remain retryable. An ACK, TERM,
+purge, stream/consumer deletion, TTL or manual outbox deletion can abandon work; do not use those as
+routine error handling.
 
 Restoring the Keycloak database to an older snapshot may replay published events; restoring a consumer database can also remove inbox entries. Coordinate backup recovery across the pipeline and downstream effects. The system cannot undo data lost by restoring durable stores to mutually inconsistent points in time.
 
 ## Deployment and upgrades
 
+Run the [production startup and database recovery drills](recovery-drills.md) and the
+[throughput benchmark](performance.md) before selecting deployment limits. The isolated reference
+tests do not replace acceptance testing of the actual ingress, HA manager and storage topology.
+
 Keep the JAR and configuration consistent across every Keycloak node. Liquibase adds its table on startup; it never cascades pending-event deletion with realm or user deletion. Test schema migrations on a backup, and drain pending data before any destructive downgrade or provider removal.
 
-The stream prefix and name are part of the deployment contract. Existing outbox rows retain their original subject; changing these settings mid-backlog requires an explicit migration/replay plan. The simple relay has one thread per node and holds one database transaction while waiting for bounded broker requests. Increase node count or redesign the relay after a throughput benchmark, rather than increasing batch size and request timeout without measuring pool pressure.
+The stream prefix and name are part of the deployment contract. Existing outbox rows retain their
+original subject; changing these settings mid-backlog requires an explicit migration/replay plan.
+`KND_RELAY_WORKERS` defaults to 1 and accepts 1–16 workers per Keycloak node. Each has an independent
+NATS connection and uses SKIP LOCKED claims against the shared outbox. Each active worker holds one
+database connection while waiting for bounded broker requests, so reserve database pool headroom for
+Keycloak requests. Increase workers only after measuring throughput, login/admin latency and pool
+pressure. Batch size controls scheduling; worker count controls publication concurrency. Parallelism
+does not introduce an ordering guarantee.
+
+The demo and full-test default is PostgreSQL 18.6. Supported existing PostgreSQL 14–18 deployments
+can keep their major version; see [compatibility](compatibility.md). Compose uses version tags, while
+the default test image retains its recorded digest. Moving a PostgreSQL 17 volume to 18 requires an
+explicit [major-version migration](postgres-upgrade.md); changing an image tag is not a data upgrade.
+
+The broker baseline is NATS 2.15.0. For an existing 2.12.x installation, rehearse the intermediate
+upgrade to at least 2.14.7 before 2.15, following the [upstream upgrade guide](https://docs.nats.io/release-notes/upgrade-to-2.15).
+It changes cluster metadata and storage feature defaults; a direct downgrade to 2.12 is not a rollback
+plan. Preserve verified backups and avoid stream/consumer moves or scaling while cluster versions are
+mixed. The reference tests start fresh clusters; they do not prove an existing broker's upgrade path.
 
 The supplied demo uses a single broker and development Keycloak mode. Its credentials, network settings and one-replica override are not production defaults. For multiple independent consuming applications, explicitly provision a Limits stream and independent durable names, and prune only history processed by all required consumers.

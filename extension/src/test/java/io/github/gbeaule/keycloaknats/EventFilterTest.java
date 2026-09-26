@@ -5,13 +5,27 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.keycloak.events.Event;
 import org.keycloak.events.EventType;
+import org.keycloak.events.admin.AdminEvent;
+import org.keycloak.events.admin.AuthDetails;
 import org.keycloak.events.admin.OperationType;
 
 class EventFilterTest {
+  private static final EventEnvelope envelopes = new EventEnvelope(BridgeConfig.from(Map.of()));
+
+  static boolean accepts(EventFilter policy, Event event) {
+    return policy.accepts(event, envelopes.userSubject(event));
+  }
+
+  static boolean accepts(EventFilter policy, AdminEvent event, Boolean enabled) {
+    return policy.accepts(event, enabled, envelopes.adminSubject(event));
+  }
+
   static EventFilter parse(String json) throws Exception {
     return EventFilter.parse(json.getBytes(StandardCharsets.UTF_8));
   }
@@ -25,11 +39,11 @@ class EventFilterTest {
           {"resourceType":"USER","operations":["DELETE"]}]}
         """);
     var user = EventEnvelopeTest.login();
-    assertFalse(policy.accepts(user));
+    assertFalse(accepts(policy, user));
     user.setType(EventType.LOGIN_ERROR);
-    assertTrue(policy.accepts(user));
-    assertTrue(policy.accepts(EventEnvelopeTest.admin(OperationType.DELETE), null));
-    assertFalse(policy.accepts(EventEnvelopeTest.admin(OperationType.CREATE), true));
+    assertTrue(accepts(policy, user));
+    assertTrue(accepts(policy, EventEnvelopeTest.admin(OperationType.DELETE), null));
+    assertFalse(accepts(policy, EventEnvelopeTest.admin(OperationType.CREATE), true));
   }
 
   @Test
@@ -41,28 +55,31 @@ class EventFilterTest {
           {"resourceType":"USER","operations":["UPDATE"],"userEnabled":false}]}
         """);
     var admin = EventEnvelopeTest.admin(OperationType.UPDATE);
-    assertTrue(policy.accepts(admin, false));
-    assertFalse(policy.accepts(admin, true));
-    assertFalse(policy.accepts(admin, null));
+    assertTrue(accepts(policy, admin, false));
+    assertFalse(accepts(policy, admin, true));
+    assertFalse(accepts(policy, admin, null));
     admin.setError("failed");
-    assertFalse(policy.accepts(admin, false));
+    assertFalse(accepts(policy, admin, false));
     admin.setError(null);
     admin.setResourcePath("users/id/role-mappings");
-    assertFalse(policy.accepts(admin, false));
+    assertFalse(accepts(policy, admin, false));
   }
 
   @Test
   void emptyListsDisableCaptureAndWildcardPreservesAllEvents() throws Exception {
     var none = parse("{\"userEvents\":[],\"adminEvents\":[]}");
-    assertFalse(none.accepts(EventEnvelopeTest.login()));
-    assertFalse(none.mayAccept(EventEnvelopeTest.admin(OperationType.UPDATE)));
+    assertFalse(accepts(none, EventEnvelopeTest.login()));
+    assertFalse(
+        none.mayAccept(
+            EventEnvelopeTest.admin(OperationType.UPDATE),
+            "keycloak.events.test.admin.user.update"));
     var all =
         parse(
             """
         {"userEvents":["*"],"adminEvents":[{"resourceType":"*","operations":["*"]}]}
         """);
-    assertTrue(all.accepts(EventEnvelopeTest.login()));
-    assertTrue(all.accepts(EventEnvelopeTest.admin(OperationType.DELETE), null));
+    assertTrue(accepts(all, EventEnvelopeTest.login()));
+    assertTrue(accepts(all, EventEnvelopeTest.admin(OperationType.DELETE), null));
   }
 
   @Test
@@ -74,7 +91,75 @@ class EventFilterTest {
         """);
     var admin = EventEnvelopeTest.admin(OperationType.CREATE);
     admin.setResourceTypeAsString("widget");
-    assertTrue(policy.accepts(admin, null));
+    assertTrue(accepts(policy, admin, null));
+  }
+
+  @Test
+  void scopesBothEventKindsByTargetRealmClientOutcomeAndSubject() throws Exception {
+    var policy =
+        parse(
+            """
+        {"realmIds":["selected"],"clientIds":["app"],"outcomes":["success"],
+         "subjects":["keycloak.events.*.user.login","keycloak.events.*.admin.user.*"],
+         "userEvents":["*"],"adminEvents":[{"resourceType":"*","operations":["*"]}]}
+        """);
+    var user = EventEnvelopeTest.login();
+    user.setRealmId("selected");
+    user.setClientId("app");
+    assertTrue(accepts(policy, user));
+    user.setType(EventType.LOGOUT);
+    assertFalse(accepts(policy, user));
+    user.setType(EventType.LOGIN);
+    user.setRealmId("another");
+    assertFalse(accepts(policy, user));
+    user.setRealmId("selected");
+    user.setClientId("different");
+    assertFalse(accepts(policy, user));
+    user.setClientId("app");
+    user.setError("rejected");
+    assertFalse(accepts(policy, user));
+
+    var admin = EventEnvelopeTest.admin(OperationType.UPDATE);
+    admin.setRealmId("selected");
+    admin.setAuthDetails(new AuthDetails());
+    admin.getAuthDetails().setClientId("app");
+    assertTrue(accepts(policy, admin, false));
+    admin.setRealmId("another");
+    assertFalse(policy.mayAccept(admin, envelopes.adminSubject(admin)));
+    admin.setRealmId("selected");
+    admin.setAuthDetails(null);
+    assertFalse(accepts(policy, admin, false));
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"realmIds", "clientIds", "outcomes", "subjects"})
+  void explicitEmptyScopeExcludesEverything(String dimension) throws Exception {
+    var policy =
+        parse(
+            "{\""
+                + dimension
+                + "\":[],\"userEvents\":[\"*\"],"
+                + "\"adminEvents\":[{\"resourceType\":\"*\",\"operations\":[\"*\"]}]}");
+    assertFalse(accepts(policy, EventEnvelopeTest.login()));
+    assertFalse(accepts(policy, EventEnvelopeTest.admin(OperationType.DELETE), null));
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "\"realmIds\":null",
+        "\"realmIds\":[\"\"]",
+        "\"realmIds\":[\"*\",\"id\"]",
+        "\"clientIds\":[1]",
+        "\"outcomes\":[\"failed\"]",
+        "\"subjects\":[\"events.>.login\"]",
+        "\"subjects\":[\"events.*login\"]",
+        "\"subjects\":[\"events..login\"]",
+        "\"clientIds\":[\"app\",\"app\"]"
+      })
+  void rejectsMalformedScope(String scope) {
+    assertThrows(
+        Exception.class, () -> parse("{" + scope + ",\"userEvents\":[],\"adminEvents\":[]}"));
   }
 
   @ParameterizedTest
