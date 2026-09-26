@@ -198,9 +198,9 @@ public final class QuarantineStore {
     try (var update =
         db.prepareStatement(
             """
-        UPDATE knd_quarantine SET replayed_at=CURRENT_TIMESTAMP
-        WHERE consumer_name=? AND stream_name=? AND stream_sequence=?
-        """)) {
+            UPDATE knd_quarantine SET replayed_at=CURRENT_TIMESTAMP
+            WHERE consumer_name=? AND stream_name=? AND stream_sequence=?
+            """)) {
       update.setString(1, consumer);
       update.setString(2, stream);
       update.setLong(3, sequence);

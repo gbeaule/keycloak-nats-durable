@@ -92,9 +92,9 @@ public final class InboxProcessor {
           try (var insert =
               db.prepareStatement(
                   """
-                INSERT INTO knd_inbox(consumer_name,event_id,payload_hash)
-                VALUES (?,?,?) ON CONFLICT DO NOTHING
-                """)) {
+                  INSERT INTO knd_inbox(consumer_name,event_id,payload_hash)
+                  VALUES (?,?,?) ON CONFLICT DO NOTHING
+                  """)) {
             insert.setString(1, consumer);
             insert.setObject(2, id);
             insert.setBytes(3, hash);

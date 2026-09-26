@@ -38,17 +38,17 @@ class CustomSchemaIT extends IntegrationSupport {
         1,
         scalar(
             """
-        SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname = 'bridge-data' AND c.relname = 'kc_nats_outbox'
-          AND c.reloptions @> ARRAY['autovacuum_vacuum_scale_factor=0.02']
-        """));
+            SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'bridge-data' AND c.relname = 'kc_nats_outbox'
+              AND c.reloptions @> ARRAY['autovacuum_vacuum_scale_factor=0.02']
+            """));
     assertEquals(
         0,
         scalar(
             """
-        SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname = 'public' AND c.relname = 'kc_nats_outbox'
-        """));
+            SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'public' AND c.relname = 'kc_nats_outbox'
+            """));
     var docker = broker.getDockerClient();
     docker.stopContainerCmd(broker.getContainerId()).withTimeout(1).exec();
     try {

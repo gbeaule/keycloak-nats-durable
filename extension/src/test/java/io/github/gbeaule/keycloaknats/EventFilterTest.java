@@ -35,9 +35,9 @@ class EventFilterTest {
     var policy =
         parse(
             """
-        {"userEvents":["LOGIN_ERROR"],"adminEvents":[
-          {"resourceType":"USER","operations":["DELETE"]}]}
-        """);
+            {"userEvents":["LOGIN_ERROR"],"adminEvents":[
+              {"resourceType":"USER","operations":["DELETE"]}]}
+            """);
     var user = EventEnvelopeTest.login();
     assertFalse(accepts(policy, user));
     user.setType(EventType.LOGIN_ERROR);
@@ -51,9 +51,9 @@ class EventFilterTest {
     var policy =
         parse(
             """
-        {"userEvents":[],"adminEvents":[
-          {"resourceType":"USER","operations":["UPDATE"],"userEnabled":false}]}
-        """);
+            {"userEvents":[],"adminEvents":[
+              {"resourceType":"USER","operations":["UPDATE"],"userEnabled":false}]}
+            """);
     var admin = EventEnvelopeTest.admin(OperationType.UPDATE);
     assertTrue(accepts(policy, admin, false));
     assertFalse(accepts(policy, admin, true));
@@ -76,8 +76,8 @@ class EventFilterTest {
     var all =
         parse(
             """
-        {"userEvents":["*"],"adminEvents":[{"resourceType":"*","operations":["*"]}]}
-        """);
+            {"userEvents":["*"],"adminEvents":[{"resourceType":"*","operations":["*"]}]}
+            """);
     assertTrue(accepts(all, EventEnvelopeTest.login()));
     assertTrue(accepts(all, EventEnvelopeTest.admin(OperationType.DELETE), null));
   }
@@ -87,8 +87,8 @@ class EventFilterTest {
     var policy =
         parse(
             """
-        {"userEvents":[],"adminEvents":[{"resourceType":"custom:widget","operations":["*"]}]}
-        """);
+            {"userEvents":[],"adminEvents":[{"resourceType":"custom:widget","operations":["*"]}]}
+            """);
     var admin = EventEnvelopeTest.admin(OperationType.CREATE);
     admin.setResourceTypeAsString("widget");
     assertTrue(accepts(policy, admin, null));
@@ -99,10 +99,10 @@ class EventFilterTest {
     var policy =
         parse(
             """
-        {"realmIds":["selected"],"clientIds":["app"],"outcomes":["success"],
-         "subjects":["keycloak.events.*.user.login","keycloak.events.*.admin.user.*"],
-         "userEvents":["*"],"adminEvents":[{"resourceType":"*","operations":["*"]}]}
-        """);
+            {"realmIds":["selected"],"clientIds":["app"],"outcomes":["success"],
+             "subjects":["keycloak.events.*.user.login","keycloak.events.*.admin.user.*"],
+             "userEvents":["*"],"adminEvents":[{"resourceType":"*","operations":["*"]}]}
+            """);
     var user = EventEnvelopeTest.login();
     user.setRealmId("selected");
     user.setClientId("app");

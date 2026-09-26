@@ -588,18 +588,18 @@ class DurabilityIT extends IntegrationSupport {
         1,
         scalar(
             """
-        SELECT count(*) FROM pg_class WHERE oid = 'kc_nats_outbox'::regclass
-          AND reloptions @> ARRAY['autovacuum_vacuum_scale_factor=0.02',
-                                   'autovacuum_vacuum_threshold=50']
-        """));
+            SELECT count(*) FROM pg_class WHERE oid = 'kc_nats_outbox'::regclass
+              AND reloptions @> ARRAY['autovacuum_vacuum_scale_factor=0.02',
+                                       'autovacuum_vacuum_threshold=50']
+            """));
     assertEquals(
         1,
         scalar(
             """
-        SELECT count(*) FROM pg_class WHERE oid =
-          (SELECT reltoastrelid FROM pg_class WHERE oid = 'kc_nats_outbox'::regclass)
-          AND reloptions @> ARRAY['autovacuum_vacuum_scale_factor=0.02']
-        """));
+            SELECT count(*) FROM pg_class WHERE oid =
+              (SELECT reltoastrelid FROM pg_class WHERE oid = 'kc_nats_outbox'::regclass)
+              AND reloptions @> ARRAY['autovacuum_vacuum_scale_factor=0.02']
+            """));
     execute(
         """
         CREATE FUNCTION knd_reject_payload_rewrite() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -699,9 +699,9 @@ class DurabilityIT extends IntegrationSupport {
     try (var insert =
         transaction.prepareStatement(
             """
-        INSERT INTO kc_nats_outbox(id,subject,payload,created_at,next_attempt_at,attempts)
-        VALUES (?,?,?,0,?,0)
-        """)) {
+            INSERT INTO kc_nats_outbox(id,subject,payload,created_at,next_attempt_at,attempts)
+            VALUES (?,?,?,0,?,0)
+            """)) {
       insert.setString(1, id);
       insert.setString(2, "keycloak.events.dGVzdA.user.login");
       insert.setString(3, payload);
