@@ -8,12 +8,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.networknt.schema.JsonSchema;
-import com.networknt.schema.JsonSchemaFactory;
-import com.networknt.schema.SpecVersion;
+import com.networknt.schema.Error;
+import com.networknt.schema.InputFormat;
+import com.networknt.schema.Schema;
+import com.networknt.schema.SchemaRegistry;
+import com.networknt.schema.SpecificationVersion;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
@@ -25,13 +28,18 @@ import org.keycloak.events.admin.ResourceType;
 
 class EventSchemaTest {
   private static final ObjectMapper objectMapper = new ObjectMapper();
-  private static final JsonSchema eventSchema =
-      JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V202012)
+  private static final Schema eventSchema =
+      SchemaRegistry.withDefaultDialect(SpecificationVersion.DRAFT_2020_12)
           .getSchema(EventSchemaTest.class.getResourceAsStream("/schemas/event-v1.schema.json"));
 
   static void assertValid(JsonNode event) {
-    var errors = eventSchema.validate(event);
+    var errors = validate(event);
     assertTrue(errors.isEmpty(), errors::toString);
+  }
+
+  private static List<Error> validate(JsonNode event) {
+    // Keycloak uses Jackson 2; the validator uses Jackson 3. Exchange serialized JSON.
+    return eventSchema.validate(event.toString(), InputFormat.JSON);
   }
 
   @ParameterizedTest
@@ -63,12 +71,12 @@ class EventSchemaTest {
         (ObjectNode)
             objectMapper.readTree(getClass().getResourceAsStream("/examples/user-login.json"));
     ((ObjectNode) event.get("data")).put("operationType", "UPDATE");
-    assertFalse(eventSchema.validate(event).isEmpty());
+    assertFalse(validate(event).isEmpty());
     event =
         (ObjectNode)
             objectMapper.readTree(getClass().getResourceAsStream("/examples/admin-delete.json"));
     ((ObjectNode) event.get("data")).put("userEnabled", false);
-    assertFalse(eventSchema.validate(event).isEmpty());
+    assertFalse(validate(event).isEmpty());
   }
 
   @Test
