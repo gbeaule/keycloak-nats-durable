@@ -4,15 +4,29 @@ updates:
     directory: /
     schedule:
       interval: weekly
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 3
+    groups:
+      maven-minor-and-patch:
+        patterns: ['*']
+        update-types: [minor, patch]
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      actions-minor-and-patch:
+        patterns: ['*']
+        update-types: [minor, patch]
   - package-ecosystem: docker
     directory: /deploy
     schedule:
       interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      docker-minor-and-patch:
+        patterns: ['*']
+        update-types: [minor, patch]
     ignore:
       # Keep the consumer on the project's Java 21 LTS runtime; still accept its image updates.
       - dependency-name: eclipse-temurin
@@ -21,3 +35,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      compose-minor-and-patch:
+        patterns: ['*']
+        update-types: [minor, patch]

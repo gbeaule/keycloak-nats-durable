@@ -1,6 +1,12 @@
 name: verify
 on:
   push:
+    branches: [main]
+    # Keep PR checks present for branch protection; only filter post-merge runs.
+    # docs/examples/*.json are test fixtures and must still trigger verification.
+    paths-ignore:
+      - '**/*.md'
+      - LICENSE
   pull_request:
   workflow_dispatch:
     inputs:
@@ -12,45 +18,47 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: verify-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: verify-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ inputs.keycloak_version }}
   cancel-in-progress: true
 jobs:
-  versions:
+  quick-checks:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     outputs:
-      keycloak: ${{ steps.matrix.outputs.keycloak }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
-      - id: matrix
+      - name: Validate compatibility matrix
+        id: matrix
         env:
           CANDIDATE_KEYCLOAK: ${{ inputs.keycloak_version }}
         run: |
-          python3 - <<'PY'
-          import json
-          import os
-          import re
-          from pathlib import Path
-
-          versions = json.loads(Path("config/keycloak-versions.json").read_text())
-          candidate = os.environ.get("CANDIDATE_KEYCLOAK", "").strip()
-          if candidate:
-              versions.append(candidate)
-          if not versions or any(not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", v) for v in versions):
-              raise SystemExit("Keycloak versions must be explicit major.minor.patch releases")
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write("keycloak=" + json.dumps(list(dict.fromkeys(versions))) + "\n")
-          PY
+          matrix=$(python3 scripts/validate.py matrix-json --keycloak-version "$CANDIDATE_KEYCLOAK")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-java@v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Unit tests, style, packaging and validation tooling
+        run: python3 scripts/validate.py quick
+      - uses: actions/upload-artifact@v7.0.1
+        if: failure()
+        with:
+          name: quick-check-results
+          retention-days: 3
+          path: '**/target/surefire-reports/**'
   test:
-    needs: versions
+    needs: quick-checks
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
-        keycloak: ${{ fromJSON(needs.versions.outputs.keycloak) }}
+        keycloak: ${{ fromJSON(needs.quick-checks.outputs.matrix).keycloak }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -63,26 +71,26 @@ jobs:
       - name: Verify provider, cluster recovery and persisted-outbox upgrade
         env:
           KEYCLOAK_RUNTIME_VERSION: ${{ matrix.keycloak }}
-        run: mvn -B -ntp -Pintegration "-Dkeycloak.runtime.version=$KEYCLOAK_RUNTIME_VERSION" verify
+        run: python3 scripts/validate.py integration --keycloak-version "$KEYCLOAK_RUNTIME_VERSION"
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
-          name: test-results-and-jars-kc-${{ matrix.keycloak }}
-          retention-days: 7
+          name: test-results-kc-${{ matrix.keycloak }}
+          retention-days: 3
           path: |
             **/target/surefire-reports/**
             **/target/failsafe-reports/**
             integration-tests/target/*.log
-            extension/target/keycloak-nats-durable-*.jar
-            consumer-example/target/consumer-example-*.jar
   postgres-compatibility:
+    needs: quick-checks
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         # PostgreSQL 18 runs the full Keycloak matrix above. Track supported older major lines too.
-        postgres: ['14', '15', '16', '17']
+        postgres: ${{ fromJSON(needs.quick-checks.outputs.matrix).postgres }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -95,15 +103,12 @@ jobs:
       - name: Verify older PostgreSQL with the current Keycloak baseline
         env:
           POSTGRES_MAJOR: ${{ matrix.postgres }}
-        run: >-
-          mvn -B -ntp -Pintegration "-Dpostgres.image=postgres:$POSTGRES_MAJOR-alpine"
-          '-Dit.test=ConsumerHardeningIT,CustomSchemaIT,UpgradeIT,DurabilityIT#uncommittedAndRolledBackRowsAreNeverPublished+outboxWritesKeepSynchronousCommitForAuthenticationOnlyTransactions+retriesDoNotRewritePayloadAndVacuumSettingsAreInstalled'
-          verify
+        run: python3 scripts/validate.py postgres --postgres-major "$POSTGRES_MAJOR"
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
           name: postgres-compatibility-${{ matrix.postgres }}
-          retention-days: 7
+          retention-days: 3
           path: |
             **/target/surefire-reports/**
             **/target/failsafe-reports/**

@@ -11,6 +11,9 @@ on:
 # Builds a reviewable bundle. Publishing/tag protection is owned by repository maintainers.
 permissions:
   contents: read
+concurrency:
+  group: release-candidate-${{ github.ref }}-${{ inputs.version }}
+  cancel-in-progress: false
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -23,6 +26,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+          cache: maven
       - name: Verify release tooling
         run: python3 -m unittest discover -s scripts -p 'test_*.py'
       - name: Validate release identity

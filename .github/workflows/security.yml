@@ -1,7 +1,10 @@
 name: security
 on:
   push:
-  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - LICENSE
   schedule:
     # Every Monday at 08:17 UTC (minute, hour, day of month, month, day of week).
     - cron: '17 8 * * 1'
@@ -9,7 +12,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: security-${{ github.event.pull_request.number || github.ref }}
+  group: security-${{ github.ref }}
   cancel-in-progress: true
 jobs:
   dependencies-and-images:
@@ -23,17 +26,14 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
-      - name: Verify release tooling
-        run: python3 -m unittest discover -s scripts -p 'test_*.py'
-      - name: Build artifacts and inventory
-        run: mvn -B -ntp -Psbom verify
-      - name: Scan dependencies and deployment images
-        run: python3 scripts/security-check.py
+          cache: maven
+      - name: Build inventories and scan dependencies and deployment images
+        run: python3 scripts/validate.py security
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
           name: security-${{ github.sha }}-${{ github.run_id }}
-          retention-days: 30
+          retention-days: 7
           path: |
             **/target/bom.json
             **/target/runtime-bom.json

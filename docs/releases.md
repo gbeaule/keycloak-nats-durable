@@ -48,13 +48,12 @@ starting a production image; the Compose stack remains a development example.
 
 ## Security checks and updates
 
-The [security workflow](../.github/workflows/security.yml) runs on pushes, pull requests, weekly and on
-demand. It creates SBOMs and uses the `aquasec/trivy:0.74.0` image to scan dependencies, the built
+The [security workflow](../.github/workflows/security.yml) runs on non-documentation pushes to `main`,
+weekly and on demand. It creates SBOMs and uses the `aquasec/trivy:0.74.0` image to scan dependencies, the built
 provider/consumer container images and the versioned PostgreSQL/NATS images. Run the same checks locally:
 
 ```sh
-mvn -B -ntp -Psbom verify
-python3 scripts/security-check.py
+python3 scripts/validate.py security
 ```
 
 Docker, Java 21, Maven and Python 3 are required. The script builds local images and downloads current
@@ -72,12 +71,13 @@ Actions and version/flavor tags for Dockerfiles, Compose, test containers and th
 dependency and plugin versions belong in the POMs.
 
 [Dependabot configuration](../.github/dependabot.yml) requests weekly Maven, GitHub Actions, Dockerfile
-and Compose updates. Changes are proposals, with no automatic merge. Review version-tag updates,
+and Compose updates, grouping minor/patch releases per ecosystem. Changes are proposals, with no automatic merge. Review version-tag updates,
 keep the default PostgreSQL/NATS test versions aligned with Compose, and rerun the supported runtime
 matrix after changes. Update the scanner's version tag deliberately. Repository administrators must
 enable the applicable GitHub security/update features and
-require the verification and security jobs through branch protection; source files alone cannot set
-those repository policies.
+require `quick-checks` through branch protection; matrix and security checks now run after merge and
+must pass before release. See [CI rollout and required checks](ci.md#repository-settings-and-rollout);
+source files alone cannot set those repository policies.
 
 For PostgreSQL major versions, use the [migration runbook](postgres-upgrade.md). For Keycloak, keep
 version-specific SPI compatibility and upgrade tests. Patch releases still require regression tests;

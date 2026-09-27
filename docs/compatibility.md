@@ -16,6 +16,10 @@ The [review of cevheri/keycloak-custom-event-listener](listener-comparison.md) f
 
 ## Version policy
 
+The full compatibility matrix runs after changes reach `main` and on manual requests. PRs run
+quick checks; use `python3 scripts/validate.py matrix` for full local validation before merging.
+See [local validation and CI](ci.md) for focused runs and the required-check policy.
+
 CI runs the same provider code and dependency baseline against Keycloak **26.6.4** and **26.7.4**, on PostgreSQL 18.6 and Java 21. The Maven compile baseline is `keycloak.version` (currently 26.7.4); the test server image is controlled separately by `keycloak.runtime.version`. Exact local results are recorded in [testing](testing.md). Entries in CI are compatibility targets until the corresponding run passes; untested versions, other database engines, vendor distributions and mixed-version Keycloak rolling upgrades are not implied.
 
 PostgreSQL 18 is not an installation requirement. The extension uses the database already configured

@@ -37,9 +37,14 @@ Events are **not globally or per-user ordered** across retries and concurrent no
 ## Build and test
 
 ```sh
+python3 scripts/validate.py        # local/PR checks, including Python validation tooling
 mvn -B -ntp verify                 # unit tests + packaged JARs
 mvn -B -ntp -Pintegration verify   # full suite; a running Docker engine is required
 ```
+
+Use `python scripts/validate.py` on Windows. [Local validation and CI](docs/ci.md) documents the
+container, compatibility-matrix and security commands. PRs run quick checks; the expensive matrix
+runs on changes merged/pushed to `main` and on manual requests.
 
 Open the root `pom.xml` in IntelliJ, select a Java 21 project SDK and Java 21 Maven runner, and reload Maven. The integration profile intentionally fails if Docker is unavailable; it does not silently skip tests.
 
