@@ -1,6 +1,6 @@
 # Java style
 
-The standard is [Google Java Style](https://google.github.io/styleguide/javaguide.html), with the already agreed mandatory braces. Spotless 3.0.0 runs Google Java Format 1.27.0. Maven Checkstyle 3.6.0 uses Checkstyle 10.26.1's bundled `google_checks.xml`, including brace, import, naming, whitespace and public API documentation checks. Versions are pinned in the root POM. Google checks emit warnings by default; `violationSeverity=warning` makes those warnings fail the build.
+The standard is [Google Java Style](https://google.github.io/styleguide/javaguide.html), with the already agreed mandatory braces. Spotless runs Google Java Format. The Maven Checkstyle plugin uses Checkstyle's bundled `google_checks.xml`, including brace, import, naming, whitespace and public API documentation checks. Tool versions are defined in the root POM. Google checks emit warnings by default; `violationSeverity=warning` makes those warnings fail the build.
 
 ```sh
 mvn spotless:apply       # apply formatting and remove unused imports

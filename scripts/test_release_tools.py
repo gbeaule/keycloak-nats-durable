@@ -101,8 +101,10 @@ class ReleaseManifestTest(unittest.TestCase):
             (root / "compose.yaml").write_text("services:\n  postgres:\n    image: postgres:18.6-alpine\n"
                                                 "  nats:\n    image: nats:2.15.0-alpine\n")
             (root / "deploy").mkdir()
-            for name in ("keycloak", "consumer"):
-                (root / "deploy" / f"Dockerfile.{name}").write_text("FROM base@sha256:" + "a" * 64)
+            (root / "deploy" / "Dockerfile.keycloak").write_text(
+                "ARG KEYCLOAK_IMAGE=quay.io/keycloak/keycloak:26.7.4\n"
+                "FROM ${KEYCLOAK_IMAGE}\n")
+            (root / "deploy" / "Dockerfile.consumer").write_text("FROM eclipse-temurin:21-jre\n")
             output = root / "target" / "release"
             with patch("sys.argv", ["release-manifest", "--version", "1.2.3", "--commit", "b" * 40,
                                     "--output", str(output)]):
@@ -111,6 +113,10 @@ class ReleaseManifestTest(unittest.TestCase):
             manifest = json.loads((output / "manifest.json").read_text())
             self.assertEqual(manifest["baseImages"]["compose.yaml"],
                              ["postgres:18.6-alpine", "nats:2.15.0-alpine"])
+            self.assertEqual(manifest["baseImages"]["deploy/Dockerfile.keycloak"],
+                             ["quay.io/keycloak/keycloak:26.7.4"])
+            self.assertEqual(manifest["baseImages"]["deploy/Dockerfile.consumer"],
+                             ["eclipse-temurin:21-jre"])
             for name in ("aggregate", "extension", "consumer-example"):
                 self.assertIn(name + "-bom.json", manifest["artifacts"])
                 self.assertIn(name + "-runtime-bom.json", manifest["artifacts"])

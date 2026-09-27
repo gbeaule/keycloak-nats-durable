@@ -91,7 +91,7 @@ public final class EventEnvelope {
     // Optional fields are omitted from the wire format, rather than encoded as JSON null.
     data.values().removeIf(Objects::isNull);
     String realmToken = realmToken(realm);
-    String subject = subject(realm, subjectSuffix);
+    final String subject = subject(realm, subjectSuffix);
     String id = UUID.randomUUID().toString();
     Map<String, Object> envelope = new LinkedHashMap<>();
     envelope.put("specversion", "1.0");

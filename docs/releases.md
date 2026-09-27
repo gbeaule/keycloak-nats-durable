@@ -22,8 +22,8 @@ dependencies are cached. Do not reuse an earlier build's inventory for a changed
 
 The release manifest command verifies the embedded JAR versions, requires nonempty SBOMs, copies the
 provider and consumer artifacts into `target/release`, records their SHA-256 hashes and source commit,
-and includes deployment image references. Compose references are version tags by owner preference;
-Dockerfile bases retain digests. A Compose tag can resolve to different bytes over time, so retain
+and includes deployment image references. Compose and Dockerfile references use version tags.
+A tag can resolve to different bytes over time, so retain
 the scan report's resolved image identity with the bundle. The manifest does not describe a tag as
 immutable. It refuses to overwrite an existing bundle.
 The fixed default build timestamp makes development packaging repeatable; release jobs override it
@@ -41,7 +41,7 @@ request artifact into production. Record the supported Keycloak runtime matrix r
 source commit before publication.
 
 Container builds accept `ARTIFACT_VERSION` and `VCS_REF` build arguments. Both provider and consumer
-bases are digest-pinned, and the Keycloak image is built with health and metrics enabled for
+bases use version tags, and the Keycloak image is built with health and metrics enabled for
 `start --optimized`. The provider mtime is fixed before that build so container timestamp rounding
 does not spuriously invalidate optimization. Pass the tested hostname/TLS/runtime configuration when
 starting a production image; the Compose stack remains a development example.
@@ -49,7 +49,7 @@ starting a production image; the Compose stack remains a development example.
 ## Security checks and updates
 
 The [security workflow](../.github/workflows/security.yml) runs on pushes, pull requests, weekly and on
-demand. It creates SBOMs and uses a digest-pinned Trivy 0.74.0 image to scan dependencies, the built
+demand. It creates SBOMs and uses the `aquasec/trivy:0.74.0` image to scan dependencies, the built
 provider/consumer container images and the versioned PostgreSQL/NATS images. Run the same checks locally:
 
 ```sh
@@ -67,12 +67,15 @@ remain visible with their original severities in scan reports and `gate.json`. A
 failure still fails the job rather than reporting a clean result. Vulnerability
 results change as advisories and fixes change, even with identical application bytes.
 
+Use version tags for dependency references throughout the repository: full release tags for GitHub
+Actions and version/flavor tags for Dockerfiles, Compose, test containers and the scanner. Maven
+dependency and plugin versions belong in the POMs.
+
 [Dependabot configuration](../.github/dependabot.yml) requests weekly Maven, GitHub Actions, Dockerfile
-and Compose updates. Changes are proposals, with no automatic merge. Review image digest updates,
-keep the default PostgreSQL/NATS test versions aligned with Compose (test digests may remain pinned),
-and rerun the supported runtime
-matrix after changes. Update the pinned scanner itself deliberately and record its official release
-digest. Repository administrators must enable the applicable GitHub security/update features and
+and Compose updates. Changes are proposals, with no automatic merge. Review version-tag updates,
+keep the default PostgreSQL/NATS test versions aligned with Compose, and rerun the supported runtime
+matrix after changes. Update the scanner's version tag deliberately. Repository administrators must
+enable the applicable GitHub security/update features and
 require the verification and security jobs through branch protection; source files alone cannot set
 those repository policies.
 

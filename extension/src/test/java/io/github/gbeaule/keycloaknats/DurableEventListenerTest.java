@@ -58,9 +58,9 @@ class DurableEventListenerTest {
     var policy =
         EventFilterTest.parse(
             """
-        {"realmIds":["other-realm"],"subjects":["keycloak.events.*.user.login"],
-         "userEvents":["*"],"adminEvents":[{"resourceType":"*","operations":["*"]}]}
-        """);
+            {"realmIds":["other-realm"],"subjects":["keycloak.events.*.user.login"],
+             "userEvents":["*"],"adminEvents":[{"resourceType":"*","operations":["*"]}]}
+            """);
     listener =
         new DurableEventListener(session, BridgeConfig.from(Map.of()), wakeRelay, () -> policy);
     listener.onEvent(EventEnvelopeTest.login());

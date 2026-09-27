@@ -37,14 +37,8 @@ abstract class IntegrationSupport {
   static final ObjectMapper objectMapper = new ObjectMapper();
   static final String STREAM = "KEYCLOAK_EVENTS";
   static final String DURABLE = "auth-worker";
-  static final String NATS_IMAGE =
-      "nats:2.15.0-alpine@sha256:"
-          + "ac8f88a6494bffc2c2a5289a0ca61cb28a9145c11ba5677cf24265d07f46d8d4";
-  static final String POSTGRES_IMAGE =
-      System.getProperty(
-          "postgres.image",
-          "postgres:18.6-alpine@sha256:"
-              + "77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873");
+  static final String NATS_IMAGE = "nats:2.15.0-alpine";
+  static final String POSTGRES_IMAGE = System.getProperty("postgres.image", "postgres:18.6-alpine");
   static final HttpClient httpClient =
       HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
   static Network network;
@@ -56,7 +50,7 @@ abstract class IntegrationSupport {
   static String adminToken;
 
   static PostgreSQLContainer postgresContainer() {
-    // Testcontainers 2.x needs explicit compatibility for a tag plus immutable digest.
+    // Allow compatible PostgreSQL image overrides.
     // Its PostgreSQL default also disables fsync, which is unsuitable for durability evidence.
     return new PostgreSQLContainer(
             DockerImageName.parse(POSTGRES_IMAGE).asCompatibleSubstituteFor("postgres"))

@@ -103,10 +103,10 @@ public final class OutboxReport {
       try (var query =
           db.prepareStatement(
               """
-          SELECT pg_total_relation_size(?::regclass),
-            coalesce(n_dead_tup,0),coalesce(extract(epoch FROM last_autovacuum),0)
-          FROM pg_stat_user_tables WHERE schemaname=? AND relname='kc_nats_outbox'
-          """)) {
+              SELECT pg_total_relation_size(?::regclass),
+                coalesce(n_dead_tup,0),coalesce(extract(epoch FROM last_autovacuum),0)
+              FROM pg_stat_user_tables WHERE schemaname=? AND relname='kc_nats_outbox'
+              """)) {
         query.setQueryTimeout(timeoutSeconds);
         query.setString(1, table);
         query.setString(2, schema);
