@@ -79,6 +79,48 @@ class EventSchemaTest {
     assertFalse(validate(event).isEmpty());
   }
 
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "0",
+        "-1",
+        "+1",
+        "01",
+        "1.0",
+        "1e3",
+        "1\n",
+        "١",
+        "",
+        "9223372036854775808",
+        "10000000000000000000"
+      })
+  void orderingSequenceRejectsMalformedAndOverflowingStrings(String sequence) throws IOException {
+    var event = objectMapper.readTree(getClass().getResourceAsStream("/examples/user-login.json"));
+    ((ObjectNode) event.at("/data/ordering")).put("sequence", sequence);
+    assertFalse(validate(event).isEmpty(), sequence);
+  }
+
+  @Test
+  void orderingRequiresUserIdentityAndOnlyTheTwoContractFields() throws IOException {
+    var event = objectMapper.readTree(getClass().getResourceAsStream("/examples/user-login.json"));
+    var data = (ObjectNode) event.get("data");
+    var ordering = (ObjectNode) data.get("ordering");
+    ordering.put("sequence", 1);
+    assertFalse(validate(event).isEmpty());
+    ordering.put("sequence", "9223372036854775807");
+    assertValid(event);
+    ordering.put("maxFailures", 1);
+    assertFalse(validate(event).isEmpty());
+    ordering.remove("maxFailures");
+    ordering.put("key", "u.realm.with.dots.user");
+    assertFalse(validate(event).isEmpty());
+    ordering.put("key", "u.ZGVtbw.dXNlci0xMjM");
+    data.remove("userId");
+    assertFalse(validate(event).isEmpty());
+    data.remove("ordering");
+    assertValid(event);
+  }
+
   @Test
   void publishedCatalogueContainsEveryEnumInCompileBaseline() throws IOException {
     var catalogue =

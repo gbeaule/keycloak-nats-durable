@@ -18,6 +18,8 @@ import static org.mockito.Mockito.when;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManager;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -220,6 +222,43 @@ class DurableEventListenerTest {
     verify(user).isEnabled();
     verifyNoInteractions(em, tx, wakeRelay);
     verify(session, never()).getProvider(JpaConnectionProvider.class);
+  }
+
+  @Test
+  void callbackUsesOneSnapshotEvenWhenObservationTriggersReload() throws Exception {
+    var initial =
+        EventFilterTest.parse(
+            DeliveryRulesTest.document(
+                DeliveryRulesTest.rule(
+                    "disabled",
+                    DeliveryRulesTest.ADMIN_MATCH.replace("}", ",\"userEnabled\":false}"),
+                    "{\"action\":\"discard\",\"maxFailures\":2}")));
+    var replacement = EventFilterTest.parse("{\"userEvents\":[],\"adminEvents\":[]}");
+    var current = new AtomicReference<>(initial);
+    @SuppressWarnings("unchecked")
+    Supplier<EventFilter> source = mock(Supplier.class);
+    when(source.get()).thenAnswer(call -> current.get());
+    var realms = mock(RealmProvider.class);
+    var realm = mock(RealmModel.class);
+    var users = mock(UserProvider.class);
+    var user = mock(UserModel.class);
+    when(session.realms()).thenReturn(realms);
+    when(realms.getRealm("realm")).thenReturn(realm);
+    when(session.users()).thenReturn(users);
+    when(users.getUserById(realm, "target")).thenReturn(user);
+    when(user.isEnabled())
+        .thenAnswer(
+            call -> {
+              current.set(replacement);
+              return false;
+            });
+    listener = new DurableEventListener(session, BridgeConfig.from(Map.of()), wakeRelay, source);
+    listener.onEvent(EventEnvelopeTest.admin(OperationType.UPDATE), false);
+    verify(source).get();
+    verify(em).persist(any(OutboxEvent.class));
+    listener.onEvent(EventEnvelopeTest.login());
+    verify(source, times(2)).get();
+    verify(em).persist(any(OutboxEvent.class));
   }
 
   @Test

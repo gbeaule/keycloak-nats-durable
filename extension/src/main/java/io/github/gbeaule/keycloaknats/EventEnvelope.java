@@ -51,9 +51,14 @@ public final class EventEnvelope {
 
   /** Creates a user event with a new identity that is persisted for all relay retries. */
   public OutboxEvent user(Event event) {
+    return user(event, null);
+  }
+
+  OutboxEvent user(Event event, EventOrdering ordering) {
     Map<String, Object> data = common("user", event.getId(), event.getRealmId(), event.getError());
     data.put("userId", event.getUserId());
     data.put("clientId", event.getClientId());
+    putOrdering(data, ordering);
     String type = event.getType().name();
     data.put("eventType", type);
     String suffix = "user." + type.toLowerCase(Locale.ROOT);
@@ -62,12 +67,17 @@ public final class EventEnvelope {
 
   /** Creates an admin event; enablement is a nullable state observation, not a transition. */
   public OutboxEvent admin(AdminEvent event, Boolean userEnabled) {
+    return admin(event, userEnabled, null);
+  }
+
+  OutboxEvent admin(AdminEvent event, Boolean userEnabled, EventOrdering ordering) {
     Map<String, Object> data = common("admin", event.getId(), event.getRealmId(), event.getError());
     data.put("resourceType", event.getResourceTypeAsString());
     data.put("operationType", event.getOperationType().name());
     data.put("resourcePath", event.getResourcePath());
     data.put("userId", targetUserId(event));
     data.put("userEnabled", userEnabled);
+    putOrdering(data, ordering);
     if (event.getAuthDetails() != null) {
       data.put("actorUserId", event.getAuthDetails().getUserId());
       data.put("actorRealmId", event.getAuthDetails().getRealmId());
@@ -91,6 +101,17 @@ public final class EventEnvelope {
     }
     String id = path.substring(6);
     return id.isEmpty() || id.contains("/") ? null : id;
+  }
+
+  private static void putOrdering(Map<String, Object> data, EventOrdering ordering) {
+    if (ordering == null) {
+      return;
+    }
+    if (!ordering.realmId().equals(data.get("realmId"))
+        || !ordering.userId().equals(data.get("userId"))) {
+      throw new IllegalArgumentException("Ordering must identify the event's affected user");
+    }
+    data.put("ordering", ordering.wireValue());
   }
 
   private OutboxEvent envelope(

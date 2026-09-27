@@ -3,10 +3,7 @@ package io.github.gbeaule.keycloaknats;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
-import java.util.HexFormat;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -58,7 +55,7 @@ final class ReloadingEventFilter implements AutoCloseable {
         this::reload, intervalMillis, intervalMillis, TimeUnit.MILLISECONDS);
   }
 
-  void reload() {
+  synchronized void reload() {
     try {
       byte[] bytes = read();
       if (!Arrays.equals(bytes, appliedBytes)) {
@@ -89,15 +86,9 @@ final class ReloadingEventFilter implements AutoCloseable {
 
   private void apply(byte[] bytes) throws IOException {
     EventFilter candidate = EventFilter.parse(bytes);
-    String digest;
-    try {
-      digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
-    } catch (NoSuchAlgorithmException impossible) {
-      throw new IllegalStateException(impossible);
-    }
     current = candidate;
     appliedBytes = bytes;
-    logger.infof("Event filter applied; sha256=%s", digest);
+    logger.infof("Event filter applied; sha256=%s", candidate.sha256());
   }
 
   @Override

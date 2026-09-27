@@ -1,0 +1,32 @@
+{
+  "userEvents": [
+    "*"
+  ],
+  "adminEvents": [
+    {
+      "resourceType": "*",
+      "operations": [
+        "*"
+      ]
+    }
+  ],
+  "delivery": {
+    "rules": [
+      {
+        "id": "short-lived-login",
+        "match": {
+          "kind": "user",
+          "eventTypes": [
+            "LOGIN",
+            "LOGIN_ERROR"
+          ]
+        },
+        "policy": {
+          "action": "discard",
+          "maxAgeSeconds": 300,
+          "maxFailures": 20
+        }
+      }
+    ]
+  }
+}

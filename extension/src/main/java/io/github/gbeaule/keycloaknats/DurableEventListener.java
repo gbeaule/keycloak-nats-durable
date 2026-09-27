@@ -38,7 +38,7 @@ public final class DurableEventListener implements EventListenerProvider {
   public void onEvent(Event event) {
     persist(
         () ->
-            filter.get().accepts(event, envelopes.userSubject(event))
+            filter.get().resolve(event, envelopes.userSubject(event)).isPresent()
                 ? envelopes.user(event)
                 : null);
   }
@@ -53,7 +53,9 @@ public final class DurableEventListener implements EventListenerProvider {
             return null;
           }
           Boolean enabled = enabledState(event);
-          return policy.accepts(event, enabled, subject) ? envelopes.admin(event, enabled) : null;
+          return policy.resolve(event, enabled, subject).isPresent()
+              ? envelopes.admin(event, enabled)
+              : null;
         });
   }
 

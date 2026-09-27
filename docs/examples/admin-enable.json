@@ -17,6 +17,10 @@
     "actorUserId": "admin-456",
     "actorRealmId": "master",
     "clientId": "admin-cli",
-    "userEnabled": true
+    "userEnabled": true,
+    "ordering": {
+      "key": "u.ZGVtbw.dXNlci0xMjM",
+      "sequence": "1"
+    }
   }
 }

@@ -72,6 +72,11 @@
         <directory>../docs/examples</directory>
         <targetPath>examples</targetPath>
       </testResource>
+      <testResource>
+        <directory>../config</directory>
+        <targetPath>config</targetPath>
+        <includes><include>events-*.json</include></includes>
+      </testResource>
     </testResources>
     <plugins>
       <plugin>
