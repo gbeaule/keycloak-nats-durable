@@ -7,6 +7,10 @@
     <version>${revision}</version>
   </parent>
   <artifactId>consumer-example</artifactId>
+  <properties>
+    <coverage.line.minimum>0.40</coverage.line.minimum>
+    <coverage.branch.minimum>0.39</coverage.branch.minimum>
+  </properties>
   <dependencies>
     <dependency>
       <groupId>com.zaxxer</groupId>

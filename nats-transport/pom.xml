@@ -7,6 +7,10 @@
     <version>${revision}</version>
   </parent>
   <artifactId>nats-transport</artifactId>
+  <properties>
+    <coverage.line.minimum>0.64</coverage.line.minimum>
+    <coverage.branch.minimum>0.56</coverage.branch.minimum>
+  </properties>
   <dependencies>
     <dependency>
       <groupId>io.nats</groupId>

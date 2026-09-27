@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>io.github.gbeaule</groupId>
+    <artifactId>keycloak-nats-durable-parent</artifactId>
+    <version>${revision}</version>
+  </parent>
+  <artifactId>coverage</artifactId>
+  <packaging>pom</packaging>
+  <name>Combined unit coverage</name>
+  <dependencies>
+    <dependency>
+      <groupId>io.github.gbeaule</groupId>
+      <artifactId>nats-transport</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.github.gbeaule</groupId>
+      <artifactId>keycloak-nats-durable</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.github.gbeaule</groupId>
+      <artifactId>consumer-example</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.jacoco</groupId>
+        <artifactId>jacoco-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>combined-unit-coverage</id>
+            <phase>verify</phase>
+            <goals>
+              <goal>report-aggregate</goal>
+            </goals>
+            <configuration>
+              <dataFileIncludes>
+                <dataFileInclude>target/jacoco-unit.exec</dataFileInclude>
+              </dataFileIncludes>
+              <outputDirectory>${project.build.directory}/site/jacoco-unit</outputDirectory>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

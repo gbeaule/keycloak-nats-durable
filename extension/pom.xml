@@ -7,6 +7,10 @@
     <version>${revision}</version>
   </parent>
   <artifactId>keycloak-nats-durable</artifactId>
+  <properties>
+    <coverage.line.minimum>0.79</coverage.line.minimum>
+    <coverage.branch.minimum>0.75</coverage.branch.minimum>
+  </properties>
   <dependencies>
     <dependency>
       <groupId>io.github.gbeaule</groupId>

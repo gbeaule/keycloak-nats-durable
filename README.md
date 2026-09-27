@@ -42,6 +42,23 @@ mvn -B -ntp verify                 # unit tests + packaged JARs
 mvn -B -ntp -Pintegration verify   # full suite; a running Docker engine is required
 ```
 
+[JaCoCo](https://www.jacoco.org/jacoco/trunk/doc/maven.html) measures unit-test line and branch
+coverage. After `verify`, open `coverage/target/site/jacoco-unit/index.html` for the combined report,
+including shared code exercised by other modules' tests. Per-module reports use the same path under
+each module's `target`. CI uploads these reports as `unit-coverage`; no production classes are excluded.
+
+The module POMs enforce initial coverage floors against each module's own tests. Raise them as
+meaningful tests close gaps, aiming for 100% of core logic and failure paths. Coverage measures
+execution, not assertion quality. To enforce the full 100% unit target locally (currently failing):
+
+```sh
+mvn -B -ntp -Dcoverage.line.minimum=1.0 -Dcoverage.branch.minimum=1.0 verify
+```
+
+Use complete test runs for coverage, and `mvn clean verify` after removing tests. Integration coverage
+is not collected yet: it needs agents in both the host test JVM and Keycloak containers, reports
+matching the shaded provider, and collection before deliberate process kills.
+
 Use `python scripts/validate.py` on Windows. [Local validation and CI](docs/ci.md) documents the
 container, compatibility-matrix and security commands. PRs run quick checks; the expensive matrix
 runs on changes merged/pushed to `main` and on manual requests.

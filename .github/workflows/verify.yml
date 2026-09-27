@@ -44,6 +44,13 @@ jobs:
           cache: maven
       - name: Unit tests, style, packaging and validation tooling
         run: python3 scripts/validate.py quick
+      - name: Unit coverage reports
+        uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: unit-coverage
+          retention-days: 3
+          path: '**/target/site/jacoco-unit/**'
       - uses: actions/upload-artifact@v7.0.1
         if: failure()
         with:
