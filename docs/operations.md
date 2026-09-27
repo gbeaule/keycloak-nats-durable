@@ -84,8 +84,8 @@ pressure. Batch size controls scheduling; worker count controls publication conc
 does not introduce an ordering guarantee.
 
 The demo and full-test default is PostgreSQL 18.6. Supported existing PostgreSQL 14–18 deployments
-can keep their major version; see [compatibility](compatibility.md). Compose uses version tags, while
-the default test image retains its recorded digest. Moving a PostgreSQL 17 volume to 18 requires an
+can keep their major version; see [compatibility](compatibility.md). Compose and the default test
+image use version tags. Moving a PostgreSQL 17 volume to 18 requires an
 explicit [major-version migration](postgres-upgrade.md); changing an image tag is not a data upgrade.
 
 The broker baseline is NATS 2.15.0. For an existing 2.12.x installation, rehearse the intermediate

@@ -36,7 +36,7 @@ matrix below belongs to the earlier hardening run and was not repeated for this 
 
 ## Production hardening before review follow-up, 2026-09-26
 
-The hardening baseline uses PostgreSQL **18.6** and NATS **2.15.0**, pinned by digest, with PostgreSQL
+These hardening runs used PostgreSQL **18.6** and NATS **2.15.0**, pinned by digest, with PostgreSQL
 `fsync` and `synchronous_commit` enabled. Both full runtime matrices passed, with zero failures,
 errors or skips, plus Spotless and Checkstyle:
 

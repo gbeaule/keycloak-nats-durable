@@ -8,8 +8,7 @@ from pathlib import Path
 import re
 import subprocess
 
-SCANNER = ("aquasec/trivy:0.74.0@sha256:"
-           "62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969")
+SCANNER = "aquasec/trivy:0.74.0"
 BLOCKING_REPORT = "runtime-dependencies.json"
 
 

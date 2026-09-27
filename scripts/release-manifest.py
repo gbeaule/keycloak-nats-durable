@@ -47,16 +47,21 @@ def main():
                 parser.error(f"SBOM version does not match release: {bom}")
             artifacts.append((bom, f"{module or 'aggregate'}-{name}"))
     images = {}
-    # Compose references are version tags by owner preference. Record them without inventing a digest.
+    # Record configured image versions without inventing a digest for a tag.
     images["compose.yaml"] = re.findall(r"^\s+image:\s*(\S+)\s*$",
                                         (root / "compose.yaml").read_text(encoding="utf-8"), re.MULTILINE)
     if len(images["compose.yaml"]) != 2:
         parser.error("Expected PostgreSQL and NATS image references in compose.yaml")
     for path in ("deploy/Dockerfile.keycloak", "deploy/Dockerfile.consumer"):
-        images[path] = sorted(set(re.findall(r"[\w./:-]+@sha256:[0-9a-f]{64}",
-                                            (root / path).read_text(encoding="utf-8"))))
-        if not images[path]:
-            parser.error(f"Expected immutable base image references in {path}")
+        dockerfile = (root / path).read_text(encoding="utf-8")
+        defaults = dict(re.findall(r"^ARG\s+(\w+)=(\S+)\s*$", dockerfile, re.MULTILINE))
+        bases = re.findall(r"^FROM\s+(\S+)", dockerfile, re.MULTILINE)
+        images[path] = sorted(set(re.sub(r"\$\{(\w+)\}",
+                                        lambda match: defaults.get(match[1], match[0]), base)
+                                  for base in bases))
+        if not images[path] or any(not re.fullmatch(r"[\w./:-]+:[\w.-]+", image)
+                                   for image in images[path]):
+            parser.error(f"Expected version-tagged base image references in {path}")
     output.mkdir(parents=True, exist_ok=True)
     checksums = {}
     for source, name in artifacts:

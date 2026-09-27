@@ -8,12 +8,12 @@ proposals and retains the Java 21 runtime.
 |---|---|---|---|
 | [#1](https://github.com/gbeaule/keycloak-nats-durable/pull/1) | Consumer Temurin image | 21 → 24 | Keep 21 LTS. Java 24 reached end of support in September 2025; it also changes the project's Java 21 runtime baseline. Ignore future Temurin major-version proposals while retaining updates within Java 21. |
 | [#2](https://github.com/gbeaule/keycloak-nats-durable/pull/2) | Mockito | 5.18.0 → 5.24.0 | Apply. Test-only dependency; the upstream Android requirement change does not apply to `mockito-core`. |
-| [#3](https://github.com/gbeaule/keycloak-nats-durable/pull/3) | setup-java | 4.9.1 → 6.0.1 | Apply with the release commit pinned. Hosted Ubuntu runners support its Node 24 runtime; the configured Temurin Java 21 input remains supported. |
+| [#3](https://github.com/gbeaule/keycloak-nats-durable/pull/3) | setup-java | 4.9.1 → 6.0.1 | Apply using the full release tag. Hosted Ubuntu runners support its Node 24 runtime; the configured Temurin Java 21 input remains supported. |
 | [#4](https://github.com/gbeaule/keycloak-nats-durable/pull/4) | JUnit BOM | 5.12.2 → 6.1.3 | Apply with both Maven test runners. JUnit 6 requires Java 17+, satisfied by Java 21; existing tests use Jupiter. Keep the BOM ahead of Keycloak's imported dependency management. |
 | [#5](https://github.com/gbeaule/keycloak-nats-durable/pull/5) | Surefire | 3.5.3 → 3.6.0 | Apply with JUnit and Failsafe. The unified JUnit Platform provider supports the existing Jupiter tests. |
-| [#6](https://github.com/gbeaule/keycloak-nats-durable/pull/6) | upload-artifact | 4.6.2 → 7.0.1 | Apply with the release commit pinned. Node 24 is supported; archive mode still defaults to true, preserving the existing multiple-file uploads and artifact names. |
+| [#6](https://github.com/gbeaule/keycloak-nats-durable/pull/6) | upload-artifact | 4.6.2 → 7.0.1 | Apply using the full release tag. Node 24 is supported; archive mode still defaults to true, preserving the existing multiple-file uploads and artifact names. |
 | [#7](https://github.com/gbeaule/keycloak-nats-durable/pull/7) | Maven Enforcer | 3.5.0 → 3.6.3 | Apply. Preserve the Java 21 and Maven 3.9 minimum-version rules. |
-| [#8](https://github.com/gbeaule/keycloak-nats-durable/pull/8) | checkout | 4.4.0 → 7.0.1 | Apply with the release commit pinned. The new restrictions on fork checkout under `pull_request_target` and `workflow_run` do not affect these workflows. Preserve `persist-credentials: false` and read-only permissions. |
+| [#8](https://github.com/gbeaule/keycloak-nats-durable/pull/8) | checkout | 4.4.0 → 7.0.1 | Apply using the full release tag. The new restrictions on fork checkout under `pull_request_target` and `workflow_run` do not affect these workflows. Preserve `persist-credentials: false` and read-only permissions. |
 | [#9](https://github.com/gbeaule/keycloak-nats-durable/pull/9) | Maven Compiler | 3.14.0 → 3.16.0 | Apply. Keep compilation targeted to Java 21; verify with Maven 3.9.6. |
 | [#10](https://github.com/gbeaule/keycloak-nats-durable/pull/10) | Checkstyle | 10.26.1 → 14.1.0 | Apply with source formatting corrections required by the updated Google rules. Keep warnings fatal and retain the full ruleset. |
 | [#11](https://github.com/gbeaule/keycloak-nats-durable/pull/11) | Failsafe | 3.5.3 → 3.6.0 | Apply with Surefire and JUnit. Validate real container tests and the method-selection syntax used in PostgreSQL compatibility CI. |
@@ -29,11 +29,12 @@ and the distance between one local variable declaration and its use. The
 corrections preserve JSON and SQL contents and event behavior; no style rules
 are disabled.
 
-The three action commit hashes were checked against their upstream release tags.
+The three actions use full release tags. Dockerfiles, test containers and the
+scanner also use version tags, following the repository dependency-reference policy.
 No Keycloak, NATS, PostgreSQL, or shipped Java library versions change in this
 update.
 
-## Local validation
+## Dependency-upgrade validation
 
 Using Java 21.0.10 and Maven 3.9.6:
 
@@ -56,6 +57,20 @@ Using Java 21.0.10 and Maven 3.9.6:
 The full GitHub Actions Keycloak/PostgreSQL matrix awaits branch publication.
 Local logs are in `.work/dependency-updates-*.log`; reports, inventories, the
 security verdict and artifact hashes are in `.work/dependency-update-evidence/`.
+
+## Version-tag follow-up
+
+GitHub Actions, Dockerfiles, Maven test-image defaults and the scanner now use
+version tags. The release manifest resolves Dockerfile `ARG` defaults and records
+the configured base-image tags. The style guide refers to the POM for tool
+versions.
+
+All five container tags were resolved against their registries and matched the
+images used in the dependency-upgrade validation above. The follow-up passed
+all 388 unit tests, three targeted container tests (`CustomSchemaIT` and
+`NatsReadinessIT`), all five Python release-tooling tests, workflow validation,
+Checkstyle and Spotless. Logs and image-resolution evidence are in
+`.work/dependency-tags-verify.log` and `.work/dependency-tags-images.json`.
 
 ## Upstream references
 

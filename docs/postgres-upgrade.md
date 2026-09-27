@@ -3,8 +3,8 @@
 The demo and full test suite default to PostgreSQL **18.6**. Existing installations can retain a
 supported PostgreSQL **14–18** major compatible with their Keycloak release; there is no requirement
 to upgrade to 18 to install this provider. See [compatibility coverage](compatibility.md).
-Compose uses the version tag `postgres:18.6-alpine`; the default Maven test image retains its recorded
-digest and can be overridden with `-Dpostgres.image=postgres:17-alpine`. Upstream supported versions
+Compose and Maven tests use the version tag `postgres:18.6-alpine`; the test image
+can be overridden with `-Dpostgres.image=postgres:17-alpine`. Upstream supported versions
 and patch policy are listed in the
 [PostgreSQL version policy](https://www.postgresql.org/support/versioning/).
 
