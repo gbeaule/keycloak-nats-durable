@@ -15,8 +15,8 @@
     "data": {
       "type": "object", "required": ["kind", "realmId", "outcome"],
       "properties": {
-        "kind": {"enum": ["user", "admin"]}, "realmId": {"type": "string"},
-        "keycloakEventId": {"type": "string"}, "userId": {"type": "string"}, "clientId": {"type": "string"},
+        "kind": {"enum": ["user", "admin"]}, "realmId": {"type": "string", "maxLength": 255},
+        "keycloakEventId": {"type": "string"}, "userId": {"type": "string", "maxLength": 255}, "clientId": {"type": "string"},
         "outcome": {"enum": ["success", "error"]}, "error": {"type": "string"},
         "eventType": {"type": "string"}, "operationType": {"enum": ["CREATE", "UPDATE", "DELETE", "ACTION"]}, "resourceType": {"type": "string"},
         "resourcePath": {"type": "string"}, "actorUserId": {"type": "string"}, "actorRealmId": {"type": "string"},
@@ -29,6 +29,7 @@
           "properties": {
             "key": {
               "type": "string",
+              "maxLength": 2048,
               "pattern": "^u\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+(?![\\s\\S])"
             },
             "sequence": {

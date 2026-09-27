@@ -49,35 +49,23 @@ public final class EventEnvelope {
             + event.getOperationType().name().toLowerCase(Locale.ROOT));
   }
 
-  /** Creates a user event with a new identity that is persisted for all relay retries. */
-  public OutboxEvent user(Event event) {
-    return user(event, null);
-  }
-
-  OutboxEvent user(Event event, EventOrdering ordering) {
+  Description describe(Event event) {
     Map<String, Object> data = common("user", event.getId(), event.getRealmId(), event.getError());
-    data.put("userId", event.getUserId());
+    data.put("userId", AffectedUser.resolve(event));
     data.put("clientId", event.getClientId());
-    putOrdering(data, ordering);
     String type = event.getType().name();
     data.put("eventType", type);
     String suffix = "user." + type.toLowerCase(Locale.ROOT);
-    return envelope(event.getRealmId(), suffix, suffix, event.getTime(), data);
+    return description(event.getRealmId(), suffix, suffix, event.getTime(), data);
   }
 
-  /** Creates an admin event; enablement is a nullable state observation, not a transition. */
-  public OutboxEvent admin(AdminEvent event, Boolean userEnabled) {
-    return admin(event, userEnabled, null);
-  }
-
-  OutboxEvent admin(AdminEvent event, Boolean userEnabled, EventOrdering ordering) {
+  Description describe(AdminEvent event, Boolean userEnabled) {
     Map<String, Object> data = common("admin", event.getId(), event.getRealmId(), event.getError());
     data.put("resourceType", event.getResourceTypeAsString());
     data.put("operationType", event.getOperationType().name());
     data.put("resourcePath", event.getResourcePath());
-    data.put("userId", targetUserId(event));
+    data.put("userId", AffectedUser.resolve(event));
     data.put("userEnabled", userEnabled);
-    putOrdering(data, ordering);
     if (event.getAuthDetails() != null) {
       data.put("actorUserId", event.getAuthDetails().getUserId());
       data.put("actorRealmId", event.getAuthDetails().getRealmId());
@@ -87,21 +75,16 @@ public final class EventEnvelope {
     String typeSuffix = "admin." + operation;
     String subjectSuffix =
         "admin." + resourceToken(event.getResourceTypeAsString()) + "." + operation;
-    return envelope(event.getRealmId(), typeSuffix, subjectSuffix, event.getTime(), data);
+    return description(event.getRealmId(), typeSuffix, subjectSuffix, event.getTime(), data);
   }
 
-  /** Returns the target of a direct user operation, or null for nested and other resources. */
-  public static String targetUserId(AdminEvent event) {
-    if (!"USER".equals(event.getResourceTypeAsString())) {
-      return null;
-    }
-    String path = event.getResourcePath();
-    if (path == null || !path.startsWith("users/")) {
-      return null;
-    }
-    String id = path.substring(6);
-    return id.isEmpty() || id.contains("/") ? null : id;
-  }
+  record Description(
+      String realmId,
+      String userId,
+      String type,
+      String subject,
+      long time,
+      Map<String, Object> data) {}
 
   private static void putOrdering(Map<String, Object> data, EventOrdering ordering) {
     if (ordering == null) {
@@ -114,19 +97,33 @@ public final class EventEnvelope {
     data.put("ordering", ordering.wireValue());
   }
 
-  private OutboxEvent envelope(
+  private Description description(
       String realm, String typeSuffix, String subjectSuffix, long time, Map<String, Object> data) {
     // Optional fields are omitted from the wire format, rather than encoded as JSON null.
     data.values().removeIf(Objects::isNull);
-    String realmToken = realmToken(realm);
-    final String subject = subject(realm, subjectSuffix);
+    return new Description(
+        realm,
+        (String) data.get("userId"),
+        "io.keycloak." + typeSuffix,
+        subject(realm, subjectSuffix),
+        time,
+        Map.copyOf(data));
+  }
+
+  OutboxEvent serialize(
+      Description description,
+      EventOrdering ordering,
+      long capturedAt,
+      ResolvedPublicationPolicy policy) {
+    Map<String, Object> data = new LinkedHashMap<>(description.data());
+    putOrdering(data, ordering);
     String id = UUID.randomUUID().toString();
     Map<String, Object> envelope = new LinkedHashMap<>();
     envelope.put("specversion", "1.0");
     envelope.put("id", id);
-    envelope.put("source", "urn:keycloak:realm:" + realmToken);
-    envelope.put("type", "io.keycloak." + typeSuffix);
-    envelope.put("time", Instant.ofEpochMilli(time).toString());
+    envelope.put("source", "urn:keycloak:realm:" + realmToken(description.realmId()));
+    envelope.put("type", description.type());
+    envelope.put("time", Instant.ofEpochMilli(description.time()).toString());
     envelope.put("datacontenttype", "application/json");
     envelope.put("dataschema", "urn:keycloak-nats:event:v1");
     envelope.put("data", data);
@@ -135,7 +132,15 @@ public final class EventEnvelope {
       if (payload.getBytes(StandardCharsets.UTF_8).length > config.maxPayloadBytes()) {
         throw new IllegalArgumentException("Event exceeds max-payload-bytes");
       }
-      return new OutboxEvent(id, subject, payload, System.currentTimeMillis());
+      return new OutboxEvent(
+          id,
+          description.subject(),
+          payload,
+          capturedAt,
+          description.realmId(),
+          description.type(),
+          ordering,
+          policy);
     } catch (JsonProcessingException e) {
       throw new IllegalStateException("Cannot serialize event");
     }

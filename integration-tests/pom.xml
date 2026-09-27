@@ -9,6 +9,17 @@
   <artifactId>integration-tests</artifactId>
   <dependencies>
     <dependency>
+      <groupId>org.keycloak</groupId>
+      <artifactId>keycloak-model-jpa</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.mockito</groupId>
+      <artifactId>mockito-core</artifactId>
+      <version>5.24.0</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
       <groupId>io.github.gbeaule</groupId>
       <artifactId>keycloak-nats-durable</artifactId>
       <version>${project.version}</version>

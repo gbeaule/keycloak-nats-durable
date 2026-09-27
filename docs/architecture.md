@@ -23,6 +23,13 @@ The listener stores selected events in an outbox using Keycloak's existing persi
 failure marks the transaction for rollback. NATS availability is outside the request transaction, so
 a broker outage allows account operations to continue while the database has capacity.
 
+Each accepted event freezes its publication policy and database capture time. Attributable users
+receive a sequence from a durable counter in the same transaction. Capture locks the user's counter
+before inserting the outbox row; multiple callbacks acquire counters in callback order. Locks last
+until commit or rollback, and a deadlock or lock timeout rolls back the entire Keycloak transaction.
+Counters survive user deletion and outbox draining. Publication workers must never lock these
+counters during broker requests.
+
 This boundary covers events that Keycloak actually sends to an enabled listener. Direct SQL changes,
 external LDAP/identity-provider changes and custom integrations that emit no event are outside it.
 External mutations are not made transactional by this bridge. Events are not backfilled after
@@ -81,14 +88,14 @@ recovery belong to the deployment owner; see [operations](operations.md).
 
 ## Ordering and event meaning
 
-The bridge provides no global, per-realm or per-user ordering guarantee. Concurrent capture,
-publication and retries can reorder events, even with one relay worker. Event timestamps are not
-commit sequences.
+Capture now assigns transactional per-user positions. Relay coordination is still pending, so the
+bridge does not yet guarantee per-user publication ordering. Concurrent publication and retries can
+reorder events, even with one relay worker. Event timestamps are not commit sequences.
 
 User enablement is an observed state, not proof of a transition. Applications maintaining account or
 authorization projections must reconcile with current Keycloak state so a delayed update cannot undo
-a later disablement or deletion. Reliable ordered processing would require coordinated sequencing
-through capture, publication and consumption; it is not an existing configuration option.
+a later disablement or deletion. Publication ordering is a separate relay phase; receiving
+applications remain responsible for their processing order.
 
 ## Code map
 

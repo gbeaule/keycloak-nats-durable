@@ -28,7 +28,7 @@ class EventCatalogueTest {
     if (type.name().endsWith("_ERROR")) {
       source.setError("example_error");
     }
-    var message = envelopes.user(source);
+    var message = CaptureFixtures.user(envelopes, source);
     var event = objectMapper.readTree(message.payload());
     EventSchemaTest.assertValid(event);
     assertEquals(
@@ -46,7 +46,7 @@ class EventCatalogueTest {
       var source = EventEnvelopeTest.admin(operation);
       source.setRealmId("demo");
       source.setResourceType(resource);
-      var message = envelopes.admin(source, null);
+      var message = CaptureFixtures.admin(envelopes, source, null);
       var event = objectMapper.readTree(message.payload());
       EventSchemaTest.assertValid(event);
       assertEquals(

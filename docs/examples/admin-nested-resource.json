@@ -12,6 +12,8 @@
     "outcome": "success",
     "resourceType": "REALM_ROLE_MAPPING",
     "operationType": "CREATE",
-    "resourcePath": "users/user-123/role-mappings/realm"
+    "resourcePath": "users/user-123/role-mappings/realm",
+    "userId": "user-123",
+    "ordering": {"key": "u.ZGVtbw.dXNlci0xMjM", "sequence": "4"}
   }
 }

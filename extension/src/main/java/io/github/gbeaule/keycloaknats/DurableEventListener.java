@@ -38,9 +38,11 @@ public final class DurableEventListener implements EventListenerProvider {
   public void onEvent(Event event) {
     persist(
         () ->
-            filter.get().resolve(event, envelopes.userSubject(event)).isPresent()
-                ? envelopes.user(event)
-                : null);
+            filter
+                .get()
+                .resolve(event, envelopes.userSubject(event))
+                .map(policy -> new Capture(envelopes.describe(event), policy))
+                .orElse(null));
   }
 
   @Override
@@ -53,14 +55,15 @@ public final class DurableEventListener implements EventListenerProvider {
             return null;
           }
           Boolean enabled = enabledState(event);
-          return policy.resolve(event, enabled, subject).isPresent()
-              ? envelopes.admin(event, enabled)
-              : null;
+          return policy
+              .resolve(event, enabled, subject)
+              .map(resolved -> new Capture(envelopes.describe(event, enabled), resolved))
+              .orElse(null);
         });
   }
 
   private Boolean enabledState(AdminEvent event) {
-    String userId = EventEnvelope.targetUserId(event);
+    String userId = AffectedUser.directUserId(event);
     OperationType operation = event.getOperationType();
     boolean observesUserState =
         operation == OperationType.CREATE || operation == OperationType.UPDATE;
@@ -75,9 +78,11 @@ public final class DurableEventListener implements EventListenerProvider {
     return user == null ? null : user.isEnabled();
   }
 
-  private void persist(java.util.function.Supplier<OutboxEvent> event) {
+  private record Capture(EventEnvelope.Description description, ResolvedPublicationPolicy policy) {}
+
+  private void persist(java.util.function.Supplier<Capture> event) {
     try {
-      OutboxEvent captured = event.get();
+      Capture captured = event.get();
       if (captured == null) {
         return;
       }
@@ -85,7 +90,12 @@ public final class DurableEventListener implements EventListenerProvider {
         throw new IllegalStateException("An active Keycloak transaction is required");
       }
       var em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-      em.persist(captured);
+      var description = captured.description();
+      // Counter locks precede the outbox insert and remain held through transaction completion.
+      // Incremental callbacks retain callback order; deadlock victims roll back the whole request.
+      var ordering = CaptureRepository.next(em, description.realmId(), description.userId());
+      long capturedAt = CaptureRepository.databaseTime(em);
+      em.persist(envelopes.serialize(description, ordering, capturedAt, captured.policy()));
       // Detect database rejection while the request is still inside the listener boundary.
       em.flush();
       enlistWakeup();

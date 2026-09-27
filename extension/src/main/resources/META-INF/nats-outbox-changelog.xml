@@ -3,34 +3,121 @@
   <changeSet id="nats-outbox-1" author="keycloak-nats-durable">
     <createTable tableName="KC_NATS_OUTBOX">
       <column name="ID" type="VARCHAR(36)">
-        <constraints primaryKey="true" primaryKeyName="PK_KC_NATS_OUTBOX" nullable="false"/>
+        <constraints nullable="false" primaryKey="true"/>
+      </column>
+      <column name="REALM_ID" type="VARCHAR(255)">
+        <constraints nullable="false"/>
+      </column>
+      <column name="EVENT_TYPE" type="VARCHAR(128)">
+        <constraints nullable="false"/>
       </column>
       <column name="SUBJECT" type="VARCHAR(512)">
         <constraints nullable="false"/>
       </column>
-      <column name="PAYLOAD" type="CLOB">
+      <column name="PAYLOAD_SHA256" type="VARCHAR(64)">
         <constraints nullable="false"/>
       </column>
       <column name="CREATED_AT" type="BIGINT">
         <constraints nullable="false"/>
       </column>
+      <column name="ORDERING_KEY" type="VARCHAR(2048)"/>
+      <column name="USER_SEQUENCE" type="BIGINT"/>
+      <column name="MAX_AGE_SECONDS" type="INT"/>
+      <column name="MAX_FAILURES" type="INT"/>
+      <column name="EXPIRES_AT" type="BIGINT"/>
+      <column name="FILTER_SHA256" type="VARCHAR(64)">
+        <constraints nullable="false"/>
+      </column>
+      <column name="RULE_ID" type="CLOB"/>
+      <column name="PAYLOAD" type="CLOB">
+        <constraints nullable="false"/>
+      </column>
       <column name="NEXT_ATTEMPT_AT" type="BIGINT">
+        <constraints nullable="false"/>
+      </column>
+      <column name="LAST_ERROR" type="VARCHAR(128)"/>
+      <column name="ATTEMPTS" type="BIGINT" defaultValueNumeric="0">
+        <constraints nullable="false"/>
+      </column>
+      <column name="PUBLICATION_MAY_HAVE_OCCURRED" type="BOOLEAN" defaultValueBoolean="false">
+        <constraints nullable="false"/>
+      </column>
+    </createTable>
+    <createTable tableName="KC_NATS_DISCARD_AUDIT">
+      <column name="ID" type="VARCHAR(36)">
+        <constraints nullable="false" primaryKey="true"/>
+      </column>
+      <column name="REALM_ID" type="VARCHAR(255)">
+        <constraints nullable="false"/>
+      </column>
+      <column name="EVENT_TYPE" type="VARCHAR(128)">
+        <constraints nullable="false"/>
+      </column>
+      <column name="SUBJECT" type="VARCHAR(512)">
+        <constraints nullable="false"/>
+      </column>
+      <column name="PAYLOAD_SHA256" type="VARCHAR(64)">
+        <constraints nullable="false"/>
+      </column>
+      <column name="CREATED_AT" type="BIGINT">
+        <constraints nullable="false"/>
+      </column>
+      <column name="ORDERING_KEY" type="VARCHAR(2048)"/>
+      <column name="USER_SEQUENCE" type="BIGINT"/>
+      <column name="MAX_AGE_SECONDS" type="INT"/>
+      <column name="MAX_FAILURES" type="INT"/>
+      <column name="EXPIRES_AT" type="BIGINT"/>
+      <column name="FILTER_SHA256" type="VARCHAR(64)">
+        <constraints nullable="false"/>
+      </column>
+      <column name="RULE_ID" type="CLOB"/>
+      <column name="DISCARDED_AT" type="BIGINT">
+        <constraints nullable="false"/>
+      </column>
+      <column name="REASON" type="VARCHAR(32)">
         <constraints nullable="false"/>
       </column>
       <column name="ATTEMPTS" type="BIGINT" defaultValueNumeric="0">
         <constraints nullable="false"/>
       </column>
-      <column name="LAST_ERROR" type="VARCHAR(128)"/>
+      <column name="PUBLICATION_MAY_HAVE_OCCURRED" type="BOOLEAN" defaultValueBoolean="false">
+        <constraints nullable="false"/>
+      </column>
     </createTable>
+    <createTable tableName="KC_NATS_CAPTURE_COUNTER">
+      <column name="ORDERING_KEY" type="VARCHAR(2048)">
+        <constraints nullable="false" primaryKey="true"/>
+      </column>
+      <column name="REALM_ID" type="VARCHAR(255)">
+        <constraints nullable="false"/>
+      </column>
+      <column name="USER_ID" type="VARCHAR(255)">
+        <constraints nullable="false"/>
+      </column>
+      <column name="LAST_SEQUENCE" type="BIGINT">
+        <constraints nullable="false"/>
+      </column>
+    </createTable>
+    <addUniqueConstraint tableName="KC_NATS_CAPTURE_COUNTER" columnNames="REALM_ID,USER_ID" constraintName="UQ_KC_NATS_COUNTER_USER"/>
+    <addUniqueConstraint tableName="KC_NATS_OUTBOX" columnNames="ORDERING_KEY,USER_SEQUENCE" constraintName="UQ_KC_NATS_OUTBOX_POSITION"/>
     <createIndex tableName="KC_NATS_OUTBOX" indexName="IDX_KC_NATS_OUTBOX_DUE">
       <column name="NEXT_ATTEMPT_AT"/>
       <column name="CREATED_AT"/>
       <column name="ID"/>
     </createIndex>
+    <createIndex tableName="KC_NATS_OUTBOX" indexName="IDX_KC_NATS_OUTBOX_EXPIRY">
+      <column name="EXPIRES_AT"/>
+      <column name="ID"/>
+    </createIndex>
+    <createIndex tableName="KC_NATS_DISCARD_AUDIT" indexName="IDX_KC_NATS_DISCARD_RETENTION">
+      <column name="DISCARDED_AT"/>
+      <column name="ID"/>
+    </createIndex>
   </changeSet>
-  <changeSet id="nats-outbox-2-vacuum" author="keycloak-nats-durable" dbms="postgresql">
-    <!-- Accept the checksum from before the package rename; the generated SQL is unchanged. -->
-    <validCheckSum>9:0865fbeca5c396e9cd44e1b50720d5ca</validCheckSum>
+  <changeSet id="nats-outbox-2-constraints" author="keycloak-nats-durable" dbms="postgresql">
+    <customChange class="io.github.gbeaule.keycloaknats.CaptureConstraintsMigration"/>
+  </changeSet>
+  <changeSet id="nats-outbox-3-vacuum" author="keycloak-nats-durable" dbms="postgresql">
     <customChange class="io.github.gbeaule.keycloaknats.OutboxVacuumMigration"/>
   </changeSet>
 </databaseChangeLog>

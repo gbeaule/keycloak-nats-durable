@@ -54,6 +54,15 @@ class CustomSchemaIT extends IntegrationSupport {
     try {
       createUser();
       assertEquals(1, scalar("SELECT count(*) FROM " + TABLE));
+      assertEquals(
+          1,
+          scalar(
+              "SELECT count(*) FROM "
+                  + TABLE
+                  + " WHERE user_sequence=1"
+                  + " AND ordering_key IS NOT NULL AND filter_sha256 IS NOT NULL"));
+      assertEquals(1, scalar("SELECT count(*) FROM \"bridge-data\".kc_nats_capture_counter"));
+      assertEquals(0, scalar("SELECT count(*) FROM \"bridge-data\".kc_nats_discard_audit"));
       restartKeycloak();
       assertEquals(1, scalar("SELECT count(*) FROM " + TABLE));
       docker.startContainerCmd(broker.getContainerId()).exec();
@@ -62,6 +71,7 @@ class CustomSchemaIT extends IntegrationSupport {
           .atMost(Duration.ofSeconds(20))
           .until(() -> scalar("SELECT count(*) FROM " + TABLE) == 0);
       assertEquals(1, messages());
+      assertEquals(1, scalar("SELECT count(*) FROM \"bridge-data\".kc_nats_capture_counter"));
     } finally {
       if (!broker.isRunning()) {
         docker.startContainerCmd(broker.getContainerId()).exec();

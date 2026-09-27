@@ -55,7 +55,7 @@ import org.mockito.ArgumentCaptor;
 class JetStreamPublisherTest {
   private final BridgeConfig config = BridgeConfig.from(Map.of());
   private final OutboxEvent event =
-      new OutboxEvent("id", "keycloak.events.realm.user.login", "{}", 0);
+      CaptureFixtures.row("id", "keycloak.events.realm.user.login", "{}", 0);
   private Connection connection;
   private JetStreamPublisher.Connector connector;
   private JetStreamManagement management;
@@ -102,7 +102,8 @@ class JetStreamPublisherTest {
   void validatesBeforePublishingOriginalBytesAndDeduplicationIdentityWithBoundedRequests()
       throws Exception {
     var original =
-        new OutboxEvent("persisted-id", "keycloak.events.realm.user.login", "{\"value\":\"é\"}", 0);
+        CaptureFixtures.row(
+            "persisted-id", "keycloak.events.realm.user.login", "{\"value\":\"é\"}", 0);
     publisher.publish(original);
     var headers = ArgumentCaptor.forClass(Headers.class);
     var bytes = ArgumentCaptor.forClass(byte[].class);

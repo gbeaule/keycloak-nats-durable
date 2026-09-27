@@ -14,7 +14,7 @@ public final class OutboxEntityProviderFactory implements JpaEntityProviderFacto
     return new JpaEntityProvider() {
       @Override
       public List<Class<?>> getEntities() {
-        return List.of(OutboxEvent.class);
+        return List.of(OutboxEvent.class, CaptureCounter.class);
       }
 
       @Override

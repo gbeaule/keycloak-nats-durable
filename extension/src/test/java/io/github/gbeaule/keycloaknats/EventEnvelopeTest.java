@@ -69,7 +69,7 @@ class EventEnvelopeTest {
   @Test
   void createsValidEnvelopeWithSafeDistinctRealmTokens() throws Exception {
     final long before = System.currentTimeMillis();
-    var event = encoder.user(login());
+    var event = CaptureFixtures.user(encoder, login());
     final long after = System.currentTimeMillis();
     var json = new ObjectMapper().readTree(event.payload());
     Set<String> fields = new HashSet<>();
@@ -115,12 +115,12 @@ class EventEnvelopeTest {
     assertTrue(event.subject().matches("keycloak\\.events\\.[A-Za-z0-9_-]+\\.user\\.login"));
     var other = login();
     other.setRealmId("tenant");
-    assertNotEquals(event.subject(), encoder.user(other).subject());
+    assertNotEquals(event.subject(), CaptureFixtures.user(encoder, other).subject());
   }
 
   @Test
   void privateDetailsNeverLeaveKeycloakAndNullClientIsSupported() {
-    String payload = encoder.user(login()).payload();
+    String payload = CaptureFixtures.user(encoder, login()).payload();
     assertFalse(payload.contains("sensitive-"));
     assertFalse(payload.contains("192.0.2.1"));
     assertFalse(payload.contains("clientId"));
@@ -128,7 +128,7 @@ class EventEnvelopeTest {
 
   @Test
   void disabledUserStateSurvivesWithoutAdminRepresentation() throws Exception {
-    var event = encoder.admin(admin(OperationType.UPDATE), false);
+    var event = CaptureFixtures.admin(encoder, admin(OperationType.UPDATE), false);
     var json = new ObjectMapper().readTree(event.payload());
     assertEquals(BooleanNode.FALSE, json.at("/data/userEnabled"));
     assertEquals("target", json.at("/data/userId").asText());
@@ -140,7 +140,8 @@ class EventEnvelopeTest {
   @Test
   void deleteDoesNotRequireLookingUpTheDeletedUser() throws Exception {
     var json =
-        new ObjectMapper().readTree(encoder.admin(admin(OperationType.DELETE), null).payload());
+        new ObjectMapper()
+            .readTree(CaptureFixtures.admin(encoder, admin(OperationType.DELETE), null).payload());
     assertEquals("target", json.at("/data/userId").textValue());
     assertEquals("DELETE", json.at("/data/operationType").textValue());
     assertEquals("io.keycloak.admin.delete", json.get("type").textValue());
@@ -152,7 +153,7 @@ class EventEnvelopeTest {
   void onlyDirectUserResourcesAreTreatedAsAccountChanges(String path, String expected) {
     var event = admin(OperationType.UPDATE);
     event.setResourcePath(path);
-    assertEquals(expected, EventEnvelope.targetUserId(event));
+    assertEquals(expected, AffectedUser.directUserId(event));
   }
 
   @ParameterizedTest
@@ -162,8 +163,8 @@ class EventEnvelopeTest {
       throws Exception {
     var event = admin(OperationType.UPDATE);
     event.setResourceTypeAsString(resource);
-    assertNull(EventEnvelope.targetUserId(event));
-    var json = new ObjectMapper().readTree(encoder.admin(event, null).payload());
+    assertNull(AffectedUser.directUserId(event));
+    var json = new ObjectMapper().readTree(CaptureFixtures.admin(encoder, event, null).payload());
     assertFalse(json.get("data").has("userId"));
   }
 
@@ -172,7 +173,7 @@ class EventEnvelopeTest {
     var event = login();
     event.setType(EventType.LOGIN_ERROR);
     event.setError("invalid_user_credentials");
-    var row = encoder.user(event);
+    var row = CaptureFixtures.user(encoder, event);
     var json = new ObjectMapper().readTree(row.payload());
     assertEquals("error", json.at("/data/outcome").textValue());
     assertEquals("invalid_user_credentials", json.at("/data/error").textValue());
@@ -190,7 +191,7 @@ class EventEnvelopeTest {
     actor.setClientId("admin-console");
     actor.setIpAddress("192.0.2.55");
     event.setAuthDetails(actor);
-    var row = encoder.admin(event, true);
+    var row = CaptureFixtures.admin(encoder, event, true);
     var json = new ObjectMapper().readTree(row.payload());
     assertEquals(
         new ObjectMapper()
@@ -214,7 +215,8 @@ class EventEnvelopeTest {
   void absentRealmsFailWithSafeErrorsBeforeCapture(String realm) {
     var event = login();
     event.setRealmId(realm);
-    var failure = assertThrows(IllegalArgumentException.class, () -> encoder.user(event));
+    var failure =
+        assertThrows(IllegalArgumentException.class, () -> CaptureFixtures.user(encoder, event));
     assertEquals("Event realm is required", failure.getMessage());
     assertNull(failure.getCause());
   }
@@ -224,9 +226,11 @@ class EventEnvelopeTest {
     var event = admin(OperationType.UPDATE);
     event.setRealmId("r".repeat(358));
     assertEquals(512, encoder.adminSubject(event).length());
-    assertEquals(512, encoder.admin(event, false).subject().length());
+    assertEquals(512, encoder.describe(event, false).subject().length());
     event.setRealmId("r".repeat(359));
-    var failure = assertThrows(IllegalArgumentException.class, () -> encoder.admin(event, false));
+    var failure =
+        assertThrows(
+            IllegalArgumentException.class, () -> CaptureFixtures.admin(encoder, event, false));
     assertEquals("Event subject exceeds storage limit", failure.getMessage());
   }
 
@@ -235,13 +239,16 @@ class EventEnvelopeTest {
     var event = login();
     event.setUserId("é".repeat(255));
     event.setClientId("é".repeat(100));
-    String payload = encoder.user(event).payload();
+    String payload = CaptureFixtures.user(encoder, event).payload();
     int bytes = payload.getBytes(StandardCharsets.UTF_8).length;
     var exact =
         new EventEnvelope(BridgeConfig.from(Map.of("max-payload-bytes", Integer.toString(bytes))));
-    assertEquals(bytes, exact.user(event).payload().getBytes(StandardCharsets.UTF_8).length);
+    assertEquals(
+        bytes,
+        CaptureFixtures.user(exact, event).payload().getBytes(StandardCharsets.UTF_8).length);
     event.setClientId(event.getClientId() + "x");
-    var failure = assertThrows(IllegalArgumentException.class, () -> exact.user(event));
+    var failure =
+        assertThrows(IllegalArgumentException.class, () -> CaptureFixtures.user(exact, event));
     assertEquals("Event exceeds max-payload-bytes", failure.getMessage());
     assertNull(failure.getCause());
   }
@@ -252,7 +259,8 @@ class EventEnvelopeTest {
     when(writer.writeValueAsString(any()))
         .thenThrow(new JsonMappingException(null, "private-event-data"));
     var constrained = new EventEnvelope(BridgeConfig.from(Map.of()), writer);
-    var failure = assertThrows(IllegalStateException.class, () -> constrained.user(login()));
+    var failure =
+        assertThrows(IllegalStateException.class, () -> CaptureFixtures.user(constrained, login()));
     assertEquals("Cannot serialize event", failure.getMessage());
     assertNull(failure.getCause());
   }
@@ -263,13 +271,14 @@ class EventEnvelopeTest {
     event.setUserId("é".repeat(255));
     event.setClientId("é".repeat(255));
     var small = new EventEnvelope(BridgeConfig.from(Map.of("max-payload-bytes", "1024")));
-    assertThrows(IllegalArgumentException.class, () -> small.user(event));
+    assertThrows(IllegalArgumentException.class, () -> CaptureFixtures.user(small, event));
     event.setRealmId(null);
-    assertThrows(IllegalArgumentException.class, () -> encoder.user(event));
+    assertThrows(IllegalArgumentException.class, () -> CaptureFixtures.user(encoder, event));
   }
 
   @Test
   void eachCaptureHasItsOwnTransportIdentity() {
-    assertNotEquals(encoder.user(login()).id(), encoder.user(login()).id());
+    assertNotEquals(
+        CaptureFixtures.user(encoder, login()).id(), CaptureFixtures.user(encoder, login()).id());
   }
 }

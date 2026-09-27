@@ -76,7 +76,8 @@ class DurableEventListenerFactoryTest {
 
   @Test
   void requestCompletionSignalsAllWorkersWithoutClosingTheirResources() throws Exception {
-    try (var fixture = new Lifecycle()) {
+    try (var fixture = new Lifecycle();
+        var capture = mockStatic(CaptureRepository.class)) {
       fixture.start();
       var session = mock(KeycloakSession.class);
       var transaction = mock(KeycloakTransactionManager.class);

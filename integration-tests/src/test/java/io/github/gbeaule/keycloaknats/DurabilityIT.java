@@ -623,8 +623,8 @@ class DurabilityIT extends IntegrationSupport {
       String payload = objectMapper.writeValueAsString(Map.of("id", id, "padding", padding));
       String insertSql =
           """
-          INSERT INTO kc_nats_outbox (id, subject, payload, created_at, next_attempt_at, attempts)
-          VALUES (?, 'keycloak.events.test.user.login', ?, 0, 0, 0)
+          INSERT INTO kc_nats_outbox (id, subject, payload, created_at, next_attempt_at, attempts, realm_id, event_type, payload_sha256, filter_sha256)
+          VALUES (?, 'keycloak.events.test.user.login', ?, 0, 0, 0, 'test', 'io.keycloak.user.login', repeat('0',64), repeat('0',64))
           """;
       try (var db = database.getConnection();
           var insert = db.prepareStatement(insertSql)) {
@@ -704,8 +704,8 @@ class DurabilityIT extends IntegrationSupport {
     try (var insert =
         transaction.prepareStatement(
             """
-            INSERT INTO kc_nats_outbox(id,subject,payload,created_at,next_attempt_at,attempts)
-            VALUES (?,?,?,0,?,0)
+            INSERT INTO kc_nats_outbox(id,subject,payload,created_at,next_attempt_at,attempts,realm_id,event_type,payload_sha256,filter_sha256)
+            VALUES (?,?,?,0,?,0,'test','io.keycloak.user.login',repeat('0',64),repeat('0',64))
             """)) {
       insert.setString(1, id);
       insert.setString(2, "keycloak.events.dGVzdA.user.login");

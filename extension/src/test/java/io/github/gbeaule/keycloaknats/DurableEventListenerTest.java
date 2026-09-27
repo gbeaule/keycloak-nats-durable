@@ -20,6 +20,7 @@ import jakarta.persistence.EntityManager;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -41,9 +42,19 @@ class DurableEventListenerTest {
   KeycloakTransactionManager tx;
   DurableEventListener listener;
   Runnable wakeRelay;
+  org.mockito.MockedStatic<CaptureRepository> capture;
 
   @BeforeEach
   void setup() {
+    capture = org.mockito.Mockito.mockStatic(CaptureRepository.class);
+    capture
+        .when(() -> CaptureRepository.next(any(), any(), any()))
+        .thenAnswer(
+            call ->
+                call.getArgument(2) == null
+                    ? null
+                    : new EventOrdering(call.getArgument(1), call.getArgument(2), 1));
+    capture.when(() -> CaptureRepository.databaseTime(any())).thenReturn(1234L);
     session = mock(KeycloakSession.class);
     em = mock(EntityManager.class);
     tx = mock(KeycloakTransactionManager.class);
@@ -54,6 +65,11 @@ class DurableEventListenerTest {
     when(jpa.getEntityManager()).thenReturn(em);
     wakeRelay = mock(Runnable.class);
     listener = new DurableEventListener(session, BridgeConfig.from(Map.of()), wakeRelay);
+  }
+
+  @AfterEach
+  void closeCapture() {
+    capture.close();
   }
 
   @Test

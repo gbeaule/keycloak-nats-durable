@@ -65,11 +65,16 @@ final class EventFilter {
     }
 
     boolean matches(AdminEvent event, Boolean enabled) {
-      return matches(event)
-          && (userEnabled == null
-              || (event.getError() == null
-                  && EventEnvelope.targetUserId(event) != null
-                  && userEnabled.equals(enabled)));
+      if (!matches(event)) {
+        return false;
+      }
+      if (userEnabled == null) {
+        return true;
+      }
+      boolean successful = event.getError() == null;
+      boolean directUser = AffectedUser.directUserId(event) != null;
+      boolean enabledMatches = userEnabled.equals(enabled);
+      return successful && directUser && enabledMatches;
     }
   }
 
@@ -308,7 +313,7 @@ final class EventFilter {
     }
   }
 
-  private static String digest(byte[] bytes) {
+  static String digest(byte[] bytes) {
     try {
       return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
     } catch (NoSuchAlgorithmException impossible) {

@@ -37,7 +37,8 @@ pipeline at all. A consumer filter does not remove unselected messages from the 
 [Disablement](examples/admin-disable.json) is a successful direct USER update with
 `data.userEnabled: false`. It can also describe another edit to an already disabled user.
 [Deletion](examples/admin-delete.json) identifies the target from the direct user resource path.
-[Nested resource changes](examples/admin-nested-resource.json) are not direct account changes.
+[Recognized nested resources](examples/admin-nested-resource.json) identify the affected user and
+share that user's capture sequence. Only direct USER create/update events observe `userEnabled`.
 
 User identity can be absent, including on a [failed login](examples/user-login-error.json).
 For admin events, the actor and affected user are distinct. A client identifier can describe the

@@ -45,7 +45,7 @@ class OutboxRelayTest {
     publisher = mock(EventPublisher.class);
     query = mock(TypedQuery.class, RETURNS_SELF);
     when(em.createQuery(anyString(), eq(OutboxEvent.class))).thenReturn(query);
-    row = new OutboxEvent("id", "subject", "{}", 0);
+    row = CaptureFixtures.row("id", "subject", "{}", 0);
     when(query.getResultList()).thenReturn(List.of(row), List.of());
     relay = new OutboxRelay(work -> work.apply(em), publisher, BridgeConfig.from(Map.of()));
   }
@@ -190,7 +190,7 @@ class OutboxRelayTest {
 
   @Test
   void fullBatchStopsAtItsConfiguredSizeWithoutClaimingAnotherRow() throws Exception {
-    var second = new OutboxEvent("second", "subject", "{\"n\":2}", 10);
+    var second = CaptureFixtures.row("second", "subject", "{\"n\":2}", 10);
     when(query.getResultList()).thenReturn(List.of(row), List.of(second));
     var worker =
         new OutboxRelay(

@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -36,6 +37,18 @@ class EventOrderingTest {
     assertEquals("9223372036854775807", ordering.wireValue().get("sequence"));
     assertEquals(Long.MAX_VALUE, EventOrdering.parseSequence("9223372036854775807"));
     assertEquals(1, EventOrdering.parseSequence("1"));
+  }
+
+  @Test
+  void orderingValuesRemainInterchangeableAsMapKeys() {
+    var ordering = new EventOrdering("realm", "user", 1);
+    var positions = new HashMap<>(Map.of(ordering, "captured"));
+    assertEquals("captured", positions.get(new EventOrdering("realm", "user", 1)));
+    assertNotEquals(ordering, new EventOrdering("realm", "user", 2));
+    assertNotEquals(ordering, new EventOrdering("other-realm", "user", 1));
+    assertNotEquals(ordering, new EventOrdering("realm", "other-user", 1));
+    assertNotEquals(ordering, "not an ordering");
+    assertNotEquals(ordering, null);
   }
 
   @ParameterizedTest
@@ -74,10 +87,20 @@ class EventOrderingTest {
   }
 
   @Test
+  void identifierAndIndexLimitsRejectOversizeValuesWithoutTruncation() {
+    assertEquals("x".repeat(255), new EventOrdering("realm", "x".repeat(255), 1).userId());
+    assertThrows(
+        IllegalArgumentException.class, () -> new EventOrdering("realm", "x".repeat(256), 1));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> new EventOrdering("😀".repeat(255), "😀".repeat(255), 1));
+  }
+
+  @Test
   void orderingPreservesBusinessSubjectsAndCloudEventIdentity() throws Exception {
     var user = EventEnvelopeTest.login();
     var ordering = new EventOrdering(user.getRealmId(), user.getUserId(), 12);
-    var row = envelopes.user(user, ordering);
+    var row = CaptureFixtures.user(envelopes, user, ordering);
     var json = mapper.readTree(row.payload());
     assertEquals(row.id(), json.get("id").textValue());
     assertEquals(envelopes.userSubject(user), row.subject());
@@ -89,33 +112,46 @@ class EventOrderingTest {
     admin.getAuthDetails().setUserId("actor");
     admin.getAuthDetails().setRealmId("master");
     ordering = new EventOrdering("realm", "target", Long.MAX_VALUE);
-    row = envelopes.admin(admin, null, ordering);
+    row = CaptureFixtures.admin(envelopes, admin, null, ordering);
     json = mapper.readTree(row.payload());
     assertEquals(mapper.valueToTree(ordering.wireValue()), json.at("/data/ordering"));
     assertEquals(envelopes.adminSubject(admin), row.subject());
     EventSchemaTest.assertValid(json);
     assertThrows(
         IllegalArgumentException.class,
-        () -> envelopes.admin(admin, null, new EventOrdering("realm", "actor", 1)));
+        () ->
+            CaptureFixtures.admin(envelopes, admin, null, new EventOrdering("realm", "actor", 1)));
     assertThrows(
         IllegalArgumentException.class,
-        () -> envelopes.admin(admin, null, new EventOrdering("master", "target", 1)));
+        () ->
+            CaptureFixtures.admin(
+                envelopes, admin, null, new EventOrdering("master", "target", 1)));
   }
 
   @Test
   void userlessEventsOmitOrderingAndCannotBorrowAnActorsPosition() throws Exception {
     var user = EventEnvelopeTest.login();
     user.setUserId(null);
-    assertFalse(mapper.readTree(envelopes.user(user).payload()).get("data").has("ordering"));
+    assertFalse(
+        mapper
+            .readTree(CaptureFixtures.user(envelopes, user).payload())
+            .get("data")
+            .has("ordering"));
     assertThrows(
         IllegalArgumentException.class,
-        () -> envelopes.user(user, new EventOrdering(user.getRealmId(), "other", 1)));
+        () ->
+            CaptureFixtures.user(
+                envelopes, user, new EventOrdering(user.getRealmId(), "other", 1)));
     var admin = EventEnvelopeTest.admin(OperationType.ACTION);
     admin.setResourcePath("clients/client");
     assertFalse(
-        mapper.readTree(envelopes.admin(admin, null).payload()).get("data").has("ordering"));
+        mapper
+            .readTree(CaptureFixtures.admin(envelopes, admin, null).payload())
+            .get("data")
+            .has("ordering"));
     assertThrows(
         IllegalArgumentException.class,
-        () -> envelopes.admin(admin, null, new EventOrdering("realm", "actor", 1)));
+        () ->
+            CaptureFixtures.admin(envelopes, admin, null, new EventOrdering("realm", "actor", 1)));
   }
 }
