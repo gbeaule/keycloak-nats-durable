@@ -1,11 +1,14 @@
 package io.github.gbeaule.keycloaknats.consumer;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.util.Map;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class ConsumerConfigTest {
   @Test
@@ -37,6 +40,41 @@ class ConsumerConfigTest {
     assertEquals("nats://broker:4222", config.nats().servers()[0]);
     assertEquals(" private-token ", config.nats().token());
     assertFalse(config.nats().toString().contains("private-token"));
+  }
+
+  @Test
+  void transportNormalizesAddressesAndDefensivelyCopiesThem() {
+    var config =
+        new ConsumerConfig(Map.of("KND_NATS_URL", " tls://broker:4222 , tls://backup:4222 ")::get);
+    var transport = config.nats();
+    assertArrayEquals(new String[] {"tls://broker:4222", "tls://backup:4222"}, transport.servers());
+    transport.servers()[0] = "nats://changed";
+    assertEquals("tls://broker:4222", transport.servers()[0]);
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "",
+        " ",
+        "nats://broker:4222,",
+        ",nats://broker:4222",
+        "nats://broker:4222,,nats://backup:4222",
+        "http://broker:4222",
+        "nats://user:secret@broker:4222",
+        "nats://broker:4222/path",
+        "nats://broker?token=secret",
+        "nats://broker#secret",
+        "nats://broker:0",
+        "nats://broker:99999",
+        "nats://secret@[",
+        "tls://broker:4222,nats://backup:4222"
+      })
+  void unsafeTransportAddressesFailWithoutEchoingCredentials(String servers) {
+    var config = new ConsumerConfig(Map.of("KND_NATS_URL", servers)::get);
+    var failure = assertThrows(IllegalArgumentException.class, config::nats);
+    assertFalse(failure.toString().contains("secret"));
+    assertEquals(null, failure.getCause());
   }
 
   @Test

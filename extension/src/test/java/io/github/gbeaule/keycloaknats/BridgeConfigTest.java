@@ -72,6 +72,13 @@ class BridgeConfigTest {
   }
 
   @Test
+  void authenticationTokensRetainTheirExactValue() {
+    var config = BridgeConfig.from(Map.of("token", " private-token "));
+    assertEquals(" private-token ", config.token());
+    assertFalse(config.toString().contains("private-token"));
+  }
+
+  @Test
   void backoffIsBoundedAndDoesNotOverflow() {
     var config = BridgeConfig.from(Map.of());
     for (long attempts : new long[] {0, 1, 5, 63, Long.MAX_VALUE}) {

@@ -1,5 +1,21 @@
 # Verification record
 
+## Production readiness review, 2026-09-27
+
+The [readiness review](production-readiness-2026-09-27.md) fixed malformed consumer JSON acceptance,
+provider token normalization, inconsistent NATS URL validation and acceptance of empty runtime
+security scans. All **417 Java unit tests**, **48 container integration tests** and **5 Python
+release-tool tests** passed, with zero failures, errors or skips. Checkstyle, Spotless and packaging
+also passed. The full integration run took 19 minutes 55 seconds on Java 21.0.10 and Maven 3.9.6.
+
+The container run used Keycloak 26.7.4, PostgreSQL 18.6 and NATS 2.15.0 and included the persisted-outbox
+upgrade from 26.6.4. The new cases verify malformed deliveries remain pending under default retry,
+explicit quarantine preserves their bytes, and Keycloak authenticates with an exact token containing
+surrounding spaces. The complete/runtime aggregate inventories were regenerated in online mode;
+the final Trivy scan passed with **0 blocking and 30 advisory records** under the existing policy.
+Evidence is preserved in `.work/readiness-evidence-20260927/`. The older runtime/database matrix and
+performance measurements below were not rerun for this patch.
+
 ## Review-comment follow-up, 2026-09-26
 
 The final build passed **388 Java unit tests** (34 transport, 319 provider, 35 consumer), Spotless and

@@ -39,10 +39,13 @@ import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.postgresql.ds.PGSimpleDataSource;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.junit.jupiter.Container;
@@ -253,9 +256,11 @@ class ConsumerHardeningIT {
     }
   }
 
-  @Test
-  void defaultRetryKeepsPoisonMessageAndQuarantineFreesThePendingWindow() throws Exception {
-    publish("not-json".getBytes(StandardCharsets.UTF_8));
+  @ParameterizedTest
+  @MethodSource("poisonPayloads")
+  void defaultRetryKeepsPoisonMessageAndQuarantineFreesThePendingWindow(byte[] poison)
+      throws Exception {
+    publish(poison);
     publish(payload());
     var defaults = settings(Map.of());
     var processor = new InboxProcessor(database, DURABLE, defaults.processing());
@@ -264,6 +269,8 @@ class ConsumerHardeningIT {
       worker.handle(fetch(), processor::recordEffect);
       assertEquals(1, monitor.count(ConsumerMonitor.Counter.RETRIES));
       assertEquals(2, messages());
+      assertEquals(0, scalar("SELECT count(*) FROM knd_inbox"));
+      assertEquals(0, scalar("SELECT count(*) FROM knd_effects"));
       assertEquals(0, scalar("SELECT count(*) FROM knd_quarantine"));
     }
     var quarantine =
@@ -281,10 +288,25 @@ class ConsumerHardeningIT {
       assertEquals(1, monitor.count(ConsumerMonitor.Counter.QUARANTINED));
       assertEquals(1, messages());
       assertEquals(1, scalar("SELECT count(*) FROM knd_quarantine WHERE payload IS NOT NULL"));
+      try (var db = database.getConnection();
+          var query = db.createStatement();
+          var result = query.executeQuery("SELECT payload FROM knd_quarantine")) {
+        assertTrue(result.next());
+        assertArrayEquals(poison, result.getBytes(1));
+      }
       worker.handle(fetch(), processor::recordEffect);
       assertEquals(1, scalar("SELECT count(*) FROM knd_effects"));
       assertEquals(0, messages());
     }
+  }
+
+  static Stream<byte[]> poisonPayloads() throws Exception {
+    String valid = new String(payload(), StandardCharsets.UTF_8);
+    return Stream.of(
+            "not-json",
+            valid + valid,
+            valid.replace("\"specversion\":", "\"specversion\":\"0.3\",\"specversion\":"))
+        .map(value -> value.getBytes(StandardCharsets.UTF_8));
   }
 
   @Test

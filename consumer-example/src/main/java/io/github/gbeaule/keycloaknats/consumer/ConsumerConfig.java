@@ -1,6 +1,7 @@
 package io.github.gbeaule.keycloaknats.consumer;
 
 import io.github.gbeaule.keycloaknats.config.Environment;
+import io.github.gbeaule.keycloaknats.config.NatsServers;
 import io.github.gbeaule.keycloaknats.routing.SubjectPattern;
 import io.github.gbeaule.keycloaknats.tls.TlsConfig;
 import java.nio.charset.StandardCharsets;
@@ -177,9 +178,14 @@ public final class ConsumerConfig {
   /** Connection configuration with credentials excluded from diagnostic rendering. */
   public record NatsSettings(
       String[] servers, TlsConfig tls, String credentialsFile, String token) {
-    /** Copies the input so configuration cannot be mutated by a caller. */
+    /** Validates and copies addresses before they can reach the NATS client. */
     public NatsSettings {
-      servers = servers.clone();
+      servers = NatsServers.validate(servers);
+      boolean allTls = Arrays.stream(servers).allMatch(server -> server.startsWith("tls://"));
+      boolean anyTls = Arrays.stream(servers).anyMatch(server -> server.startsWith("tls://"));
+      if (tls == null || anyTls != allTls || tls.enabled() != allTls) {
+        throw new IllegalArgumentException("TLS settings must match every NATS server");
+      }
     }
 
     @Override

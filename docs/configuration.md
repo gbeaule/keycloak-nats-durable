@@ -12,6 +12,12 @@ preserves the platform's native environment-name lookup, including case insensit
 Keeping the two application loaders separate avoids making a NATS receiver depend on Keycloak APIs.
 Worker policy records validate values but delegate environment loading to that central consumer loader.
 
+Provider and consumer NATS seed addresses use the same validation: explicit `nats://` or `tls://`
+URLs, no embedded credentials, paths, query strings, fragments, empty list entries or invalid ports.
+Whitespace around addresses is removed. Authentication tokens are passed exactly as configured,
+including leading and trailing whitespace; secret values are never normalized. Supply credentials
+through `KND_TOKEN` or `KND_CREDENTIALS_FILE`, rather than embedding them in `KND_NATS_URL`.
+
 ## Choose events before storing them
 
 The capture policy is optional. Leave `KND_FILTER_FILE` unset to capture all events emitted to this listener. To exclude irrelevant events before they use outbox or broker space, set `KND_FILTER_FILE=/etc/knd/events.json` and mount that file's **directory** read-only. `KND_FILTER_RELOAD_MS` defaults to 1000 (range 100–60000). Only the capture policy is hot-reloaded; connection, routing and relay settings require a restart.

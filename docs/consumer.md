@@ -154,6 +154,11 @@ invalid event IDs and oversized payloads are deterministic rejections. Applicati
 exceptions, SQL failures, timeouts and event-ID/content conflicts remain retryable regardless of the
 configured rejection policy.
 
+Each delivery must contain one JSON document. Duplicate object keys, additional JSON documents and
+trailing non-whitespace content are rejected before acquiring a database connection or invoking the
+handler. Envelope version fields must be strings. These failures use the same retry/quarantine/drop
+policy as other deterministic rejections; the default retains the original broker message.
+
 Quarantine commits original bytes, headers, subject, identity and a fixed reason code before ACK.
 `drop` commits only audit metadata and the payload hash before ACK; the payload is discarded and
 cannot be replayed from that audit. A failed recovery write leaves the broker copy pending.

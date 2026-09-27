@@ -58,6 +58,9 @@ The integration suite uses real PostgreSQL, NATS and Keycloak containers and tes
 
 The [verification record](docs/testing.md) records test results and their limits. [CI security](docs/ci-security.md) explains why PR builds execute untrusted code, where they run, and the protections required at repository level.
 
+The [2026-09-27 production readiness review](docs/production-readiness-2026-09-27.md) records confirmed
+defects, fixes, regression coverage and the remaining deployment acceptance requirements.
+
 The additional failure suites exercise live capture-policy replacement, mounted mutual TLS, certificate rejection, NATS leader and quorum loss, surviving Keycloak-node recovery, and retry storage behavior. The [external listener comparison](docs/listener-comparison.md) explains why direct webhooks cannot replace the transactional outbox with equivalent guarantees.
 
 ## Local demonstration

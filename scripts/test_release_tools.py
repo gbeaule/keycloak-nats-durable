@@ -58,13 +58,16 @@ class SecurityPolicyTest(unittest.TestCase):
                          "consumer.json", "infrastructure-0.json", "infrastructure-1.json"):
                 path = Path(directory) / name
                 path.write_text(json.dumps({"SchemaVersion": 2,
-                                            "Results": [{"Vulnerabilities": [vulnerability]}]}))
+                                            "Results": [{"Class": "lang-pkgs", "Type": "jar",
+                                                         "Packages": [{"Name": "example"}],
+                                                         "Vulnerabilities": [vulnerability]}]}))
                 reports.append(path)
             gate = module.evaluate(reports)
             self.assertEqual(len(gate["blockingFindings"]), 1)
             self.assertEqual(len(gate["advisoryFindings"]), 5)
             self.assertTrue(all(f["severity"] == "HIGH" for f in gate["advisoryFindings"]))
-            reports[0].write_text(json.dumps({"SchemaVersion": 2, "Results": []}))
+            reports[0].write_text(json.dumps({"SchemaVersion": 2, "Results": [
+                {"Class": "lang-pkgs", "Type": "jar", "Packages": [{"Name": "example"}]}]}))
             self.assertEqual(module.evaluate(reports)["blockingFindings"], [])
 
     def test_missing_or_incomplete_runtime_scan_cannot_pass(self):
@@ -73,9 +76,16 @@ class SecurityPolicyTest(unittest.TestCase):
             module.evaluate([])
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "runtime-dependencies.json"
-            path.write_text("{}")
-            with self.assertRaises(ValueError):
-                module.evaluate([path])
+            for report in ({}, {"SchemaVersion": 2, "Results": []},
+                           {"SchemaVersion": 2, "Results": [{}]},
+                           {"SchemaVersion": 2, "Results": [
+                               {"Class": "lang-pkgs", "Type": "jar", "Packages": []}]},
+                           {"SchemaVersion": 2, "Results": [
+                               {"Class": "os-pkgs", "Type": "alpine", "Packages": [{"Name": "example"}]}]}):
+                with self.subTest(report=report):
+                    path.write_text(json.dumps(report))
+                    with self.assertRaises(ValueError):
+                        module.evaluate([path])
 
 
 class ReleaseManifestTest(unittest.TestCase):

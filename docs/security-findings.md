@@ -11,6 +11,10 @@ visible in the complete inventory and image scan. Full reports retain all severi
 `target/security`; acceptance does not relabel scanner findings as low severity or prove they are
 unreachable. Scanner/network failures continue to fail the job.
 
+The gate also requires a nonempty Java package inventory in the shipped-runtime scan. An empty
+result, a result without packages, or an OS-only result cannot establish that the Java dependencies
+were scanned and fails the gate. A populated Java inventory without vulnerabilities remains valid.
+
 | Surface | Result requiring attention |
 |---|---|
 | Consumer application image | No fixed HIGH/CRITICAL finding in the recorded scan. |

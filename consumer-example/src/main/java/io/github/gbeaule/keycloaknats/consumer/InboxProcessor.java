@@ -1,5 +1,7 @@
 package io.github.gbeaule.keycloaknats.consumer;
 
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
@@ -12,7 +14,10 @@ import javax.sql.DataSource;
 
 /** The inbox insert and ALL database side effects must share this transaction. */
 public final class InboxProcessor {
-  private static final ObjectMapper objectMapper = new ObjectMapper();
+  private static final ObjectMapper objectMapper =
+      new ObjectMapper()
+          .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+          .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
 
   /** A business effect that must use the supplied transaction and avoid external side effects. */
   @FunctionalInterface
@@ -69,8 +74,8 @@ public final class InboxProcessor {
       throw new RejectedEventException(RejectedEventException.Reason.INVALID_JSON);
     }
     if (event == null
-        || !"1.0".equals(event.path("specversion").asText())
-        || !"urn:keycloak-nats:event:v1".equals(event.path("dataschema").asText())
+        || !"1.0".equals(event.path("specversion").textValue())
+        || !"urn:keycloak-nats:event:v1".equals(event.path("dataschema").textValue())
         || !event.path("source").asText().startsWith("urn:keycloak:realm:")
         || !event.path("type").asText().startsWith("io.keycloak.")
         || !event.path("data").isObject()) {

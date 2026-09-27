@@ -19,9 +19,16 @@ def evaluate(outputs):
     blocking, advisory = [], []
     for output in outputs:
         report = json.loads(output.read_text(encoding="utf-8"))
-        if "SchemaVersion" not in report or "Results" not in report:
+        if (not isinstance(report, dict) or report.get("SchemaVersion") != 2
+                or not isinstance(report.get("Results"), list)
+                or any(not isinstance(result, dict) for result in report["Results"])):
             raise ValueError(f"Incomplete scanner report: {output.name}")
-        for result in report.get("Results", []):
+        if output.name == BLOCKING_REPORT and not any(
+                result.get("Class") == "lang-pkgs" and result.get("Type") == "jar"
+                and isinstance(result.get("Packages"), list) and result["Packages"]
+                for result in report["Results"]):
+            raise ValueError("Shipped runtime scan contains no Java package inventory")
+        for result in report["Results"]:
             for finding in result.get("Vulnerabilities", []) or []:
                 if finding.get("Severity") in ("HIGH", "CRITICAL") and finding.get("FixedVersion"):
                     entry = {"report": output.name, "id": finding["VulnerabilityID"],

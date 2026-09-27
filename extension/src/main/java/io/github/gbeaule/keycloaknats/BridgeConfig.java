@@ -1,8 +1,8 @@
 package io.github.gbeaule.keycloaknats;
 
 import io.github.gbeaule.keycloaknats.config.Environment;
+import io.github.gbeaule.keycloaknats.config.NatsServers;
 import io.github.gbeaule.keycloaknats.tls.TlsConfig;
-import java.net.URI;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.Map;
@@ -61,7 +61,7 @@ public record BridgeConfig(
         Duration.ofMillis(number(get, "retry-max-ms", 60000)),
         number(get, "max-payload-bytes", 65536),
         get.apply("credentials-file"),
-        get.apply("token"),
+        input.apply("token"),
         TlsConfig.from(servers, get),
         get.apply("filter-file"),
         Duration.ofMillis(number(get, "filter-reload-ms", 1000)));
@@ -69,13 +69,7 @@ public record BridgeConfig(
 
   /** Validates all limits and defensively copies the server list. */
   public BridgeConfig {
-    if (servers == null || servers.length == 0) {
-      throw new IllegalArgumentException("At least one NATS server is required");
-    }
-    servers = servers.clone();
-    for (int i = 0; i < servers.length; i++) {
-      servers[i] = validateServer(servers[i]);
-    }
+    servers = NatsServers.validate(servers);
     if (stream == null || !stream.matches("[A-Za-z0-9_-]{1,128}")) {
       throw new IllegalArgumentException("Invalid stream name");
     }
@@ -121,36 +115,6 @@ public record BridgeConfig(
         || filterReloadInterval.toMillis() > 60000) {
       throw new IllegalArgumentException("filter-reload-ms must be 100..60000");
     }
-  }
-
-  private static String validateServer(String server) {
-    if (server == null || server.isBlank()) {
-      throw new IllegalArgumentException("NATS server entries must not be empty");
-    }
-    String address = server.trim();
-    URI uri;
-    try {
-      uri = URI.create(address);
-    } catch (IllegalArgumentException invalidUri) {
-      // URI exceptions may contain inline credentials. Keep the diagnostic independent of input.
-      throw new IllegalArgumentException("Invalid NATS server URI");
-    }
-    boolean supportedScheme = "nats".equals(uri.getScheme()) || "tls".equals(uri.getScheme());
-    boolean hasHost = uri.getHost() != null;
-    boolean hasInlineCredentials = uri.getUserInfo() != null;
-    boolean hasQueryOrFragment = uri.getQuery() != null || uri.getFragment() != null;
-    boolean hasPath = uri.getPath() != null && !uri.getPath().isEmpty();
-    boolean validPort = uri.getPort() == -1 || (uri.getPort() >= 1 && uri.getPort() <= 65535);
-    if (!supportedScheme
-        || !hasHost
-        || hasInlineCredentials
-        || hasQueryOrFragment
-        || hasPath
-        || !validPort) {
-      throw new IllegalArgumentException(
-          "Use nats://host:port or tls://host:port; use separate credentials");
-    }
-    return address;
   }
 
   @Override

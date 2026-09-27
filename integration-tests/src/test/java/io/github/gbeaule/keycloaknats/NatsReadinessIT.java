@@ -4,13 +4,53 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import io.nats.client.Options;
 import java.util.function.Consumer;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.postgresql.ds.PGSimpleDataSource;
 import org.testcontainers.containers.GenericContainer;
+import org.testcontainers.containers.Network;
 
-/** Exercises the interval between Docker starting a container and NATS accepting connections. */
+/** Exercises authenticated publication and reconnects while NATS is still starting. */
 @SuppressWarnings("checkstyle:AbbreviationAsWordInName") // Maven Failsafe discovers the IT suffix.
 class NatsReadinessIT extends IntegrationSupport {
+  @Test
+  void publisherPreservesWhitespaceInAuthenticationTokens() throws Exception {
+    String token = " integration-token ";
+    network = Network.newNetwork();
+    postgres =
+        postgresContainer()
+            .withDatabaseName("keycloak")
+            .withUsername("keycloak")
+            .withPassword("integration-password")
+            .withNetwork(network)
+            .withNetworkAliases("postgres");
+    broker =
+        new GenericContainer<>(NATS_IMAGE)
+            .withNetwork(network)
+            .withNetworkAliases("nats")
+            .withExposedPorts(4222)
+            .withCommand("-js", "-sd", "/data", "--auth", token);
+    keycloak = keycloakContainer(true).withEnv("KND_TOKEN", token);
+    try {
+      postgres.start();
+      broker.start();
+      database = new PGSimpleDataSource();
+      database.setURL(postgres.getJdbcUrl());
+      database.setUser(postgres.getUsername());
+      database.setPassword(postgres.getPassword());
+      connectNats(options -> options.token(token.toCharArray()));
+      provision();
+      keycloak.start();
+      loginAdmin();
+      createUser();
+      drained();
+      assertEquals(1, messages());
+    } finally {
+      stopInfrastructure();
+    }
+  }
+
   @ParameterizedTest(name = "authenticated={0}")
   @ValueSource(booleans = {false, true})
   void reconnectWaitsForBrokerReadinessAndPreservesStoredMessages(boolean authenticated)
