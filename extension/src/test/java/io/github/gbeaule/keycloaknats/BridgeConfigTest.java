@@ -78,17 +78,29 @@ class BridgeConfigTest {
     assertFalse(config.toString().contains("private-token"));
   }
 
-  @Test
-  void backoffIsBoundedAndDoesNotOverflow() {
+  @ParameterizedTest
+  @CsvSource({
+    "-1,500,1000",
+    "0,500,1000",
+    "1,1000,2000",
+    "5,16000,32000",
+    "6,30000,60000",
+    "63,30000,60000",
+    "9223372036854775807,30000,60000"
+  })
+  void backoffGrowsPerAttemptAndSaturatesWithoutOverflow(
+      long attempts, long minimum, long maximum) {
     var config = BridgeConfig.from(Map.of());
-    for (long attempts : new long[] {0, 1, 5, 63, Long.MAX_VALUE}) {
-      for (int i = 0; i < 100; i++) {
-        long delay = RetryBackoff.delay(config, attempts);
-        assertTrue(delay >= 500 && delay <= 60000);
-        if (attempts >= 63) {
-          assertTrue(delay >= 30000);
-        }
-      }
+    for (int i = 0; i < 50; i++) {
+      long delay = RetryBackoff.delay(config, attempts);
+      assertTrue(delay >= minimum && delay <= maximum, "Unexpected retry delay: " + delay);
     }
+  }
+
+  @Test
+  void minimalRetryIntervalRemainsPositiveWithoutRequiringRandomVariation() {
+    var config = BridgeConfig.from(Map.of("retry-initial-ms", "1", "retry-max-ms", "1"));
+    assertEquals(1, RetryBackoff.delay(config, 0));
+    assertEquals(1, RetryBackoff.delay(config, Long.MAX_VALUE));
   }
 }

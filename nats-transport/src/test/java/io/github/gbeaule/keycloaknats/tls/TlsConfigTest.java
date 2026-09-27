@@ -3,23 +3,27 @@ package io.github.gbeaule.keycloaknats.tls;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
 import java.io.StringWriter;
 import java.math.BigInteger;
+import java.net.SocketException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.GeneralSecurityException;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.KeyStore;
+import java.security.Security;
 import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
 import java.security.spec.ECGenParameterSpec;
 import java.time.Instant;
 import java.util.Date;
+import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import javax.crypto.Cipher;
@@ -29,6 +33,7 @@ import javax.crypto.spec.PBEKeySpec;
 import javax.crypto.spec.PBEParameterSpec;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLException;
 import javax.net.ssl.SSLServerSocket;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.TrustManagerFactory;
@@ -76,6 +81,8 @@ class TlsConfigTest {
   void plaintextRequiresNoTlsConfiguration() {
     var config = TlsConfig.from(new String[] {"nats://localhost:4222"}, key -> null);
     assertFalse(config.enabled());
+    assertThrows(IllegalStateException.class, config::createContext);
+    assertEquals("TlsConfig[enabled=false, mutual=false]", config.toString());
   }
 
   @Test
@@ -83,6 +90,63 @@ class TlsConfigTest {
     var config = TlsConfig.from(new String[] {"tls://localhost:4222"}, key -> null);
     assertTrue(config.enabled());
     assertNotNull(config.createContext());
+    assertEquals("TlsConfig[enabled=true, mutual=false]", config.toString());
+  }
+
+  @Test
+  void mixedSeedsAreRejectedInBothOrdersBeforeReadingTlsFiles() {
+    for (String[] servers :
+        new String[][] {{"tls://first", "nats://second"}, {"nats://first", "tls://second"}}) {
+      var failure =
+          assertThrows(
+              IllegalArgumentException.class,
+              () ->
+                  TlsConfig.from(
+                      servers,
+                      key -> {
+                        throw new AssertionError("Mixed seed list must fail first");
+                      }));
+      assertEquals("Do not mix TLS and plaintext NATS servers", failure.getMessage());
+    }
+  }
+
+  @Test
+  void clientCredentialsMustBePairedAndTlsFilesCannotBeUsedWithPlaintext() {
+    for (boolean enabled : new boolean[] {false, true}) {
+      assertThrows(
+          IllegalArgumentException.class, () -> new TlsConfig(enabled, null, "secret-cert", null));
+      assertThrows(
+          IllegalArgumentException.class, () -> new TlsConfig(enabled, null, null, "secret-key"));
+    }
+    assertThrows(
+        IllegalArgumentException.class, () -> new TlsConfig(false, "secret-ca", null, null));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> new TlsConfig(false, null, "secret-cert", "secret-key"));
+  }
+
+  @Test
+  void filePathsAreNormalizedAndNeverPrinted() {
+    var config =
+        TlsConfig.from(
+            new String[] {" tls://first ", "tls://second"},
+            Map.of(
+                    "tls-ca-file",
+                    " ca.pem ",
+                    "tls-cert-file",
+                    " client.pem ",
+                    "tls-key-file",
+                    " secret.key ")
+                ::get);
+    assertTrue(config.enabled());
+    assertEquals("ca.pem", config.caFile());
+    assertEquals("client.pem", config.certificateFile());
+    assertEquals("secret.key", config.keyFile());
+    assertEquals("TlsConfig[enabled=true, mutual=true]", config.toString());
+    var blank = TlsConfig.from(new String[] {"tls://first"}, key -> " \t");
+    assertNull(blank.caFile());
+    assertNull(blank.certificateFile());
+    assertNull(blank.keyFile());
   }
 
   @ParameterizedTest
@@ -95,10 +159,12 @@ class TlsConfigTest {
                 ? new PemObject(label, identity.keys().getPrivate().getEncoded())
                 : identity.keys().getPrivate());
     assertTrue(key.contains("-----BEGIN " + label + "-----"));
-    SSLContext client = configuration(identity, key).createContext();
+    var providers = Security.getProviders();
+    SSLContext client = configuration(rsa, identity, key).createContext();
+    assertEquals(java.util.List.of(providers), java.util.List.of(Security.getProviders()));
     try (var server =
             (SSLServerSocket)
-                serverContext(identity).getServerSocketFactory().createServerSocket(0);
+                serverContext(rsa, identity).getServerSocketFactory().createServerSocket(0);
         var executor = Executors.newSingleThreadExecutor()) {
       server.setSoTimeout(5000);
       server.setNeedClientAuth(true);
@@ -111,7 +177,7 @@ class TlsConfigTest {
                   assertEquals(7, socket.getInputStream().read());
                   socket.getOutputStream().write(9);
                   socket.getOutputStream().flush();
-                  return socket.getSession().getPeerPrincipal();
+                  return socket.getSession().getPeerCertificates()[0];
                 }
               });
       try (var socket =
@@ -121,12 +187,9 @@ class TlsConfigTest {
         socket.getOutputStream().write(7);
         socket.getOutputStream().flush();
         assertEquals(9, socket.getInputStream().read());
-        assertEquals(
-            identity.certificate().getSubjectX500Principal(),
-            socket.getSession().getPeerPrincipal());
+        assertEquals(rsa.certificate(), socket.getSession().getPeerCertificates()[0]);
       }
-      assertEquals(
-          identity.certificate().getSubjectX500Principal(), accepted.get(5, TimeUnit.SECONDS));
+      assertEquals(identity.certificate(), accepted.get(5, TimeUnit.SECONDS));
     }
   }
 
@@ -143,22 +206,140 @@ class TlsConfigTest {
           case MULTIPLE -> valid + valid;
         };
     var config = configuration(rsa, key);
-    assertThrows(GeneralSecurityException.class, config::createContext);
+    var failure = assertThrows(GeneralSecurityException.class, config::createContext);
+    assertNull(failure.getCause(), "Parser errors must not expose key material through causes");
+    String reason =
+        switch (input) {
+          case MULTIPLE -> "Client key file must contain exactly one private key";
+          case MALFORMED -> "Cannot parse client PEM private key";
+          default ->
+              "Client key must be an unencrypted PKCS#8, RSA PKCS#1 or EC SEC1 PEM private key";
+        };
+    assertEquals(reason, failure.getMessage());
   }
 
   @Test
   void oversizedKeysAreRejectedBeforeParsing() throws Exception {
     var config = configuration(rsa, " ".repeat(1048577));
+    var failure = assertThrows(IOException.class, config::createContext);
+    assertEquals("TLS file exceeds 1 MiB", failure.getMessage());
+  }
+
+  @Test
+  void keyAtTheFileSizeLimitStillParsesAndLoads() throws Exception {
+    String key = pem(new PemObject("PRIVATE KEY", rsa.keys().getPrivate().getEncoded()));
+    assertNotNull(configuration(rsa, key + " ".repeat(1048576 - key.length())).createContext());
+  }
+
+  @Test
+  void emptyCertificateFilesFailClosed() throws Exception {
+    Path empty = directory.resolve("empty.pem");
+    Files.writeString(empty, "");
+    var config = new TlsConfig(true, empty.toString(), null, null);
+    var failure = assertThrows(GeneralSecurityException.class, config::createContext);
+    assertEquals("Certificate file is empty", failure.getMessage());
+  }
+
+  @Test
+  void missingCertificateFilesDoNotFallBackToSystemRoots() {
+    var config = new TlsConfig(true, directory.resolve("missing.pem").toString(), null, null);
     assertThrows(IOException.class, config::createContext);
   }
 
+  @Test
+  void privateCaBundleTrustsEveryConfiguredCertificate() throws Exception {
+    Path bundle = directory.resolve("ca.pem");
+    Files.writeString(bundle, pem(rsa.certificate()) + pem(ec.certificate()));
+    SSLContext client = new TlsConfig(true, bundle.toString(), null, null).createContext();
+    for (Identity serverIdentity : new Identity[] {rsa, ec}) {
+      try (var server =
+              (SSLServerSocket)
+                  serverContext(serverIdentity, rsa)
+                      .getServerSocketFactory()
+                      .createServerSocket(0);
+          var executor = Executors.newSingleThreadExecutor()) {
+        server.setSoTimeout(5000);
+        var received =
+            executor.submit(
+                () -> {
+                  try (var socket = (SSLSocket) server.accept()) {
+                    socket.setSoTimeout(5000);
+                    socket.startHandshake();
+                    int request = socket.getInputStream().read();
+                    socket.getOutputStream().write(9);
+                    socket.getOutputStream().flush();
+                    return request;
+                  }
+                });
+        try (var socket =
+            (SSLSocket)
+                client.getSocketFactory().createSocket("localhost", server.getLocalPort())) {
+          socket.setSoTimeout(5000);
+          socket.startHandshake();
+          assertEquals(serverIdentity.certificate(), socket.getSession().getPeerCertificates()[0]);
+          socket.getOutputStream().write(7);
+          socket.getOutputStream().flush();
+          assertEquals(9, socket.getInputStream().read());
+        }
+        assertEquals(7, received.get(5, TimeUnit.SECONDS));
+      }
+    }
+  }
+
+  @Test
+  void trustedCertificateForAnotherHostnameIsRejectedBeforeApplicationData() throws Exception {
+    SSLContext client = configuration(rsa, pem(rsa.keys().getPrivate())).createContext();
+    assertHandshakeRejected(client, "127.0.0.1");
+  }
+
+  @Test
+  void anUntrustedServerCertificateIsRejectedBeforeApplicationData() throws Exception {
+    SSLContext client = configuration(ec, pem(ec.keys().getPrivate())).createContext();
+    assertHandshakeRejected(client, "localhost");
+  }
+
+  private void assertHandshakeRejected(SSLContext client, String hostname) throws Exception {
+    try (var server =
+            (SSLServerSocket)
+                serverContext(rsa, rsa).getServerSocketFactory().createServerSocket(0);
+        var executor = Executors.newSingleThreadExecutor()) {
+      server.setSoTimeout(5000);
+      var received =
+          executor.submit(
+              () -> {
+                try (var socket = (SSLSocket) server.accept()) {
+                  socket.setSoTimeout(5000);
+                  socket.startHandshake();
+                  return socket.getInputStream().read();
+                } catch (SSLException | SocketException rejected) {
+                  // A rejected client handshake can close the transport before the server alert.
+                  return -1;
+                }
+              });
+      try (var socket =
+          (SSLSocket) client.getSocketFactory().createSocket(hostname, server.getLocalPort())) {
+        socket.setSoTimeout(5000);
+        assertThrows(SSLException.class, socket::startHandshake);
+      }
+      assertEquals(
+          -1,
+          received.get(5, TimeUnit.SECONDS),
+          "Untrusted peers must receive no application byte");
+    }
+  }
+
   private TlsConfig configuration(Identity identity, String key) throws Exception {
+    return configuration(identity, identity, key);
+  }
+
+  private TlsConfig configuration(Identity trust, Identity identity, String key) throws Exception {
+    Path roots = directory.resolve("roots.pem");
     Path certificate = directory.resolve("identity.pem");
     Path privateKey = directory.resolve("identity.key");
     Files.writeString(certificate, pem(identity.certificate()));
     Files.writeString(privateKey, key);
-    return new TlsConfig(
-        true, certificate.toString(), certificate.toString(), privateKey.toString());
+    Files.writeString(roots, pem(trust.certificate()));
+    return new TlsConfig(true, roots.toString(), certificate.toString(), privateKey.toString());
   }
 
   private static Identity identity(String algorithm) throws Exception {
@@ -200,7 +381,8 @@ class TlsConfigTest {
     return new Identity(keys, new JcaX509CertificateConverter().getCertificate(certificate));
   }
 
-  private static SSLContext serverContext(Identity identity) throws Exception {
+  private static SSLContext serverContext(Identity identity, Identity trustedClient)
+      throws Exception {
     // Independent JDK construction verifies that the PEM-loaded client can actually authenticate.
     KeyStore store = KeyStore.getInstance("PKCS12");
     store.load(null, null);
@@ -209,11 +391,13 @@ class TlsConfigTest {
         identity.keys().getPrivate(),
         new char[0],
         new Certificate[] {identity.certificate()});
-    store.setCertificateEntry("trusted", identity.certificate());
+    KeyStore trusted = KeyStore.getInstance("PKCS12");
+    trusted.load(null, null);
+    trusted.setCertificateEntry("trusted", trustedClient.certificate());
     var keys = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
     keys.init(store, new char[0]);
     var trusts = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-    trusts.init(store);
+    trusts.init(trusted);
     SSLContext context = SSLContext.getInstance("TLS");
     context.init(keys.getKeyManagers(), trusts.getTrustManagers(), null);
     return context;

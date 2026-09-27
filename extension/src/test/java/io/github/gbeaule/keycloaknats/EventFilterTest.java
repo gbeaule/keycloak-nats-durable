@@ -4,6 +4,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -26,7 +28,7 @@ class EventFilterTest {
     return policy.accepts(event, enabled, envelopes.adminSubject(event));
   }
 
-  static EventFilter parse(String json) throws Exception {
+  static EventFilter parse(String json) throws IOException {
     return EventFilter.parse(json.getBytes(StandardCharsets.UTF_8));
   }
 
@@ -92,6 +94,9 @@ class EventFilterTest {
     var admin = EventEnvelopeTest.admin(OperationType.CREATE);
     admin.setResourceTypeAsString("widget");
     assertTrue(accepts(policy, admin, null));
+    admin.setResourceTypeAsString("other-widget");
+    assertFalse(accepts(policy, admin, null));
+    assertFalse(policy.mayAccept(admin, envelopes.adminSubject(admin)));
   }
 
   @Test
@@ -159,7 +164,8 @@ class EventFilterTest {
       })
   void rejectsMalformedScope(String scope) {
     assertThrows(
-        Exception.class, () -> parse("{" + scope + ",\"userEvents\":[],\"adminEvents\":[]}"));
+        IllegalArgumentException.class,
+        () -> parse("{" + scope + ",\"userEvents\":[],\"adminEvents\":[]}"));
   }
 
   @ParameterizedTest
@@ -168,15 +174,12 @@ class EventFilterTest {
         "{}",
         "null",
         "[]",
-        "{",
         "{\"userEvents\":[]}",
         "{\"userEvents\":[],\"adminEvents\":[],\"typo\":true}",
         "{\"userEvents\":[\"LGIN\"],\"adminEvents\":[]}",
         "{\"userEvents\":[true],\"adminEvents\":[]}",
         "{\"userEvents\":[\"*\",\"LOGIN\"],\"adminEvents\":[]}",
         "{\"userEvents\":[\"LOGIN\",\"LOGIN\"],\"adminEvents\":[]}",
-        "{\"userEvents\":[],\"userEvents\":[\"*\"],\"adminEvents\":[]}",
-        "{\"userEvents\":[],\"adminEvents\":[]} {}",
         "{\"userEvents\":[],\"adminEvents\":[{\"resourceType\":\"USRE\",\"operations\":[\"*\"]}]}",
         "{\"userEvents\":[],\"adminEvents\":[{\"resourceType\":\"USER\","
             + "\"operations\":[\"DELETE\"],\"userEnabled\":false}]}",
@@ -184,6 +187,81 @@ class EventFilterTest {
             + "\"operations\":[\"UPDATE\"],\"userEnabled\":null}]}"
       })
   void rejectsAmbiguousOrMistypedPolicies(String json) {
-    assertThrows(Exception.class, () -> parse(json));
+    assertThrows(IllegalArgumentException.class, () -> parse(json));
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "{",
+        "{\"userEvents\":[],\"userEvents\":[\"*\"],\"adminEvents\":[]}",
+        "{\"userEvents\":[],\"adminEvents\":[]} {}"
+      })
+  void rejectsMalformedJsonDuplicateFieldsAndTrailingDocuments(String json) {
+    assertThrows(JsonProcessingException.class, () -> parse(json));
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "",
+        "true",
+        "{\"userEvents\":{},\"adminEvents\":[]}",
+        "{\"userEvents\":[],\"adminEvents\":{}}",
+        "{\"userEvents\":[],\"adminEvents\":[null]}",
+        "{\"userEvents\":[],\"adminEvents\":[{}]}",
+        "{\"userEvents\":[],\"adminEvents\":[{\"resourceType\":1,\"operations\":[\"*\"]}]}",
+        "{\"userEvents\":[],\"adminEvents\":[{\"resourceType\":\"USER\"}]}",
+        "{\"userEvents\":[],\"adminEvents\":[{\"resourceType\":\"custom:\","
+            + "\"operations\":[\"*\"]}]}",
+        "{\"userEvents\":[],\"adminEvents\":[{\"resourceType\":\"custom:*\","
+            + "\"operations\":[\"*\"]}]}"
+      })
+  void rejectsMissingOrWronglyTypedRuleFields(String json) {
+    assertThrows(IllegalArgumentException.class, () -> parse(json));
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "\"resourceType\":\"CLIENT\",\"operations\":[\"UPDATE\"]",
+        "\"resourceType\":\"USER\",\"operations\":[]",
+        "\"resourceType\":\"USER\",\"operations\":[\"*\"]"
+      })
+  void statePredicatesRequireExplicitDirectUserMutationOperations(String rule) {
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> parse("{\"userEvents\":[],\"adminEvents\":[{" + rule + ",\"userEnabled\":true}]}"));
+  }
+
+  @Test
+  void rulesAreAlternativesAndEmptyOperationListsNeverMatch() throws Exception {
+    var policy =
+        parse(
+            """
+            {"userEvents":[],"adminEvents":[
+              {"resourceType":"CLIENT","operations":["*"]},
+              {"resourceType":"USER","operations":[]},
+              {"resourceType":"USER","operations":["UPDATE"],"userEnabled":true}]}
+            """);
+    var event = EventEnvelopeTest.admin(OperationType.UPDATE);
+    assertTrue(policy.mayAccept(event, envelopes.adminSubject(event)));
+    assertTrue(accepts(policy, event, true));
+    assertFalse(accepts(policy, event, false));
+    assertFalse(accepts(policy, EventEnvelopeTest.admin(OperationType.DELETE), null));
+  }
+
+  @Test
+  void explicitScopeWildcardsAndSubjectAlternativesKeepTheirDifferentMeanings() throws Exception {
+    var policy =
+        parse(
+            """
+            {"realmIds":["*"],"clientIds":["*"],"outcomes":["*"],
+             "subjects":["*","keycloak.events.*.user.login"],"userEvents":["*"],"adminEvents":[]}
+            """);
+    var login = EventEnvelopeTest.login();
+    assertTrue(accepts(policy, login));
+    login.setType(EventType.LOGOUT);
+    assertFalse(accepts(policy, login));
   }
 }

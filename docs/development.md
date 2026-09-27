@@ -22,6 +22,10 @@ Tests are the source of truth for covered scenarios. Unit tests live in each mod
 packaged application. Integration runs fail when Docker is unavailable. Inspect JUnit reports under
 each module's `target` directory and container logs under `integration-tests/target`.
 
+Use `mvn -Pmutation -pl nats-transport,extension -am test-compile pitest:mutationCoverage` to check
+whether assertions detect deliberate code changes. Review survivors in each module's
+`target/pit-reports/`; coverage percentages alone do not establish test quality.
+
 Run checks appropriate to the change. Delivery, database, upgrade and dependency changes need the
 compatibility matrix; dependency and deployment image changes also need fresh security scans.
 The `performance` Maven profile runs the

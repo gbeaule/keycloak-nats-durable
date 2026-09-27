@@ -1,6 +1,10 @@
 package io.github.gbeaule.keycloaknats;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -8,7 +12,9 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -18,11 +24,19 @@ import io.nats.client.Connection;
 import io.nats.client.JetStream;
 import io.nats.client.JetStreamManagement;
 import io.nats.client.JetStreamOptions;
+import io.nats.client.NKey;
+import io.nats.client.Options;
 import io.nats.client.PublishOptions;
 import io.nats.client.api.PublishAck;
+import io.nats.client.api.StorageType;
 import io.nats.client.api.StreamInfo;
 import io.nats.client.impl.Headers;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.SecureRandom;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
@@ -30,8 +44,11 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.mockito.ArgumentCaptor;
 
 class JetStreamPublisherTest {
   private final BridgeConfig config = BridgeConfig.from(Map.of());
@@ -42,6 +59,8 @@ class JetStreamPublisherTest {
   private JetStreamManagement management;
   private JetStream jetStream;
   private JetStreamPublisher publisher;
+  private PublishAck ack;
+  @TempDir Path directory;
 
   @BeforeEach
   void setup() throws Exception {
@@ -56,13 +75,170 @@ class JetStreamPublisherTest {
     var stream = mock(StreamInfo.class);
     when(stream.getConfiguration()).thenReturn(StreamSafetyTest.safe().build());
     when(management.getStreamInfo(config.stream())).thenReturn(stream);
-    var ack = mock(PublishAck.class);
+    ack = mock(PublishAck.class);
     when(ack.getStream()).thenReturn(config.stream());
     when(ack.getSeqno()).thenReturn(1L);
     when(jetStream.publish(
             anyString(), any(Headers.class), any(byte[].class), any(PublishOptions.class)))
         .thenReturn(ack);
     publisher = new JetStreamPublisher(config, connector);
+  }
+
+  @Test
+  void validatesBeforePublishingOriginalBytesAndDeduplicationIdentityWithBoundedRequests()
+      throws Exception {
+    var original =
+        new OutboxEvent("persisted-id", "keycloak.events.realm.user.login", "{\"value\":\"é\"}", 0);
+    publisher.publish(original);
+    var headers = ArgumentCaptor.forClass(Headers.class);
+    var bytes = ArgumentCaptor.forClass(byte[].class);
+    var options = ArgumentCaptor.forClass(PublishOptions.class);
+    var order = inOrder(management, jetStream);
+    order.verify(management).getStreamInfo(config.stream());
+    order
+        .verify(jetStream)
+        .publish(eq(original.subject()), headers.capture(), bytes.capture(), options.capture());
+    assertArrayEquals(original.payload().getBytes(StandardCharsets.UTF_8), bytes.getValue());
+    assertEquals(
+        Map.of("Content-Type", List.of("application/cloudevents+json")),
+        headers.getValue().toMap());
+    assertEquals(original.id(), options.getValue().getMessageId());
+    assertEquals(config.stream(), options.getValue().getExpectedStream());
+    assertNull(options.getValue().getMessageTtl());
+    var request = ArgumentCaptor.forClass(JetStreamOptions.class);
+    verify(connection).jetStreamManagement(request.capture());
+    assertEquals(config.timeout(), request.getValue().getRequestTimeout());
+    verify(connection).jetStream(request.capture());
+    assertEquals(config.timeout(), request.getValue().getRequestTimeout());
+  }
+
+  @Test
+  void everyPublicationRevalidatesTheStreamAndUnsafeChangesPreventSending() throws Exception {
+    publisher.publish(event);
+    var changed = mock(StreamInfo.class);
+    when(changed.getConfiguration())
+        .thenReturn(StreamSafetyTest.safe().storageType(StorageType.Memory).build());
+    when(management.getStreamInfo(config.stream())).thenReturn(changed);
+    assertThrows(UnsafeStreamException.class, () -> publisher.publish(event));
+    verify(management, times(2)).getStreamInfo(config.stream());
+    verify(jetStream)
+        .publish(anyString(), any(Headers.class), any(byte[].class), any(PublishOptions.class));
+  }
+
+  @ParameterizedTest
+  @CsvSource({"OTHER,1", "KEYCLOAK_EVENTS,0", "KEYCLOAK_EVENTS,-1"})
+  void wrongDestinationOrInvalidSequenceCannotCountAsAcknowledgement(String stream, long sequence) {
+    when(ack.getStream()).thenReturn(stream);
+    when(ack.getSeqno()).thenReturn(sequence);
+    var failure = assertThrows(IOException.class, () -> publisher.publish(event));
+    assertEquals("Unexpected publish acknowledgement", failure.getMessage());
+  }
+
+  @Test
+  void duplicateAcknowledgementStillConfirmsThePersistedMessage() throws Exception {
+    when(ack.isDuplicate()).thenReturn(true);
+    publisher.publish(event);
+    var options = ArgumentCaptor.forClass(PublishOptions.class);
+    verify(jetStream)
+        .publish(eq(event.subject()), any(Headers.class), any(byte[].class), options.capture());
+    assertEquals(event.id(), options.getValue().getMessageId());
+  }
+
+  @Test
+  void reconnectingConnectionIsReusedWithoutBufferingAnotherPublication() throws Exception {
+    publisher.publish(event);
+    when(connection.getStatus()).thenReturn(Connection.Status.RECONNECTING);
+    var failure = assertThrows(IOException.class, () -> publisher.publish(event));
+    assertEquals("NATS is unavailable", failure.getMessage());
+    verify(connector).connect(any());
+    verify(management).getStreamInfo(config.stream());
+    verify(jetStream)
+        .publish(anyString(), any(Headers.class), any(byte[].class), any(PublishOptions.class));
+  }
+
+  @Test
+  void closedConnectionIsReplacedOnTheNextAttempt() throws Exception {
+    publisher.publish(event);
+    when(connection.getStatus()).thenReturn(Connection.Status.CLOSED);
+    var replacement = mock(Connection.class);
+    when(replacement.getStatus()).thenReturn(Connection.Status.CONNECTED);
+    when(replacement.jetStreamManagement(any())).thenReturn(management);
+    when(replacement.jetStream(any())).thenReturn(jetStream);
+    when(connector.connect(any())).thenReturn(replacement);
+    publisher.publish(event);
+    publisher.close();
+    verify(connector, times(2)).connect(any());
+    verify(replacement).close();
+    verify(connection, never()).close();
+  }
+
+  @Test
+  void connectionOptionsPreserveTokenAndDisableUnacknowledgedReconnectBuffering() throws Exception {
+    var settings = BridgeConfig.from(Map.of("token", " private-token ", "timeout-ms", "1234"));
+    try (var configured = new JetStreamPublisher(settings, connector)) {
+      configured.publish(event);
+      var options = ArgumentCaptor.forClass(Options.class);
+      verify(connector).connect(options.capture());
+      assertEquals(" private-token ", options.getValue().getToken());
+      assertEquals(settings.timeout(), options.getValue().getConnectionTimeout());
+      assertEquals(-1, options.getValue().getMaxReconnect());
+      assertEquals(0, options.getValue().getReconnectBufferSize());
+      assertEquals("keycloak-nats-durable", options.getValue().getConnectionName());
+      assertInstanceOf(NatsDiagnostics.class, options.getValue().getErrorListener());
+      assertInstanceOf(NatsDiagnostics.class, options.getValue().getConnectionListener());
+    }
+  }
+
+  @Test
+  void tlsUsesVerifiedContextWithoutClientCredentials() throws Exception {
+    var settings = BridgeConfig.from(Map.of("nats-url", "tls://broker:4222"));
+    try (var configured = new JetStreamPublisher(settings, connector)) {
+      configured.publish(event);
+      var options = ArgumentCaptor.forClass(Options.class);
+      verify(connector).connect(options.capture());
+      assertNotNull(options.getValue().getSslContext());
+      assertNull(options.getValue().getAuthHandler());
+    }
+  }
+
+  @Test
+  void credentialsFileProvidesTheJwtAndSignsWithItsPrivateKey() throws Exception {
+    NKey key = NKey.createUser(new SecureRandom());
+    Path credentials = directory.resolve("publisher.creds");
+    Files.writeString(
+        credentials,
+        "-----BEGIN NATS USER JWT-----\nunit-test-jwt\n------END NATS USER JWT------\n"
+            + "-----BEGIN USER NKEY SEED-----\n"
+            + new String(key.getSeed())
+            + "\n------END USER NKEY SEED------\n");
+    var settings = BridgeConfig.from(Map.of("credentials-file", credentials.toString()));
+    try (var configured = new JetStreamPublisher(settings, connector)) {
+      configured.publish(event);
+      var options = ArgumentCaptor.forClass(Options.class);
+      verify(connector).connect(options.capture());
+      var authentication = options.getValue().getAuthHandler();
+      assertNotNull(authentication);
+      assertEquals("unit-test-jwt", new String(authentication.getJWT()));
+      byte[] nonce = "server-challenge".getBytes(StandardCharsets.UTF_8);
+      assertTrue(key.verify(nonce, authentication.sign(nonce)));
+      assertNull(options.getValue().getToken());
+    } finally {
+      key.clear();
+    }
+  }
+
+  @Test
+  void invalidTlsTrustMaterialFailsBeforeConnectingWithoutLeakingParserDetails() throws Exception {
+    Path empty = directory.resolve("private-ca.pem");
+    Files.writeString(empty, "");
+    var settings =
+        BridgeConfig.from(Map.of("nats-url", "tls://broker:4222", "tls-ca-file", empty.toString()));
+    try (var configured = new JetStreamPublisher(settings, connector)) {
+      var failure = assertThrows(IOException.class, () -> configured.publish(event));
+      assertEquals("Cannot load verified NATS TLS configuration", failure.getMessage());
+      assertNull(failure.getCause());
+      verifyNoInteractions(connector, management, jetStream);
+    }
   }
 
   @Test
