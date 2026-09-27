@@ -1,128 +1,82 @@
-# Phase 1: delivery contracts and filter policy
+# Phase 1: publication policy and event contract
 
-Prerequisite: [index and agreed decisions](README.md). Outcome: one executable contract shared by
-capture, relay and consumer, with deterministic policy selection.
+Prerequisite: [feature boundary and decisions](README.md). Outcome: deterministic capture and
+publication-policy selection, plus ordering metadata on Keycloak-derived events.
 
 ## Read first
 
 - `extension/src/main/java/io/github/gbeaule/keycloaknats/EventFilter.java`
-- `extension/src/main/java/io/github/gbeaule/keycloaknats/CaptureScope.java`
-- `extension/src/main/java/io/github/gbeaule/keycloaknats/ReloadingEventFilter.java`
-- `extension/src/main/java/io/github/gbeaule/keycloaknats/EventEnvelope.java`
-- `schemas/event-v1.schema.json`, `schemas/keycloak-catalogue-26.7.4.json`, `config/events-*.json`
-- `consumer-example/src/main/java/io/github/gbeaule/keycloaknats/consumer/FailurePolicy.java`
-- Root and module POMs, including shading and `coverage/pom.xml`.
+- `CaptureScope.java`, `ReloadingEventFilter.java`, `EventEnvelope.java` in that package.
+- `schemas/event-v1.schema.json`, the Keycloak catalogue and `config/events-*.json`.
+- Existing filter, reload, envelope and schema tests.
 
 ## Work
 
-1. Introduce a small `event-contract` Maven module for shared wire metadata, resolved stage policies,
-   strict parsing and validation. It must not depend on Keycloak, JPA or consumer persistence. Use
-   the project's existing Jackson dependency; keep Keycloak enum matching in the extension. Wire
-   the module into the reactor, extension, consumer, coverage and packaged artifacts.
-2. Add a JSON schema for the filter file. Preserve existing capture-selection behavior and fields.
-   Add an optional `delivery.rules` array; capture selection still runs before delivery matching.
-   A delivery rule must never implicitly capture an otherwise excluded event.
-3. Compile capture selection and delivery rules into one immutable snapshot. Each listener callback
-   reads that snapshot once, including admin preselection and enabled-state matching. Invalid
-   startup files fail startup; invalid reloads retain the entire last valid snapshot.
-4. Resolve stage policies once per accepted event, with policy digest and rule ID. Persist the
-   result in later phases; relay and consumer must not reread the filter to reinterpret an event.
-5. Add the business delivery metadata and discard-notice schema defined in the index. Supply
-   serialization fixtures and shared round-trip validators for both. Revise the unreleased v1
-   contract in place; no old-envelope compatibility mode is needed.
-6. Extend fixtures and catalogue/schema tests to cover nested user attribution without changing
-   `userEnabled` into a transition or extending that observation to nested operations.
+1. Add an optional `delivery.rules` section and a JSON schema for the existing filter document.
+   Capture selection runs first. A delivery rule cannot capture an excluded event.
+2. Compile capture and delivery rules into one immutable snapshot. Each callback reads one snapshot,
+   including admin preselection and observed enabled-state matching. Invalid initial files fail
+   startup; invalid reloads retain the entire last valid snapshot.
+3. Resolve one internal publication policy per accepted event, with the filter-byte SHA-256 and a
+   rule ID. Persist those with the outbox in phase 2. Retrying never reinterprets current config.
+4. Add `data.ordering` to the unreleased event schema for confidently attributable user events:
+   an unambiguous `key` and a positive decimal-string `sequence`, backed by checked 64-bit storage.
+   Use `u.<base64url realm ID>.<base64url user ID>` for the key. Omit ordering for userless events.
+5. Preserve business subjects, CloudEvent identity and the existing event schema identifier. Update
+   JSON examples and validators. No discard schema, control subject or synthetic event type exists.
+6. Keep policy types in the extension. Do not add a shared consumer-policy module. Rule IDs,
+   failure limits, audit details and delivery decisions stay internal unless already needed by the
+   business-event contract; no receiver implements the publication policy.
 
 ## Rule semantics
 
-Rules have unique nonblank IDs, a `match` object and optional `outbox` and `consumer` stage policies.
-Evaluate in file order; the first matching rule supplies both stages. An omitted stage means retry
-forever. No matching rule, omitted `delivery`, or an empty rules array means retry forever in both
-stages. Do not merge several matching rules or infer specificity.
-
-`match.kind` is required and is `user` or `admin`. User rules require `eventTypes`; admin rules
-require `resourceType` and `operations`. Reuse existing enum/custom-resource/wildcard semantics.
-Optional realm, client, outcome and subject selectors use the existing scope semantics. Optional
-`userEnabled` has the existing direct-USER CREATE/UPDATE restriction and cannot match an error
-event. Reject fields belonging to the other kind, unknown fields, duplicate IDs/JSON keys,
-contradictory selectors and invalid types.
-
-Example configuration shape to encode in the schema and parser tests:
+Rules have unique nonblank IDs, a `match` object and required `policy`. First matching rule wins;
+no merge or inferred specificity. Omitted delivery rules or no match means retry indefinitely.
+User matches require `kind: user` and `eventTypes`; admin matches require `kind: admin`,
+`resourceType` and `operations`. Reuse current scope, wildcard and custom-resource semantics.
+`userEnabled` remains restricted to successful direct USER CREATE/UPDATE observations.
 
 ```json
 {
   "userEvents": ["*"],
-  "adminEvents": [{"resourceType": "*", "operations": ["*"]}],
+  "adminEvents": [{ "resourceType": "*", "operations": ["*"] }],
   "delivery": {
     "rules": [
       {
         "id": "short-lived-login",
-        "match": {"kind": "user", "eventTypes": ["LOGIN", "LOGIN_ERROR"]},
-        "outbox": {"action": "discard", "maxAgeSeconds": 300, "maxFailures": 20},
-        "consumer": {"action": "discard", "maxAgeSeconds": 900, "maxFailures": 5}
+        "match": { "kind": "user", "eventTypes": ["LOGIN", "LOGIN_ERROR"] },
+        "policy": {
+          "action": "discard",
+          "maxAgeSeconds": 300,
+          "maxFailures": 20
+        }
       }
     ]
   }
 }
 ```
 
-The numbers are illustrative, not recommended deployment limits. With this example, unmatched
-events, including user lifecycle admin events, retain the no-discard default.
+These thresholds are illustrative. Unmatched events retain the no-discard default. `retry` forbids
+thresholds; `discard` requires at least one. Positive integer age/failure limits combine with OR.
+Use one year and one million failures as initial validation bounds. Reject zero, overflow,
+unknown/duplicate fields, invalid selectors and contradictory combinations. Audit retention is a
+separate maintenance setting and may allow zero; do not confuse it with event expiry.
 
-`retry` forbids thresholds. `discard` requires at least one threshold. Thresholds are positive
-integers; zero, negatives, fractional numbers and overflow are invalid. Use the current one-year
-age and one-million-failure bounds as initial limits. Omission is the sole way to disable a
-threshold. Test equality at the boundary and the OR behavior when both thresholds are configured.
-
-Expiry uses `now >= capturedAt + maxAgeSeconds`, with checked arithmetic. Capture obtains time from
-the source database; consumer comparisons use its database time. Broker publication does not reset
-age. Operations require reasonably synchronized database clocks; this is not a claim of perfect
-wall-clock agreement. Expiry is checked before starting an attempt and after a confirmed failure;
-it does not undo effects or cancel an already-running successful transaction solely due to age.
-
-## Failure-count contract
-
-| Stage | Count toward `maxFailures` | Do not count |
-| --- | --- | --- |
-| Outbox | Completed calls to publish an original event that fail to return a valid expected-stream ACK, including transport failure | Database failure/ambiguous commit, worker cancellation, retries of a discard notice, process crashes with no committed count |
-| Consumer | Deliberate `HANDLER_REJECTED` failures after confirmed rollback of handler work | Broker redelivery count, receipt failures, parser/schema/identity conflicts, SQL failures, timeouts, cancellation, unknown exceptions or ambiguous commits |
-
-Consumer handlers opt into a deterministic rejection using the existing rejection exception or a
-narrow replacement. Other failures retry; they may still become eligible for an explicitly
-configured age discard after database state is reconciled. Protecting database failures from the
-failure counter does not pause the age clock. Only a successful audit transaction can discard.
-
-## Notice and identity contract
-
-A notice refers to the original source/ID and SHA-256 of its serialized bytes. It copies the
-original delivery metadata and includes a bounded reason code, decision time and committed failure
-count. Its own source remains the realm source, but its UUID, CloudEvent type and schema are
-distinct. Retries of either representation must preserve its own UUID, subject and bytes.
-
-Allow only producer `EXPIRED` or `FAILURE_LIMIT` notices authorized by the original outbox policy.
-Validate the age/count evidence against that policy. Consumer-local discard does not publish a
-global notice and cannot affect another application's cursor.
-
-Consumer business filters select original subjects. A notice is control data, never a business
-handler input, and must bypass those filters. Consumers reject conflicting references instead of
-choosing arbitrary bytes for an identity or sequence.
+Expiry is `databaseNow >= capturedAt + maxAgeSeconds` with checked arithmetic. Count completed
+original publication calls that fail to return a valid expected-stream ACK, including transport
+failures. Do not count cancellation, database failures, uncertain database commits or hypothetical
+attempts lost in a crash. Receiving-application failures are unrelated.
 
 ## Acceptance and validation
 
-- Parser and JSON schema agree on accepted/rejected examples; unknown fields never silently alter
-  a retain policy into discard.
-- Overlapping rules prove first-match behavior; scope, wildcard, custom resource, missing optional
-  identity and `userEnabled` cases have focused coverage.
-- Concurrent reload tests demonstrate one capture uses one snapshot. Failed reloads retain both
-  capture and delivery behavior.
-- Schema fixtures cover original events, notices, large valid sequence strings, overflow, invalid
-  sequence encodings and original/notice reference mismatch.
-- Existing filter files remain valid and resolve both stages to retry.
-- Run `python scripts/validate.py`. Inspect packaged dependencies so the shared module does not
-  accidentally package Keycloak APIs or duplicate a different Jackson version.
+- Schema and parser agree on accepted/rejected fixtures, rule precedence and safe defaults.
+- Existing filter files remain valid and never introduce implicit discard.
+- Concurrent reloads cannot mix capture rules from one snapshot with policy from another.
+- Sequence encodings reject overflow and malformed values; events without a user omit ordering.
+- All emitted message shapes remain derived from actual captured Keycloak events.
+- Run `python scripts/validate.py`. Phase 2 wires the new metadata to real capture transactions.
 
 ## Handoff
 
-Provide the schema/type locations, example policy, policy-resolution API, notice fixtures and
-validation results to phases 2–5. Production event emission remains phase 2's responsibility;
-isolated contract fixtures must not be represented as a working ordering guarantee.
+Provide parser/schema locations, resolved-policy API, ordering fixtures and validation results.
+No consumer API, mandatory subscriber filter or receiver processing feature is part of this phase.

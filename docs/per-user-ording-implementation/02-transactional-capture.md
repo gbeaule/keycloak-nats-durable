@@ -1,7 +1,8 @@
 # Phase 2: transactional per-user capture
 
-Prerequisite: [phase 1](01-contracts-and-policy.md). Outcome: every accepted event has a durable
-ordering key, consecutive sequence and frozen delivery policy in the same transaction as capture.
+Prerequisite: [phase 1](01-contracts-and-policy.md). Outcome: attributable user events have durable
+ordering metadata; every accepted event has a frozen internal publication policy in its capture
+transaction. This is source persistence, not a downstream processing protocol.
 
 ## Read first
 
@@ -21,15 +22,15 @@ ordering key, consecutive sequence and frozen delivery policy in the same transa
    it in the active Keycloak transaction. The row lock is retained through commit or rollback.
    Use a transactional row update/upsert, not `nextval`, UUID order, timestamps or `MAX + 1` over
    pending outbox rows.
-3. Obtain database capture time and resolved delivery metadata, then serialize the final event
+3. Obtain database capture time and resolved ordering metadata, then serialize the final event
    once. Persist event, sequence/counter update and policy together; flush failures must continue
    marking the Keycloak transaction rollback-only.
-4. Extend the outbox row with queryable ordering scope/key/sequence, capture time, resolved policy
-   fields, policy/rule identities and publication state. Add indexes and uniqueness constraints
-   needed by phase 3. Keep original immutable wire bytes separate from mutable retry/state fields.
+4. Extend the outbox row with nullable user ordering key/sequence, capture time, resolved internal
+   policy, rule/digest, retry fields and the sticky publication-intent flag required by phase 4.
+   Keep wire bytes separate from policy/diagnostic fields. Add phase 3's indexes and constraints.
 5. Rework the initial Liquibase schema and entity registration for fresh installations. Add the
-   discard audit and notice storage planned for phase 3, or coordinate that exact shape with its
-   implementation. Remove tests that assert obsolete pre-release checksums; replace them with
+   local discard-audit storage planned for phase 4. No notice state or notice table exists.
+   Remove tests that assert obsolete pre-release checksums; replace them with
    fresh-schema structure and behavior checks.
 6. Update serialization examples, schema tests and fresh fixtures. Preserve synchronous-commit and
    after-commit wakeup behavior already protected by integration tests.
@@ -45,7 +46,7 @@ direct-user state observation accidentally.
 | User event with a nonblank `userId` | That user in the event's realm. |
 | Direct USER admin event at `users/{id}` | The path's target user. |
 | Recognized nested user admin event | The user segment of a tested Keycloak user-resource path. |
-| Missing, ambiguous or unrelated identity | Singleton event key with sequence 1. |
+| Missing, ambiguous or unrelated identity | No per-user sequence/counter; independent outbox row. |
 
 Inspect supported Keycloak resources and actual emitted paths before defining the nested-path
 allowlist. Cover role mappings, group membership, credentials and consent where the supported
@@ -56,19 +57,20 @@ An event may have an error and still have a valid affected-user identity.
 
 Do not look up a deleted user to obtain its ordering key. The realm comes from the affected event,
 not admin authentication details. Populate nested admin `data.userId` with the recognized affected
-user; preserve `actorUserId` separately. Unrecognized/custom forms remain singleton events until
+user; preserve `actorUserId` separately. Unrecognized/custom forms remain independent events until
 their attribution has explicit tests.
 
 ## Database invariants
 
-- Sequence starts at 1 and increments once per accepted event. A rolled-back transaction leaves
+- A user's sequence starts at 1 and increments once per accepted attributable event. A rollback leaves
   neither its events nor consumed sequence values. Several events in one transaction are ordered
   by callback order.
 - Counter state survives an empty outbox and user deletion. Do not use a cascading foreign key to
   Keycloak's user row, and do not reset counters when the relay drains.
 - A higher sequence cannot commit while a transaction holding a lower sequence remains open.
 - Realm/user tuple uniqueness and `(orderingKey, sequence)` outbox uniqueness are database-enforced.
-  Check identifier lengths and sequence overflow explicitly; never truncate or wrap.
+  Permit absent ordering on independent events. Check identifier lengths and sequence overflow
+  explicitly; never truncate or wrap. Local discard may leave gaps in the published sequence.
 - Capture and publication ownership use separate rows. A relay may not lock/update the capture
   counter during a network call.
 - Use Keycloak's managed connection and transaction. Native SQL, if needed, must respect custom
@@ -107,5 +109,5 @@ with actual test names. Phase 7 adds the new lock tests to the full compatibilit
 ## Handoff
 
 Provide the counter and outbox entities, actual constraints/indexes, attribution rules and capture
-test results. State the exact database lock order for phase 3. Ordering at capture alone does not
-yet establish ordered publication or consumer effects.
+test results. State the exact database lock order for phase 3. Capture ordering still requires
+relay coordination; downstream application effects are outside this implementation.
