@@ -1,0 +1,1 @@
+When writing documentation, please write in a concise and clear style. The source of truth for the implementation should be the code itself, not documentation. Documentation should remain for higher-level abstractions such as the architecture of the solution.

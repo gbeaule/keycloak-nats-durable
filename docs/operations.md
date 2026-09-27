@@ -1,97 +1,143 @@
-# Operating the bridge
+# Operations
 
-## Production configuration
+## Installation
 
-Use PostgreSQL with durable commits and a recovery/backup plan, plus a NATS cluster with at least three stream replicas on independent durable storage. Use `sync_interval: always` where power-loss durability is required. Do not infer that a stream replica count proves independent disks or failure domains. The integration suite exercises a three-node NATS cluster with mutual TLS, leader failure and majority loss; restore procedures, database failover and capacity still need testing in the target infrastructure. See [cluster and certificate configuration](configuration.md).
+The provider uses the PostgreSQL database already configured for Keycloak. Installing it does not
+require another database or pool. Use the [compatibility process](development.md#compatibility) for
+the intended Keycloak and database versions; demo image versions are not installation requirements.
 
-Keep PostgreSQL `fsync` enabled and `synchronous_commit` set for durable commits; synchronous replication settings must also match the desired database failover guarantee. Keycloak has an [asynchronous-commit optimization for ephemeral data](https://www.keycloak.org/server/db#_asynchronous_commits). The outbox entity does not opt into it, and an integration test checks the effective setting at commit using a deferred trigger. Do not change the entity to allow asynchronous commits. Disabling the optimization with `--spi-connections-jpa--quarkus--async-commit=false` is an additional deployment option; it does not fix an unsafe server/database default of `synchronous_commit=off`.
+1. Back up the Keycloak database. Install the built provider JAR in `$KEYCLOAK_HOME/providers/` on
+   every node, then run `kc.sh build --db=postgres`.
+2. Provision the JetStream stream and durable consumers with an administrative identity. The
+   example's [provision command](../consumer-example/src/main/java/io/github/gbeaule/keycloaknats/consumer/ConsumerMain.java)
+   creates a WorkQueue setup. Independent applications needing the same events require Limits
+   retention and separate durables. Provisioning does not migrate existing resource policies.
+3. Configure the provider's NATS destination and credentials, then restart Keycloak. Its
+   [Liquibase migration](../extension/src/main/resources/META-INF/nats-outbox-changelog.xml) owns the
+   outbox schema; allow the required DDL through your deployment's migration process.
+4. Add `nats-durable` to each required realm's event listeners, preserving other listeners.
+   [The demo realm](../deploy/realm.json) shows the configuration. Saving Keycloak events and including
+   admin representations are not prerequisites.
+5. Exercise an account operation and verify its downstream effect. Monitor delivery separately from
+   Keycloak readiness.
 
-TLS is optional: choose `nats://` for plaintext or `tls://` for verified TLS. Use TLS when the deployment requires transport encryption, and configure realm-appropriate NATS permissions independently. The Keycloak publisher needs publish access to its event subjects and the configured stream-info API, and subscribe access to its request reply inbox. It needs no stream/consumer create, update, purge or delete permission. Provision resources with a separate administrative identity. Consumers need their consumer-info, pull-next and acknowledgement subjects plus their reply inboxes. Do not allow unrelated publishers to reuse event IDs. Credentials and payloads are not intentionally logged by this provider.
+All nodes sharing an outbox must use the same provider version, NATS account, stream and subject
+prefix. Configure Keycloak clustering independently. Drain pending work before removing the provider;
+changing destinations or routing while a backlog exists requires an explicit migration plan.
 
-The sample consumer requires explicit migrations by default; Compose opts into automatic DDL for the
-demo. Use a migration identity to provision production tables. Each logical consumer must share its
-inbox across worker replicas. Do not clear inbox rows as a restart procedure. See the
-[consumer settings and recovery commands](consumer.md) for deadlines, progress ACKs and monitoring.
+## Configuration sources
 
-## Monitoring
+Exact names, defaults and validation rules belong to these files:
 
-Poll the outbox independently of Keycloak readiness. Alert on queue growth, oldest event age, repeated failures, database free space, NATS storage free space, lost quorum, disconnected clients, consumer pending messages and redeliveries. Store metrics in your monitoring system and set thresholds from the application's delivery latency requirement.
+| Concern | Source |
+| --- | --- |
+| Provider settings and Keycloak SPI precedence | [BridgeConfig](../extension/src/main/java/io/github/gbeaule/keycloaknats/BridgeConfig.java) |
+| Capture policy and reload behavior | [EventFilter](../extension/src/main/java/io/github/gbeaule/keycloaknats/EventFilter.java), [CaptureScope](../extension/src/main/java/io/github/gbeaule/keycloaknats/CaptureScope.java) and [ReloadingEventFilter](../extension/src/main/java/io/github/gbeaule/keycloaknats/ReloadingEventFilter.java) |
+| TLS | [TlsConfig](../nats-transport/src/main/java/io/github/gbeaule/keycloaknats/tls/TlsConfig.java) |
+| Accepted stream configuration | [StreamPolicy](../nats-transport/src/main/java/io/github/gbeaule/keycloaknats/jetstream/StreamPolicy.java) |
+| Example consumer, provisioner and collector | [ConsumerConfig](../consumer-example/src/main/java/io/github/gbeaule/keycloaknats/consumer/ConsumerConfig.java) and [command entry point](../consumer-example/src/main/java/io/github/gbeaule/keycloaknats/consumer/ConsumerMain.java) |
+| Local deployment wiring | [Compose](../compose.yaml) and [deployment files](../deploy) |
 
-The packaged [read-only collector and example alert rules](monitoring.md) provide JSON/Prometheus
-output, optional realm/topic scopes, bounded queries and owner-defined exit thresholds. They do not
-change admission policy, delete events or control Keycloak readiness.
+Environment names use the `KND_` prefix. Matching Keycloak provider keys, such as `nats-url`,
+take precedence over environment values.
 
-```sql
-SELECT count(*) AS pending,
-       COALESCE(EXTRACT(EPOCH FROM clock_timestamp()) * 1000 - min(created_at), 0) AS oldest_age_ms,
-       max(attempts) AS largest_retry_count
-FROM kc_nats_outbox;
+For an encrypted NATS connection, configure `KND_NATS_URL` with reachable `tls://` seeds and mount
+credentials through `KND_CREDENTIALS_FILE`. Use `KND_TLS_CA_FILE` for a private CA; mutual TLS also
+uses the paired `KND_TLS_CERT_FILE` and `KND_TLS_KEY_FILE`. Certificates must cover seed and discovered
+server names. Plaintext connections use `nats://`; mixed modes are rejected. Rotate certificate and
+credential bundles, then roll clients to load them and verify delivery before revoking old identities.
 
-SELECT last_error, count(*) AS pending, max(attempts) AS largest_retry_count
-FROM kc_nats_outbox GROUP BY last_error;
+Leave `KND_FILTER_FILE` unset to capture all events reaching the listener, or mount a deployment-owned
+policy directory and point it to the chosen file. Start from the optional [all-events](../config/events-all.json),
+[disabled-user](../config/events-disabled-only.json) or [scoped](../config/events-scoped.json) example.
+Replace placeholder realm IDs; these files are not packaged or loaded automatically.
 
-SELECT id, created_at, attempts, next_attempt_at, last_error
-FROM kc_nats_outbox ORDER BY created_at LIMIT 100;
-```
+Replace policy files atomically within the mounted directory. Invalid initial policies fail startup;
+invalid reloads retain the last valid policy. Deleting a configured file does not restore capture-all.
+Policy reloads affect future capture and are eventually consistent across nodes. Other settings
+require a restart.
 
-`LAST_ERROR` contains a failure category, not raw server text or event contents. Publish failures log on attempt 1 and powers of two. Transaction failures log separately and leave data recoverable. An empty outbox alone does not mean consumers are caught up; inspect stream and durable-consumer state too. The example exposes NATS monitoring on loopback port 8222; production should restrict it to the monitoring network.
+## Storage and access
 
-The `io.github.gbeaule.keycloaknats.NatsDiagnostics` logger reports connection transitions, authentication/permission failures, exceptions, slow consumers, discarded messages and socket write timeouts. Relay warnings include the retry time, event ID, controlled stream-validation reason or JetStream numeric status/API code. Exception cause categories are retained; raw remote exception text, URLs and payloads are not logged because they can contain credentials or injected lines. For a generic `server_error`, correlate with NATS server logs. An unsafe-stream warning now explains the failed rule (for example `DiscardNew is required`).
+Use durable PostgreSQL commits and replicated JetStream File storage across independent failure
+domains. Keep PostgreSQL `fsync` and durable `synchronous_commit` settings, and align replication with
+the required failover guarantee. Configure NATS disk synchronization for the required power-loss
+guarantee. Test the actual storage and HA topology; replica counts alone cannot establish durability.
 
-During sustained idle periods the scan delay grows to `KND_IDLE_POLL_MAX_MS`; a local commit wakes the relay sooner. Full batches drain without an extra polling delay. Lower the idle maximum if cross-node crash recovery needs tighter latency; tune it with database load measurements. A database connection is held during each synchronous publish attempt, not while the worker sleeps.
+Separate provisioning, publisher, consumer and monitoring identities. The publisher needs event
+publication, stream-info access and its reply inbox, without stream administration rights.
+Consumers need their durable's information, pull and ACK permissions. A shared server token does not
+establish per-user authorization. Restrict monitoring endpoints and protect event identifiers and
+recovery copies as application data.
 
-The outbox is intentionally unbounded: an extended outage must consume database capacity or reject new operations. When capture cannot be persisted, the request fails rather than committing a missing event. Size the database for the expected outage window, measure row/index overhead, and use alerts before free space runs out. Adjust `KND_MAX_PAYLOAD_BYTES` and the broker/stream maximum message size together, allowing room for headers.
+The example consumer's schema belongs to
+[consumer.sql](../consumer-example/src/main/resources/db/consumer.sql). Run its `migrate` command with
+a migration identity before starting restricted workers; automatic migration is opt-in for the demo.
+Preserve inbox state across restarts.
 
-Use a [capture policy](configuration.md#choose-events-before-storing-them) to avoid storing unwanted events. Confirmed publications are removed immediately; retries update only bounded metadata. The migration tunes PostgreSQL autovacuum for the outbox and TOAST storage. Monitor dead tuples, relation sizes and blocked vacuum alongside free space; see [database lifecycle and retention](database.md). Pending rows and the consumer inbox must not be trimmed by age as a capacity workaround.
+## Monitoring and capacity
 
-## Recovery
+Monitor oldest pending age and queue growth across the outbox, stream and consumers. Include database
+and broker disk headroom, replication health, pool pressure, redeliveries, quarantine and stalled
+processing. An empty outbox proves publication, not completion of downstream effects. Use a canary
+account operation to measure end-to-end delivery.
 
-| Symptom | Action |
-|---|---|
-| NATS absent at boot or disconnected | Restore NATS/network/authentication; the relay retries automatically. Keycloak can start and accumulate events. |
-| Unsafe/missing stream | Provision or repair the intended stream. Verify File storage, replica count, exact subject prefix, DiscardNew, no expiry, supported retention and publish ACKs. No backlog rows need to be recreated. |
-| Stream full | Restore/scale consumers or increase capacity. WorkQueue ACKs free space. Do not purge unprocessed messages. |
-| Poison event or schema mismatch | Fix the consumer/publisher configuration and retry the same ID. Events are not silently discarded after N attempts. |
-| Consumer has reached a configured MaxDeliver | This is a misconfiguration for indefinite retries; repair it and arrange redelivery. The shipped consumer uses unlimited MaxDeliver. |
-| Keycloak process dies during publish | Restart any correctly configured node against the same database. Lock recovery and the saved ID handle retry. |
-| Inbox ID has different payload | Investigate publisher identity reuse or data corruption. The consumer refuses to treat different content as a processed duplicate. |
-| Database unavailable | Restore it; Keycloak account changes cannot safely proceed without the shared transaction. |
+The packaged [OutboxReport](../consumer-example/src/main/java/io/github/gbeaule/keycloaknats/consumer/OutboxReport.java)
+collector emits JSON or Prometheus output using a read-only database identity. It reads backlog
+metadata without payloads. Its settings live in `ConsumerConfig`; run its main class with the consumer
+JAR on the classpath and `json` or `prometheus` as the argument. Combine it with the example
+[consumer metrics](../consumer-example/src/main/java/io/github/gbeaule/keycloaknats/consumer/ConsumerMonitor.java)
+and adapt the [alert rules](../deploy/prometheus-rules.yml) to your delivery objective. Alert on failed
+or stale collection as well as backlog thresholds.
 
-Retry remains the default. The example consumer provides an opt-in, subject-scoped quarantine or
-discard policy, with a committed recovery copy or discard audit before ACK. It also supports explicit
-age-based load shedding, disabled by default. See [consumer recovery](consumer.md#retry-quarantine-and-explicit-loss)
-for the settings and replay command. Database outages and timeouts remain retryable. An ACK, TERM,
-purge, stream/consumer deletion, TTL or manual outbox deletion can abandon work; do not use those as
-routine error handling.
+Budget outage storage from accepted event rate × outage duration × measured storage per event,
+including indexes, WAL, replication and vacuum headroom. Recovery requires sustained delivery and
+processing rates above ongoing capture. More relay workers consume more database connections during
+broker requests; measure Keycloak request latency and pool pressure before increasing concurrency.
+Use the [benchmark](../integration-tests/src/test/java/io/github/gbeaule/keycloaknats/ThroughputBenchmark.java)
+on representative infrastructure rather than adopting workstation measurements.
 
-Restoring the Keycloak database to an older snapshot may replay published events; restoring a consumer database can also remove inbox entries. Coordinate backup recovery across the pipeline and downstream effects. The system cannot undo data lost by restoring durable stores to mutually inconsistent points in time.
+Confirmed publication deletes outbox rows; ordinary vacuum makes their space reusable. Pending events
+have no expiry. Expand capacity, narrow future capture deliberately, or stop admitting relevant writes
+before the shared database fills. Purging pending events or aging out inbox identities sacrifices
+delivery guarantees.
 
-## Deployment and upgrades
+## Consumer recovery
 
-Run the [production startup and database recovery drills](recovery-drills.md) and the
-[throughput benchmark](performance.md) before selecting deployment limits. The isolated reference
-tests do not replace acceptance testing of the actual ingress, HA manager and storage topology.
+Restore broker, network or credential availability to resume automatic outbox retries. Repair unsafe
+stream settings without deleting backlog. If a stream fills, recover consumers or add capacity.
+Preserve original IDs and payloads when investigating schema failures or conflicting duplicate IDs.
 
-Keep the JAR and configuration consistent across every Keycloak node. Liquibase adds its table on startup; it never cascades pending-event deletion with realm or user deletion. Test schema migrations on a backup, and drain pending data before any destructive downgrade or provider removal.
+The example retries failed deliveries by default. Its
+[failure policy](../consumer-example/src/main/java/io/github/gbeaule/keycloaknats/consumer/FailurePolicy.java)
+allows explicitly scoped quarantine or discard, including opt-in age shedding. Database failures,
+timeouts and identity conflicts remain retryable. A discard audit cannot recover a discarded payload.
 
-The stream prefix and name are part of the deployment contract. Existing outbox rows retain their
-original subject; changing these settings mid-backlog requires an explicit migration/replay plan.
-`KND_RELAY_WORKERS` defaults to 1 and accepts 1–16 workers per Keycloak node. Each has an independent
-NATS connection and uses SKIP LOCKED claims against the shared outbox. Each active worker holds one
-database connection while waiting for bounded broker requests, so reserve database pool headroom for
-Keycloak requests. Increase workers only after measuring throughput, login/admin latency and pool
-pressure. Batch size controls scheduling; worker count controls publication concurrency. Parallelism
-does not introduce an ordering guarantee.
+Use the example's `quarantine-list` and `quarantine-replay` commands with the original consumer
+namespace and database after fixing the processing issue. Replay preserves identity and may remain
+pending until the broker deduplication window passes. Keep pending recovery copies and inbox history;
+stream recreation or namespace changes need a recovery plan. Command syntax lives in
+[ConsumerMain](../consumer-example/src/main/java/io/github/gbeaule/keycloaknats/consumer/ConsumerMain.java).
 
-The demo and full-test default is PostgreSQL 18.6. Supported existing PostgreSQL 14–18 deployments
-can keep their major version; see [compatibility](compatibility.md). Compose and the default test
-image use version tags. Moving a PostgreSQL 17 volume to 18 requires an
-explicit [major-version migration](postgres-upgrade.md); changing an image tag is not a data upgrade.
+## Upgrades and coordinated restore
 
-The broker baseline is NATS 2.15.0. For an existing 2.12.x installation, rehearse the intermediate
-upgrade to at least 2.14.7 before 2.15, following the [upstream upgrade guide](https://docs.nats.io/release-notes/upgrade-to-2.15).
-It changes cluster metadata and storage feature defaults; a direct downgrade to 2.12 is not a rollback
-plan. Preserve verified backups and avoid stream/consumer moves or scaling while cluster versions are
-mixed. The reference tests start fresh clusters; they do not prove an existing broker's upgrade path.
+Test provider and schema upgrades on a restored database with pending events. PostgreSQL major
+upgrades require a rehearsed database migration into appropriate storage; changing an image tag does
+not upgrade an existing data volume. Rehearse broker upgrades against existing stream and consumer
+state as well. Fresh-container tests do not establish a production upgrade path.
 
-The supplied demo uses a single broker and development Keycloak mode. Its credentials, network settings and one-replica override are not production defaults. For multiple independent consuming applications, explicitly provision a Limits stream and independent durable names, and prune only history processed by all required consumers.
+Back up and recover Keycloak/outbox, JetStream, consumer inbox and business effects at a coordinated
+boundary. Restoring only the consumer database can erase an effect after WorkQueue retention has
+removed the broker copy. Restoring an older outbox can replay events or encounter newer broker
+deduplication state. Restarting workers cannot repair inconsistent recovery points.
+
+For a restore rehearsal, quiesce writers, relays and consumers; record pending identities and take
+verified backups of every store. Restore into isolated storage, check account/outbox consistency and
+consumer deduplication, then account for pending work and verify a canary before reopening traffic.
+Preserve the original storage until acceptance completes.
+
+The [production startup tests](../integration-tests/src/test/java/io/github/gbeaule/keycloaknats/ProductionModeIT.java)
+and [database recovery tests](../integration-tests/src/test/java/io/github/gbeaule/keycloaknats/PostgresRecoveryIT.java)
+provide executable reference scenarios. Repeat equivalent drills using the deployment's actual
+ingress, credential rotation, backups and HA manager, including fencing the old database primary.
+Record recovery time, data loss and restored redundancy.
