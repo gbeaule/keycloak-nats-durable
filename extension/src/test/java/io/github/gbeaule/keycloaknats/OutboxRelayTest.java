@@ -1,6 +1,8 @@
 package io.github.gbeaule.keycloaknats;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.any;
@@ -22,6 +24,8 @@ import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.logging.Level;
+import java.util.logging.SimpleFormatter;
 import org.hibernate.Timeouts;
 import org.hibernate.jpa.SpecHints;
 import org.junit.jupiter.api.BeforeEach;
@@ -78,7 +82,7 @@ class OutboxRelayTest {
   void interruptedPublishRetainsRowAndInterruptFlag() throws Exception {
     doThrow(new InterruptedException()).when(publisher).publish(row);
     try {
-      relay.run();
+      assertEquals(0, relay.runBatch());
       assertTrue(Thread.currentThread().isInterrupted());
       verify(em, never()).remove(any());
       assertEquals(0, row.attempts());
@@ -86,6 +90,29 @@ class OutboxRelayTest {
     } finally {
       Thread.interrupted();
     }
+  }
+
+  @Test
+  void sustainedFailuresLogAtPowersOfTwoWithoutExposingRemoteText() throws Exception {
+    when(query.getResultList()).thenReturn(List.of(row));
+    doThrow(new IOException("private-server-message")).when(publisher).publish(row);
+    try (var logs = new LogCapture(OutboxRelay.class)) {
+      for (int attempt = 1; attempt <= 9; attempt++) {
+        assertEquals(0, relay.runBatch());
+      }
+      var records = logs.records();
+      assertEquals(4, records.size());
+      var formatter = new SimpleFormatter();
+      for (int i = 0; i < records.size(); i++) {
+        var record = records.get(i);
+        assertEquals(Level.WARNING, record.getLevel());
+        assertTrue(formatter.format(record).contains(" attempts=" + (1L << i) + " retryAt="));
+        assertFalse(formatter.format(record).contains("private-server-message"));
+        assertNull(record.getThrown());
+      }
+    }
+    assertEquals(9, row.attempts());
+    verify(em, never()).remove(any());
   }
 
   @Test

@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.BooleanNode;
 import io.github.gbeaule.keycloaknats.consumer.InboxProcessor;
 import io.nats.client.Message;
 import io.nats.client.PullSubscribeOptions;
@@ -129,7 +130,11 @@ class DurabilityIT extends IntegrationSupport {
       String op = data.get("operationType").asText();
       ops.add(op);
       if (op.equals("UPDATE")) {
-        assertFalse(data.get("userEnabled").asBoolean());
+        assertEquals(BooleanNode.FALSE, data.get("userEnabled"));
+      } else if (op.equals("CREATE")) {
+        assertEquals(BooleanNode.TRUE, data.get("userEnabled"));
+      } else if (op.equals("DELETE")) {
+        assertFalse(data.has("userEnabled"));
       }
       assertFalse(data.has("representation"));
       message.ackSync(Duration.ofSeconds(2));

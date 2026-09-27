@@ -162,10 +162,10 @@ class TlsConfigTest {
     var providers = Security.getProviders();
     SSLContext client = configuration(rsa, identity, key).createContext();
     assertEquals(java.util.List.of(providers), java.util.List.of(Security.getProviders()));
-    try (var server =
+    try (var executor = Executors.newSingleThreadExecutor();
+        var server =
             (SSLServerSocket)
-                serverContext(rsa, identity).getServerSocketFactory().createServerSocket(0);
-        var executor = Executors.newSingleThreadExecutor()) {
+                serverContext(rsa, identity).getServerSocketFactory().createServerSocket(0)) {
       server.setSoTimeout(5000);
       server.setNeedClientAuth(true);
       var accepted =
@@ -252,12 +252,12 @@ class TlsConfigTest {
     Files.writeString(bundle, pem(rsa.certificate()) + pem(ec.certificate()));
     SSLContext client = new TlsConfig(true, bundle.toString(), null, null).createContext();
     for (Identity serverIdentity : new Identity[] {rsa, ec}) {
-      try (var server =
+      try (var executor = Executors.newSingleThreadExecutor();
+          var server =
               (SSLServerSocket)
                   serverContext(serverIdentity, rsa)
                       .getServerSocketFactory()
-                      .createServerSocket(0);
-          var executor = Executors.newSingleThreadExecutor()) {
+                      .createServerSocket(0)) {
         server.setSoTimeout(5000);
         var received =
             executor.submit(
@@ -299,10 +299,10 @@ class TlsConfigTest {
   }
 
   private void assertHandshakeRejected(SSLContext client, String hostname) throws Exception {
-    try (var server =
+    try (var executor = Executors.newSingleThreadExecutor();
+        var server =
             (SSLServerSocket)
-                serverContext(rsa, rsa).getServerSocketFactory().createServerSocket(0);
-        var executor = Executors.newSingleThreadExecutor()) {
+                serverContext(rsa, rsa).getServerSocketFactory().createServerSocket(0)) {
       server.setSoTimeout(5000);
       var received =
           executor.submit(

@@ -1,6 +1,8 @@
 package io.github.gbeaule.keycloaknats;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import io.nats.client.api.DiscardPolicy;
@@ -58,6 +60,33 @@ class StreamSafetyTest {
   void rejectsLossyOrMisroutedStreams(Consumer<StreamConfiguration.Builder> mutate) {
     var builder = safe();
     mutate.accept(builder);
-    assertThrows(IllegalStateException.class, () -> StreamSafety.validate(builder.build(), config));
+    var stream = builder.build();
+    var failure =
+        assertThrows(UnsafeStreamException.class, () -> StreamSafety.validate(stream, config));
+    assertNull(failure.getCause());
+  }
+
+  @Test
+  void usesTheConfiguredDestinationReplicaCountAndPayloadBudget() {
+    var custom =
+        BridgeConfig.from(
+            Map.of(
+                "stream",
+                "CUSTOM",
+                "subject-prefix",
+                "auth",
+                "min-replicas",
+                "1",
+                "max-payload-bytes",
+                "1024"));
+    var stream =
+        safe().name("CUSTOM").subjects("auth.>").replicas(1).maximumMessageSize(1536).build();
+    assertDoesNotThrow(() -> StreamSafety.validate(stream, custom));
+    var tooSmall = StreamConfiguration.builder(stream).maximumMessageSize(1535).build();
+    var failure =
+        assertThrows(UnsafeStreamException.class, () -> StreamSafety.validate(tooSmall, custom));
+    assertEquals(
+        "Stream message size must leave room for the payload and headers", failure.getMessage());
+    assertNull(failure.getCause());
   }
 }

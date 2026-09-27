@@ -4,10 +4,12 @@ import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.fasterxml.jackson.databind.node.BooleanNode;
 import io.nats.client.PullSubscribeOptions;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Duration;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.Map;
@@ -91,6 +93,16 @@ class FilteringIT extends IntegrationSupport {
       createUser();
       assertEquals(3, scalar("SELECT count(*) FROM kc_nats_outbox"));
 
+      var committed = new HashMap<String, String>();
+      try (var db = database.getConnection();
+          var statement = db.createStatement();
+          var rows = statement.executeQuery("SELECT id, payload FROM kc_nats_outbox")) {
+        while (rows.next()) {
+          committed.put(rows.getString(1), rows.getString(2));
+        }
+      }
+      assertTrue(committed.keySet().containsAll(originalIds));
+
       docker.startContainerCmd(broker.getContainerId()).exec();
       connectNats();
       drained();
@@ -99,19 +111,21 @@ class FilteringIT extends IntegrationSupport {
       try {
         var messages = subscription.fetch(3, Duration.ofSeconds(10));
         assertEquals(3, messages.size());
-        var delivered = new HashSet<String>();
-        int disabled = 0;
+        var delivered = new HashMap<String, String>();
+        var disabledUsers = new HashSet<String>();
         for (var message : messages) {
           var event = objectMapper.readTree(message.getData());
-          delivered.add(event.path("id").asText());
-          if (event.path("data").has("userEnabled")
-              && !event.path("data").path("userEnabled").asBoolean()) {
-            disabled++;
+          delivered.put(
+              event.get("id").textValue(), new String(message.getData(), StandardCharsets.UTF_8));
+          if (BooleanNode.FALSE.equals(event.at("/data/userEnabled"))) {
+            assertEquals("UPDATE", event.at("/data/operationType").textValue());
+            disabledUsers.add(event.at("/data/userId").textValue());
           }
           message.ackSync(Duration.ofSeconds(2));
         }
-        assertTrue(delivered.containsAll(originalIds), "Reload must not filter persisted rows");
-        assertEquals(2, disabled);
+        assertEquals(
+            committed, delivered, "Reload must preserve every persisted identity and payload");
+        assertEquals(java.util.Set.of(included, excluded), disabledUsers);
       } finally {
         subscription.unsubscribe();
       }

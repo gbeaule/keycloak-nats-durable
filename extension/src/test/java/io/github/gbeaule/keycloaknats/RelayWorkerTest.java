@@ -1,11 +1,15 @@
 package io.github.gbeaule.keycloaknats;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
+import static org.mockito.Mockito.when;
 
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -14,6 +18,58 @@ import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 class RelayWorkerTest {
+  @Test
+  void interruptedWorkerNeverStartsScanningOrWaiting() {
+    var relay = mock(OutboxRelay.class);
+    var wakeup = mock(RelayWakeup.class);
+    when(wakeup.isOpen()).thenReturn(true);
+    try {
+      Thread.currentThread().interrupt();
+      new RelayWorker(relay, wakeup, BridgeConfig.from(Map.of())).run();
+      assertTrue(Thread.currentThread().isInterrupted());
+      verifyNoInteractions(relay);
+      verify(wakeup).isOpen();
+      verifyNoMoreInteractions(wakeup);
+    } finally {
+      Thread.interrupted();
+    }
+  }
+
+  @Test
+  void interruptedWaitStopsScanningAndRestoresTheInterrupt() throws Exception {
+    var relay = mock(OutboxRelay.class);
+    var wakeup = mock(RelayWakeup.class);
+    when(wakeup.isOpen()).thenReturn(true);
+    when(wakeup.awaitSignal(anyLong())).thenThrow(new InterruptedException());
+    try {
+      new RelayWorker(relay, wakeup, BridgeConfig.from(Map.of())).run();
+      assertTrue(Thread.currentThread().isInterrupted());
+      verify(relay).runBatch();
+      verifyNoMoreInteractions(relay);
+    } finally {
+      Thread.interrupted();
+    }
+  }
+
+  @Test
+  void idleBackoffIsCappedAndResetsAfterPartialAndFullBatches() throws Exception {
+    var relay = mock(OutboxRelay.class);
+    var wakeup = mock(RelayWakeup.class);
+    when(wakeup.isOpen()).thenReturn(true);
+    when(relay.runBatch()).thenReturn(0, 0, 0, 0, 1, 2, 0);
+    when(wakeup.awaitSignal(anyLong())).thenReturn(true, true, true, true, true, true, false);
+    var config =
+        BridgeConfig.from(Map.of("batch-size", "2", "poll-ms", "100", "idle-poll-max-ms", "500"));
+    new RelayWorker(relay, wakeup, config).run();
+    var order = inOrder(relay, wakeup);
+    for (long delay : new long[] {200, 400, 500, 500, 100, 0, 100}) {
+      order.verify(wakeup).isOpen();
+      order.verify(relay).runBatch();
+      order.verify(wakeup).awaitSignal(delay);
+    }
+    order.verifyNoMoreInteractions();
+  }
+
   @Test
   void closedWorkerNeverStartsScanning() {
     var relay = mock(OutboxRelay.class);

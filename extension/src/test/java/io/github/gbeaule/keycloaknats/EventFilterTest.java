@@ -1,5 +1,6 @@
 package io.github.gbeaule.keycloaknats;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -18,6 +19,24 @@ import org.keycloak.events.admin.AuthDetails;
 import org.keycloak.events.admin.OperationType;
 
 class EventFilterTest {
+  @ParameterizedTest
+  @ValueSource(strings = {"", "null", "[]", "42", "true", "\"policy\""})
+  void nonObjectPoliciesFailAtTheRootWithSafeSchemaErrors(String json) {
+    var failure = assertThrows(IllegalArgumentException.class, () -> parse(json));
+    assertEquals("Expected an object", failure.getMessage());
+  }
+
+  @Test
+  void unknownAdminRuleFieldsCannotSilentlyBroadenCapture() {
+    String json =
+        """
+        {"userEvents":[],"adminEvents":[
+          {"resourceType":"USER","operations":["UPDATE"],"userEnabld":false}]}
+        """;
+    var failure = assertThrows(IllegalArgumentException.class, () -> parse(json));
+    assertEquals("Unknown filter field", failure.getMessage());
+  }
+
   private static final EventEnvelope envelopes = new EventEnvelope(BridgeConfig.from(Map.of()));
 
   static boolean accepts(EventFilter policy, Event event) {

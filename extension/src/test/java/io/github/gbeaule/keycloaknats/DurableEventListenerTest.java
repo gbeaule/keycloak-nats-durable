@@ -197,6 +197,45 @@ class DurableEventListenerTest {
     verifyNoInteractions(wakeRelay);
   }
 
+  @Test
+  void statePredicateRejectsEnabledAccountsAfterLookupWithoutEnteringTheOutbox() throws Exception {
+    final var policy =
+        EventFilterTest.parse(
+            """
+            {"userEvents":[],"adminEvents":[
+              {"resourceType":"USER","operations":["UPDATE"],"userEnabled":false}]}
+            """);
+    var realms = mock(RealmProvider.class);
+    var users = mock(UserProvider.class);
+    var realm = mock(RealmModel.class);
+    var user = mock(UserModel.class);
+    when(session.realms()).thenReturn(realms);
+    when(session.users()).thenReturn(users);
+    when(realms.getRealm("realm")).thenReturn(realm);
+    when(users.getUserById(realm, "target")).thenReturn(user);
+    when(user.isEnabled()).thenReturn(true);
+    listener =
+        new DurableEventListener(session, BridgeConfig.from(Map.of()), wakeRelay, () -> policy);
+    listener.onEvent(EventEnvelopeTest.admin(OperationType.UPDATE), true);
+    verify(user).isEnabled();
+    verifyNoInteractions(em, tx, wakeRelay);
+    verify(session, never()).getProvider(JpaConnectionProvider.class);
+  }
+
+  @Test
+  void notificationEnlistmentFailureMarksTheRequestForRollback() {
+    var failure = new IllegalStateException("completion enlistment failed");
+    doThrow(failure).when(tx).enlistAfterCompletion(any());
+    assertSame(
+        failure,
+        assertThrows(
+            IllegalStateException.class, () -> listener.onEvent(EventEnvelopeTest.login())));
+    verify(em).persist(any(OutboxEvent.class));
+    verify(em).flush();
+    verify(tx).setRollbackOnly();
+    verifyNoInteractions(wakeRelay);
+  }
+
   @ParameterizedTest
   @ValueSource(booleans = {false, true})
   void recordsObservedEnablementForDirectSuccessfulUserUpdates(boolean enabled) throws Exception {

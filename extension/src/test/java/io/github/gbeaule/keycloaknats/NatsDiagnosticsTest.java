@@ -15,12 +15,8 @@ import io.nats.client.JetStreamApiException;
 import io.nats.client.Message;
 import java.io.IOException;
 import java.net.ConnectException;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
-import java.util.logging.Logger;
 import java.util.logging.SimpleFormatter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -98,30 +94,10 @@ class NatsDiagnosticsTest {
 
   @Test
   void listenerCallbacksLogSafeContextWithoutInspectingConnectionOrMessageContents() {
-    Logger logger = Logger.getLogger(NatsDiagnostics.class.getName());
-    final Level previous = logger.getLevel();
-    final boolean parents = logger.getUseParentHandlers();
-    List<LogRecord> records = new ArrayList<>();
-    var handler =
-        new Handler() {
-          @Override
-          public void publish(LogRecord record) {
-            records.add(record);
-          }
-
-          @Override
-          public void flush() {}
-
-          @Override
-          public void close() {}
-        };
-    logger.addHandler(handler);
-    logger.setLevel(Level.ALL);
-    logger.setUseParentHandlers(false);
     var connection = mock(Connection.class);
     var consumer = mock(Consumer.class);
     var message = mock(Message.class);
-    try {
+    try (var logs = new LogCapture(NatsDiagnostics.class)) {
       var listener = new NatsDiagnostics();
       listener.connectionEvent(connection, ConnectionListener.Events.DISCONNECTED);
       listener.connectionEvent(connection, ConnectionListener.Events.CONNECTED);
@@ -130,7 +106,13 @@ class NatsDiagnosticsTest {
       listener.slowConsumerDetected(connection, consumer);
       listener.messageDiscarded(connection, message);
       listener.socketWriteTimeout(connection);
+      var records = logs.records();
       assertEquals(7, records.size());
+      assertEquals(Level.WARNING, records.get(0).getLevel());
+      assertEquals(Level.INFO, records.get(1).getLevel());
+      for (int i = 2; i < records.size(); i++) {
+        assertEquals(Level.SEVERE, records.get(i).getLevel());
+      }
       var formatter = new SimpleFormatter();
       for (LogRecord record : records) {
         assertFalse(formatter.format(record).contains("secret-token"));
@@ -139,10 +121,6 @@ class NatsDiagnosticsTest {
       assertTrue(formatter.format(records.get(2)).contains("reason=payload_limit"));
       assertTrue(formatter.format(records.get(3)).contains("NATS client exception; IOException"));
       verifyNoInteractions(connection, consumer, message);
-    } finally {
-      logger.removeHandler(handler);
-      logger.setLevel(previous);
-      logger.setUseParentHandlers(parents);
     }
   }
 }

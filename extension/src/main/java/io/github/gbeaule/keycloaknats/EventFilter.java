@@ -106,7 +106,7 @@ final class EventFilter {
   }
 
   private static void fields(JsonNode node, Set<String> allowed) {
-    require(node != null && node.isObject(), "Expected an object");
+    require(node.isObject(), "Expected an object");
     node.fieldNames()
         .forEachRemaining(name -> require(allowed.contains(name), "Unknown filter field"));
   }

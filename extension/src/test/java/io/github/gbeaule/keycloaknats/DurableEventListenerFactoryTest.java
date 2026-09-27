@@ -98,8 +98,10 @@ class DurableEventListenerFactoryTest {
     }
   }
 
-  @Test
-  void relayWorkUsesTheSessionOwnedByTheKeycloakTransactionRunner() throws Exception {
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void relayWorkUsesTheSessionOwnedByTheKeycloakTransactionRunner(boolean published)
+      throws Exception {
     try (var fixture = new Lifecycle();
         var jobs = mockStatic(KeycloakModelUtils.class)) {
       fixture.start();
@@ -114,14 +116,15 @@ class DurableEventListenerFactoryTest {
                 KeycloakSessionTaskWithResult<?> task = invocation.getArgument(1);
                 return task.run(session);
               });
-      assertTrue(
+      assertEquals(
+          published,
           fixture
               .transactions
               .getFirst()
               .run(
                   actual -> {
                     assertSame(entityManager, actual);
-                    return true;
+                    return published;
                   }));
       var failure = new IllegalStateException("database failed");
       assertSame(

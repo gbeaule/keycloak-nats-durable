@@ -14,6 +14,7 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -25,6 +26,7 @@ import io.nats.client.JetStream;
 import io.nats.client.JetStreamManagement;
 import io.nats.client.JetStreamOptions;
 import io.nats.client.NKey;
+import io.nats.client.Nats;
 import io.nats.client.Options;
 import io.nats.client.PublishOptions;
 import io.nats.client.api.PublishAck;
@@ -61,6 +63,18 @@ class JetStreamPublisherTest {
   private JetStreamPublisher publisher;
   private PublishAck ack;
   @TempDir Path directory;
+
+  @Test
+  void defaultPublisherConnectsLazilyAndRejectsPublicationAfterClose() throws Exception {
+    try (var nats = mockStatic(Nats.class)) {
+      var unused = new JetStreamPublisher(config);
+      unused.close();
+      unused.close();
+      var failure = assertThrows(IOException.class, () -> unused.publish(event));
+      assertEquals("Publisher is closed", failure.getMessage());
+      nats.verifyNoInteractions();
+    }
+  }
 
   @BeforeEach
   void setup() throws Exception {

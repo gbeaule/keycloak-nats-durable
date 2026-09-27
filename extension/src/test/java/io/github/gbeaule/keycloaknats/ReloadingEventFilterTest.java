@@ -23,6 +23,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Level;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.keycloak.events.admin.OperationType;
@@ -57,17 +58,29 @@ class ReloadingEventFilterTest {
     Path file = directory.resolve("filter.json");
     String policy = "{\"userEvents\":[\"LOGIN\"],\"adminEvents\":[]}";
     Files.writeString(file, policy);
-    try (var filter = new ReloadingEventFilter(file.toString())) {
+    try (var logs = new LogCapture(ReloadingEventFilter.class);
+        var filter = new ReloadingEventFilter(file.toString())) {
       EventFilter original = filter.current();
       filter.reload();
       assertSame(original, filter.current());
+      assertEquals(
+          1, logs.records().size(), "An unchanged valid file must not produce repeated logs");
       Files.delete(file);
       filter.reload();
+      assertEquals(2, logs.records().size(), "The first failure must be reported immediately");
       filter.reload();
       assertSame(original, filter.current());
+      assertEquals(2, logs.records().size(), "Repeated failures must log only the first rejection");
+      assertEquals(Level.SEVERE, logs.records().get(1).getLevel());
       Files.writeString(file, policy);
       filter.reload();
       assertSame(original, filter.current());
+      assertEquals(3, logs.records().size());
+      assertEquals(
+          "Event filter is readable again; active policy unchanged",
+          logs.records().get(2).getMessage());
+      filter.reload();
+      assertEquals(3, logs.records().size(), "Recovery must only be logged once");
       assertTrue(EventFilterTest.accepts(filter.current(), EventEnvelopeTest.login()));
     }
   }

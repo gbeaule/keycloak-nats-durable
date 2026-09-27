@@ -2,6 +2,7 @@ package io.github.gbeaule.keycloaknats;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectWriter;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Base64;
@@ -19,12 +20,18 @@ import org.keycloak.events.admin.ResourceType;
  * details.
  */
 public final class EventEnvelope {
-  private static final ObjectMapper objectMapper = new ObjectMapper();
+  private static final ObjectWriter defaultWriter = new ObjectMapper().writer();
   private final BridgeConfig config;
+  private final ObjectWriter writer;
 
   /** Uses the configured routing prefix and serialized payload limit. */
   public EventEnvelope(BridgeConfig config) {
+    this(config, defaultWriter);
+  }
+
+  EventEnvelope(BridgeConfig config, ObjectWriter writer) {
     this.config = config;
+    this.writer = writer;
   }
 
   /** Returns the routing subject without serializing or allocating an event identity. */
@@ -103,7 +110,7 @@ public final class EventEnvelope {
     envelope.put("dataschema", "urn:keycloak-nats:event:v1");
     envelope.put("data", data);
     try {
-      String payload = objectMapper.writeValueAsString(envelope);
+      String payload = writer.writeValueAsString(envelope);
       if (payload.getBytes(StandardCharsets.UTF_8).length > config.maxPayloadBytes()) {
         throw new IllegalArgumentException("Event exceeds max-payload-bytes");
       }
