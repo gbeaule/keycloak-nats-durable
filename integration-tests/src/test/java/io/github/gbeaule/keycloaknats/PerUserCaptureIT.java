@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -62,6 +63,50 @@ class PerUserCaptureIT extends IntegrationSupport {
       sessions.close();
     }
     stopInfrastructure();
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void simultaneousFirstCapturesHandleBothUniqueIndexesAndRollback(boolean rollBackSome)
+      throws Exception {
+    try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+      for (int round = 0; round < 10; round++) {
+        String user = UUID.randomUUID().toString();
+        var ready = new CountDownLatch(8);
+        var start = new CountDownLatch(1);
+        var captures = new java.util.ArrayList<java.util.concurrent.Future<?>>();
+        for (int worker = 0; worker < 8; worker++) {
+          boolean rollback = rollBackSome && worker % 2 == 0;
+          captures.add(
+              executor.submit(
+                  () -> {
+                    try (var session = sessions.openSession()) {
+                      session.beginTransaction();
+                      ready.countDown();
+                      assertTrue(start.await(10, TimeUnit.SECONDS));
+                      listener(session, EventFilter::all).onEvent(event("first-capture", user));
+                      if (rollback) {
+                        session.getTransaction().rollback();
+                      } else {
+                        session.getTransaction().commit();
+                      }
+                    }
+                    return null;
+                  }));
+        }
+        try {
+          assertTrue(ready.await(10, TimeUnit.SECONDS));
+        } finally {
+          start.countDown();
+        }
+        for (var capture : captures) {
+          capture.get(10, TimeUnit.SECONDS);
+        }
+        assertEquals(
+            java.util.stream.LongStream.rangeClosed(1, rollBackSome ? 4 : 8).boxed().toList(),
+            sequences(user));
+      }
+    }
   }
 
   @ParameterizedTest
@@ -177,7 +222,9 @@ class PerUserCaptureIT extends IntegrationSupport {
             """
             {"userEvents":["LOGIN"],"adminEvents":[],"delivery":{"rules":[
               {"id":"short","match":{"kind":"user","eventTypes":["LOGIN"]},
-               "policy":{"action":"discard","maxAgeSeconds":60,"maxFailures":2}}]}}
+               "policy":{"action":"discard","maxAgeSeconds":60,"maxFailures":2}},
+              {"id":"overlap","match":{"kind":"user","eventTypes":["*"]},
+               "policy":{"action":"retry"}}]}}
             """
                 .getBytes(java.nio.charset.StandardCharsets.UTF_8));
     var current = new AtomicReference<>(initial);
@@ -241,6 +288,8 @@ class PerUserCaptureIT extends IntegrationSupport {
       assertEquals(
           initial.resolve(event("capture", user), row.subject()).orElseThrow(),
           row.publicationPolicy());
+      assertEquals("short", row.publicationPolicy().ruleId());
+      assertEquals(new PublicationPolicy(60, 2), row.publicationPolicy().policy());
       assertEquals(row.createdAt() + 60_000, row.expiresAt());
       assertFalse(row.payload().contains("maxAgeSeconds"));
       assertEquals(

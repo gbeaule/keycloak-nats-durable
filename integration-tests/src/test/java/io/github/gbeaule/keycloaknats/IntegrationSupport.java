@@ -142,7 +142,7 @@ abstract class IntegrationSupport {
                 Map.entry("KND_IDLE_POLL_MAX_MS", "200"),
                 Map.entry("KND_RETRY_INITIAL_MS", "100"),
                 Map.entry("KND_RETRY_MAX_MS", "1000")))
-        .waitingFor(Wait.forHttp("/realms/durable-test").forStatusCode(200))
+        .waitingFor(Wait.forHttp("/realms/durable-test").forPort(8080).forStatusCode(200))
         .withStartupTimeout(Duration.ofMinutes(3));
     if (copyProvider) {
       container.withCopyFileToContainer(
@@ -263,9 +263,21 @@ abstract class IntegrationSupport {
   }
 
   static HttpResponse<String> login(String realm, String form) throws Exception {
+    return loginTo(keycloak, realm, form);
+  }
+
+  static HttpResponse<String> loginTo(GenericContainer<?> node, String realm, String form)
+      throws Exception {
     return httpClient.send(
         HttpRequest.newBuilder(
-                URI.create(base() + "/realms/" + realm + "/protocol/openid-connect/token"))
+                URI.create(
+                    "http://"
+                        + node.getHost()
+                        + ":"
+                        + currentPort(node, 8080)
+                        + "/realms/"
+                        + realm
+                        + "/protocol/openid-connect/token"))
             .timeout(Duration.ofSeconds(10))
             .header("Content-Type", "application/x-www-form-urlencoded")
             .POST(HttpRequest.BodyPublishers.ofString(form))

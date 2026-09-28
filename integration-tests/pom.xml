@@ -92,6 +92,7 @@
             <configuration>
               <includes>
                 <include>**/ThroughputBenchmark.java</include>
+                <include>**/PerUserOrderingBenchmark.java</include>
               </includes>
               <systemPropertyVariables>
                 <keycloak.version>${keycloak.runtime.version}</keycloak.version>

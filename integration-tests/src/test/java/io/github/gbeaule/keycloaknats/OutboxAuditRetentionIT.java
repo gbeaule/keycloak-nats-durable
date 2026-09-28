@@ -20,6 +20,8 @@ import org.hibernate.cfg.Configuration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.keycloak.events.Event;
+import org.keycloak.events.EventType;
 
 /** Real PostgreSQL retention, concurrent claims, rollback and source-state isolation. */
 @SuppressWarnings("checkstyle:AbbreviationAsWordInName")
@@ -27,6 +29,72 @@ class OutboxAuditRetentionIT extends RelayIntegrationSupport {
   private static final class TestRegistry extends SimpleMeterRegistry implements AutoCloseable {}
 
   private static final String TABLE = "\"relay-data\".kc_nats_discard_audit";
+
+  @Test
+  void discardedElevenLeavesTenAndTwelveWithoutAReplacementOrReplayAfterCleanup() throws Exception {
+    var event = new Event();
+    event.setRealmId("gap");
+    event.setUserId(UUID.randomUUID().toString());
+    event.setType(EventType.LOGIN);
+    var envelope = new EventEnvelope(config);
+    var originals = new ArrayList<OutboxEvent>();
+    transaction(
+        em -> {
+          long now = CaptureRepository.databaseTime(em);
+          for (int sequence = 1; sequence <= 12; sequence++) {
+            var policy = sequence == 11 ? new PublicationPolicy(1, null) : PublicationPolicy.RETRY;
+            var row =
+                envelope.serialize(
+                    envelope.describe(event),
+                    CaptureRepository.next(em, event.getRealmId(), event.getUserId()),
+                    sequence == 11 ? now - 2000 : now,
+                    new ResolvedPublicationPolicy(policy, EventFilter.all().sha256(), null));
+            em.persist(row);
+            originals.add(row);
+          }
+        });
+    try (var publisher = new JetStreamPublisher(config);
+        var metrics = new TestRegistry();
+        var cleanup = cleanup(Map.of("audit-retention-seconds", "0"), metrics)) {
+      var relay = new OutboxRelay(OutboxAuditRetentionIT::transaction, publisher, config);
+      var result = relay.runBatch();
+      assertEquals(11, result.published());
+      assertEquals(1, result.expired());
+      var published = storedMessages(11);
+      assertEquals(
+          "10",
+          objectMapper.readTree(published.get(9).getData()).at("/data/ordering/sequence").asText());
+      assertEquals(
+          "12",
+          objectMapper
+              .readTree(published.get(10).getData())
+              .at("/data/ordering/sequence")
+              .asText());
+      assertEquals(
+          originals.stream().filter(o -> o.userSequence() != 11).map(OutboxEvent::id).toList(),
+          storedIds(11));
+      assertEquals(List.of(originals.get(10).id()), ids());
+      cleanup.run();
+      transaction(
+          em -> {
+            assertTrue(AuditRepository.inspect(em, Long.MIN_VALUE, "", 10).isEmpty());
+            var ordering = CaptureRepository.next(em, event.getRealmId(), event.getUserId());
+            assertEquals(13, ordering.sequence());
+            em.persist(
+                envelope.serialize(
+                    envelope.describe(event),
+                    ordering,
+                    CaptureRepository.databaseTime(em),
+                    new ResolvedPublicationPolicy(
+                        PublicationPolicy.RETRY, EventFilter.all().sha256(), null)));
+          });
+      assertEquals(1, relay.runBatch().published());
+      assertEquals(OutboxRelay.Outcome.NO_WORK, relay.runBatch().outcome());
+      assertEquals(12, messages());
+      assertEquals(0, audits());
+      assertTrue(nats.jetStreamManagement().getConsumerNames(STREAM).isEmpty());
+    }
+  }
 
   @Test
   void exactCutoffIncludesEqualityAndUsesTheDiscardTimeIndex() throws Exception {

@@ -29,7 +29,13 @@ whether assertions detect deliberate code changes. Review survivors in each modu
 Run checks appropriate to the change. Delivery, database, upgrade and dependency changes need the
 compatibility matrix; dependency and deployment image changes also need fresh security scans.
 The `performance` Maven profile runs the
-[opt-in benchmark](../integration-tests/src/test/java/io/github/gbeaule/keycloaknats/ThroughputBenchmark.java).
+[runtime benchmark](../integration-tests/src/test/java/io/github/gbeaule/keycloaknats/ThroughputBenchmark.java)
+and [source ordering benchmark](../integration-tests/src/test/java/io/github/gbeaule/keycloaknats/PerUserOrderingBenchmark.java).
+The source benchmark isolates capture contention, send-intent commits, relay fairness, expiry and
+diagnostic cleanup without a receiver. Reports under `integration-tests/target/performance-*.json`
+include the environment, latency distributions, query plan and retained-row samples. Cleanup bounds
+live diagnostic history; physical PostgreSQL space also depends on vacuum, and protected originals
+remain a separate capacity concern.
 Measure capacity and recovery on the intended deployment; reference tests do not certify its topology.
 
 ## Compatibility
@@ -68,7 +74,7 @@ and pending event contracts.
 The standalone publisher acceptance run requires no receiving application:
 
 ```sh
-python scripts/validate.py integration --maven-arg=-Dit.test=ProductionModeIT,NatsReadinessIT,PerUserPublicationIT
+python scripts/validate.py integration --maven-arg=-Dit.test=ProductionModeIT,NatsReadinessIT,PerUserPublicationIT,PerUserSystemIT
 ```
 
 These tests verify the optimized provider, broker readiness, ordered originals, local discard and

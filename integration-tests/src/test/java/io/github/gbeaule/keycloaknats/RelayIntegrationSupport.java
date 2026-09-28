@@ -31,7 +31,8 @@ abstract class RelayIntegrationSupport extends IntegrationSupport {
             throw new IllegalStateException(e);
           }
           container.withEnv("KC_DB_SCHEMA", "relay-data");
-        });
+        },
+        false);
     await()
         .atMost(Duration.ofSeconds(20))
         .until(() -> scalar("SELECT count(*) FROM \"relay-data\".kc_nats_outbox") == 0);
@@ -72,7 +73,7 @@ abstract class RelayIntegrationSupport extends IntegrationSupport {
           em.createQuery("delete from NatsDiscardAudit").executeUpdate();
         });
     nats.jetStreamManagement().deleteStream(STREAM);
-    provision();
+    provisionStream();
   }
 
   @AfterAll

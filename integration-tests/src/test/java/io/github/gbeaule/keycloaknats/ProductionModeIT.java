@@ -195,7 +195,8 @@ class ProductionModeIT extends IntegrationSupport {
             "--https-certificate-file=/opt/keycloak/conf/server.pem",
             "--https-certificate-key-file=/opt/keycloak/conf/server.key",
             "--http-management-scheme=http")
-        .waitingFor(Wait.forHttp("/health/ready").forPort(9000).forStatusCode(200));
+        .waitingFor(Wait.forHttp("/health/ready").forPort(9000).forStatusCode(200))
+        .withStartupTimeout(Duration.ofMinutes(3));
   }
 
   private static void assertNoCredentialsInLogs(String contents) {

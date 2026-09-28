@@ -12,7 +12,9 @@ import sys
 ROOT = Path(__file__).resolve().parent.parent
 POSTGRES_MAJORS = ("14", "15", "16", "17")
 POSTGRES_TESTS = (
-    "ConsumerHardeningIT,CustomSchemaIT,UpgradeIT,DurabilityIT#"
+    "ConsumerHardeningIT,CustomSchemaIT,UpgradeIT,"
+    "PerUserCaptureIT,PerUserRelayIT,OutboxDiscardIT,OutboxAuditRetentionIT,"
+    "PerUserPublicationIT,PerUserSystemIT,FilteringIT,DurabilityIT#"
     "uncommittedAndRolledBackRowsAreNeverPublished+"
     "outboxWritesKeepSynchronousCommitForAuthenticationOnlyTransactions+"
     "retriesDoNotRewritePayloadAndVacuumSettingsAreInstalled"

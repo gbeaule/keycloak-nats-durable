@@ -70,6 +70,9 @@ class FilteringIT extends IntegrationSupport {
       final String excluded = createUser();
       assertEquals(1, scalar("SELECT count(*) FROM kc_nats_outbox"));
       assertEquals(
+          0,
+          scalar("SELECT count(*) FROM kc_nats_capture_counter WHERE user_id='" + excluded + "'"));
+      assertEquals(
           204,
           request("PUT", "/admin/realms/durable-test/users/" + included, Map.of("enabled", false))
               .statusCode());
@@ -134,6 +137,57 @@ class FilteringIT extends IntegrationSupport {
         docker.startContainerCmd(broker.getContainerId()).exec();
       }
     }
+  }
+
+  @Test
+  void deliveryRuleReloadChangesFutureCapturesOnlyAndFirstMatchWins() throws Exception {
+    drained();
+    var initial =
+        """
+        {"userEvents":["LOGIN"],"adminEvents":[],"delivery":{"rules":[
+          {"id":"first","match":{"kind":"user","eventTypes":["LOGIN"]},
+           "policy":{"action":"discard","maxAgeSeconds":3600}},
+          {"id":"overlap","match":{"kind":"user","eventTypes":["*"]},
+           "policy":{"action":"retry"}}]}}
+        """;
+    replace(initial, true);
+    var docker = broker.getDockerClient();
+    docker.stopContainerCmd(broker.getContainerId()).withTimeout(1).exec();
+    try {
+      assertEquals(200, login("durable-test", loginForm("alice-password")).statusCode());
+      assertEquals(
+          1,
+          scalar(
+              "SELECT count(*) FROM kc_nats_outbox"
+                  + " WHERE rule_id='first' AND max_age_seconds=3600 AND max_failures IS NULL"));
+      replace(
+          """
+          {"userEvents":["LOGIN"],"adminEvents":[],"delivery":{"rules":[
+            {"id":"replacement","match":{"kind":"user","eventTypes":["*"]},
+             "policy":{"action":"retry"}}]}}
+          """,
+          true);
+      assertEquals(200, login("durable-test", loginForm("alice-password")).statusCode());
+      assertEquals(
+          1,
+          scalar(
+              "SELECT count(*) FROM kc_nats_outbox WHERE rule_id='first'"
+                  + " AND max_age_seconds=3600 AND expires_at=created_at+3600000"
+                  + " AND filter_sha256='"
+                  + EventFilter.digest(initial.getBytes(StandardCharsets.UTF_8))
+                  + "'"));
+      assertEquals(
+          1,
+          scalar(
+              "SELECT count(*) FROM kc_nats_outbox WHERE rule_id='replacement'"
+                  + " AND max_age_seconds IS NULL AND max_failures IS NULL"
+                  + " AND expires_at IS NULL"));
+    } finally {
+      docker.startContainerCmd(broker.getContainerId()).exec();
+      connectNats();
+      replace(ALL, true);
+    }
+    drained();
   }
 
   @Test

@@ -51,6 +51,22 @@ class CompatibilityMatrixTest(unittest.TestCase):
 
 
 class ValidationRunnerTest(unittest.TestCase):
+    def test_postgres_selection_keeps_source_and_existing_durability_coverage(self):
+        expected = {
+            "ConsumerHardeningIT", "CustomSchemaIT", "UpgradeIT", "PerUserCaptureIT",
+            "PerUserRelayIT", "OutboxDiscardIT", "OutboxAuditRetentionIT",
+            "PerUserPublicationIT", "PerUserSystemIT", "FilteringIT",
+            "DurabilityIT#uncommittedAndRolledBackRowsAreNeverPublished+"
+            "outboxWritesKeepSynchronousCommitForAuthenticationOnlyTransactions+"
+            "retriesDoNotRewritePayloadAndVacuumSettingsAreInstalled",
+        }
+        for major in validate.POSTGRES_MAJORS:
+            with self.subTest(postgres=major):
+                command, = validate.maven_commands("postgres", {}, postgres_major=major)
+                selection, = (arg.removeprefix("-Dit.test=") for arg in command
+                              if arg.startswith("-Dit.test="))
+                self.assertTrue(expected.issubset(selection.split(",")))
+
     def test_local_matrix_matches_individual_ci_selections_and_keeps_tests_enabled(self):
         matrix = validate.compatibility_matrix("99.0.0")
         expected = []
