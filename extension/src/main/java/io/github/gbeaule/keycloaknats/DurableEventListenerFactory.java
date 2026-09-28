@@ -25,6 +25,7 @@ public final class DurableEventListenerFactory implements EventListenerProviderF
   private ReloadingEventFilter filter;
   private ExecutorService executor;
   private AuditCleanup auditCleanup;
+  private RelayMetrics metrics;
   private final List<RelayWakeup> wakeups = new CopyOnWriteArrayList<>();
   private final List<OutboxRelay> relays = new ArrayList<>();
   private final List<EventPublisher> publishers = new ArrayList<>();
@@ -74,6 +75,7 @@ public final class DurableEventListenerFactory implements EventListenerProviderF
             config.auditCleanup(),
             Metrics.globalRegistry);
     auditCleanup.start();
+    metrics = new RelayMetrics(Metrics.globalRegistry);
     AtomicInteger workerNumber = new AtomicInteger();
     executor =
         Executors.newFixedThreadPool(
@@ -96,7 +98,8 @@ public final class DurableEventListenerFactory implements EventListenerProviderF
                           work.accept(
                               session.getProvider(JpaConnectionProvider.class).getEntityManager())),
               publisher,
-              config);
+              config,
+              metrics);
       publishers.add(publisher);
       wakeups.add(wakeup);
       relays.add(relay);
@@ -124,24 +127,30 @@ public final class DurableEventListenerFactory implements EventListenerProviderF
       }
       stoppingExecutor = executor;
       stoppingCleanup = auditCleanup;
+      if (stoppingCleanup != null) {
+        stoppingCleanup.stop();
+      }
       stoppingPublishers = List.copyOf(publishers);
     }
     // Do not hold the lifecycle monitor while closing sockets or waiting for the worker.
     if (stoppingExecutor != null) {
-      stoppingExecutor.shutdownNow();
+      stoppingExecutor.shutdown();
+      try {
+        if (!stoppingExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+          stoppingExecutor.shutdownNow();
+          logger.warn("NATS relay shutdown is still completing; database rows remain recoverable");
+        }
+      } catch (InterruptedException e) {
+        stoppingExecutor.shutdownNow();
+        Thread.currentThread().interrupt();
+      }
     }
     stoppingPublishers.forEach(EventPublisher::close);
     if (stoppingCleanup != null) {
       stoppingCleanup.close();
     }
-    if (stoppingExecutor != null) {
-      try {
-        if (!stoppingExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
-          logger.warn("NATS relay shutdown is still completing; database rows remain recoverable");
-        }
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-      }
+    if (metrics != null) {
+      metrics.close();
     }
   }
 }

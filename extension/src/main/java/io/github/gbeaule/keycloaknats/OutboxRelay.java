@@ -18,6 +18,7 @@ public final class OutboxRelay implements Runnable {
   }
 
   enum Outcome {
+    PREPARED,
     PUBLISHED,
     RETRY_SCHEDULED,
     DISCARDED_EXPIRED,
@@ -38,19 +39,35 @@ public final class OutboxRelay implements Runnable {
 
   private record Claim(String id, long version) {}
 
-  private record Preparation(Claim claim, Outcome outcome) {}
+  record Resolution(Outcome outcome, boolean uncertainDiscard) {
+    Resolution(Outcome outcome) {
+      this(outcome, false);
+    }
+  }
+
+  private record Preparation(Claim claim, Resolution resolution) {}
 
   private final Transactions transactions;
   private final EventPublisher publisher;
   private final BridgeConfig config;
+  private final RelayMetrics metrics;
   private boolean preferExpiry = true;
   private volatile boolean stopped;
 
   /** Connects transaction ownership, confirmed publication and bounded batch settings. */
   public OutboxRelay(Transactions transactions, EventPublisher publisher, BridgeConfig config) {
+    this(transactions, publisher, config, null);
+  }
+
+  OutboxRelay(
+      Transactions transactions,
+      EventPublisher publisher,
+      BridgeConfig config,
+      RelayMetrics metrics) {
     this.transactions = transactions;
     this.publisher = publisher;
     this.config = config;
+    this.metrics = metrics;
   }
 
   @Override
@@ -73,15 +90,20 @@ public final class OutboxRelay implements Runnable {
           outcome = Outcome.STOPPED;
           break;
         }
-        if (prepared.outcome() == Outcome.NO_WORK || prepared.outcome() == Outcome.STOPPED) {
-          outcome = prepared.outcome();
+        if (prepared.resolution().outcome() == Outcome.NO_WORK
+            || prepared.resolution().outcome() == Outcome.STOPPED) {
+          outcome = prepared.resolution().outcome();
           break;
         }
         processed++;
-        outcome =
+        Resolution resolution =
             prepared.claim() == null
-                ? prepared.outcome()
+                ? prepared.resolution()
                 : transact(em -> publishPrepared(em, prepared.claim()));
+        if (metrics != null) {
+          metrics.committed(resolution);
+        }
+        outcome = resolution.outcome();
         if (outcome == Outcome.PUBLISHED) {
           published++;
         } else if (outcome == Outcome.RETRY_SCHEDULED) {
@@ -100,6 +122,9 @@ public final class OutboxRelay implements Runnable {
           "NATS outbox transaction failed; resolution unconfirmed; %s",
           NatsDiagnostics.describe(e));
       outcome = Outcome.TRANSACTION_FAILED;
+      if (metrics != null) {
+        metrics.transactionFailed();
+      }
     }
     return new BatchResult(processed, published, retries, expired, exhausted, outcome);
   }
@@ -120,35 +145,35 @@ public final class OutboxRelay implements Runnable {
               : OutboxRepository.lockNextExpired(em, now);
     }
     if (isStopped()) {
-      return new Preparation(null, Outcome.STOPPED);
+      return new Preparation(null, new Resolution(Outcome.STOPPED));
     }
     if (next.isEmpty()) {
-      return new Preparation(null, Outcome.NO_WORK);
+      return new Preparation(null, new Resolution(Outcome.NO_WORK));
     }
     OutboxEvent row = next.get();
-    Outcome discarded = discardIfEligible(em, row, now);
+    Resolution discarded = discardIfEligible(em, row, now);
     if (discarded != null) {
       return new Preparation(null, discarded);
     }
     // Commit intent before any network operation. Rollback after a send cannot erase ambiguity.
     row.markPublicationIntent();
     em.flush();
-    return new Preparation(new Claim(row.id(), row.version()), null);
+    return new Preparation(new Claim(row.id(), row.version()), new Resolution(Outcome.PREPARED));
   }
 
-  private Outcome publishPrepared(EntityManager em, Claim claim) {
+  private Resolution publishPrepared(EntityManager em, Claim claim) {
     var next =
         OutboxRepository.lockPrepared(
             em, claim.id(), claim.version(), CaptureRepository.databaseTime(em));
     // Reacquire the same unchanged head in a fresh transaction, retaining ownership through send.
     if (isStopped()) {
-      return Outcome.STOPPED;
+      return new Resolution(Outcome.STOPPED);
     }
     if (next.isEmpty()) {
-      return Outcome.STALE;
+      return new Resolution(Outcome.STALE);
     }
     OutboxEvent row = next.get();
-    Outcome discarded = discardIfEligible(em, row, CaptureRepository.databaseTime(em));
+    Resolution discarded = discardIfEligible(em, row, CaptureRepository.databaseTime(em));
     if (discarded != null) {
       return discarded;
     }
@@ -156,10 +181,13 @@ public final class OutboxRelay implements Runnable {
       publisher.publish(row);
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
-      return Outcome.STOPPED;
+      return new Resolution(Outcome.STOPPED);
     } catch (Exception e) {
       if (isStopped()) {
-        return Outcome.STOPPED;
+        return new Resolution(Outcome.STOPPED);
+      }
+      if (metrics != null) {
+        metrics.publicationFailed();
       }
       long now = CaptureRepository.databaseTime(em);
       row.failed(now + RetryBackoff.delay(config, row.attempts()), e.getClass().getSimpleName());
@@ -172,22 +200,24 @@ public final class OutboxRelay implements Runnable {
             "NATS outbox publish pending; id=%s attempts=%d retryAt=%d reason=%s",
             row.id(), row.attempts(), row.nextAttemptAt(), NatsDiagnostics.describe(e));
       }
-      return Outcome.RETRY_SCHEDULED;
+      return new Resolution(Outcome.RETRY_SCHEDULED);
     }
     em.remove(row);
-    return Outcome.PUBLISHED;
+    return new Resolution(Outcome.PUBLISHED);
   }
 
-  private Outcome discardIfEligible(EntityManager em, OutboxEvent row, long now) {
+  private Resolution discardIfEligible(EntityManager em, OutboxEvent row, long now) {
     var reason =
         row.publicationPolicy().policy().discardReason(row.createdAt(), now, row.attempts());
     if (reason == null) {
       return null;
     }
     OutboxRepository.discard(em, row, reason, now);
-    return reason == DiscardReason.EXPIRED
-        ? Outcome.DISCARDED_EXPIRED
-        : Outcome.DISCARDED_MAX_FAILURES;
+    return new Resolution(
+        reason == DiscardReason.EXPIRED
+            ? Outcome.DISCARDED_EXPIRED
+            : Outcome.DISCARDED_MAX_FAILURES,
+        row.publicationMayHaveOccurred());
   }
 
   private <T> T transact(Function<EntityManager, T> work) {

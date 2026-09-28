@@ -267,10 +267,13 @@ class AuditCleanupTest {
       } else {
         when(executor.awaitTermination(5, TimeUnit.SECONDS)).thenReturn(result.equals("finished"));
       }
+      cleanup.stop();
+      cleanup.stop();
       cleanup.close();
       cleanup.close();
       assertEquals(result.equals("interrupted"), Thread.currentThread().isInterrupted());
-      verify(executor).shutdownNow();
+      verify(executor).shutdown();
+      verify(executor, times(result.equals("finished") ? 0 : 1)).shutdownNow();
       assertTrue(registry.getMeters().isEmpty());
     }
   }

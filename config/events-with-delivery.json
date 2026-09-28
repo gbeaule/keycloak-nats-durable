@@ -13,6 +13,15 @@
   "delivery": {
     "rules": [
       {
+        "id": "protected-user-lifecycle",
+        "match": {
+          "kind": "admin",
+          "resourceType": "USER",
+          "operations": ["CREATE", "UPDATE", "DELETE"]
+        },
+        "policy": {"action": "retry"}
+      },
+      {
         "id": "short-lived-login",
         "match": {
           "kind": "user",

@@ -18,6 +18,7 @@ public final class AuditCleanup implements Runnable, AutoCloseable {
   private final AuditCleanupMetrics metrics;
   private ScheduledExecutorService executor;
   private volatile boolean stopped;
+  private boolean closed;
 
   /** The transaction runner must enforce the configured timeout and return only after commit. */
   public AuditCleanup(
@@ -96,23 +97,36 @@ public final class AuditCleanup implements Runnable, AutoCloseable {
     }
   }
 
+  /** Stops new sweeps and claims before the owner begins draining its other workers. */
+  public synchronized void stop() {
+    if (stopped) {
+      return;
+    }
+    stopped = true;
+    if (executor != null) {
+      executor.shutdown();
+    }
+  }
+
   @Override
   public void close() {
     ScheduledExecutorService stopping;
     synchronized (this) {
-      if (stopped) {
+      if (closed) {
         return;
       }
-      stopped = true;
+      closed = true;
+      stop();
       stopping = executor;
     }
     if (stopping != null) {
-      stopping.shutdownNow();
       try {
         if (!stopping.awaitTermination(5, TimeUnit.SECONDS)) {
+          stopping.shutdownNow();
           logger.warn("NATS audit cleanup shutdown is still completing; audits remain recoverable");
         }
       } catch (InterruptedException e) {
+        stopping.shutdownNow();
         Thread.currentThread().interrupt();
       }
     }

@@ -1,0 +1,14 @@
+{
+  "name": "KEYCLOAK_EVENTS",
+  "subjects": ["keycloak.events.>"],
+  "retention": "workqueue",
+  "storage": "file",
+  "discard": "new",
+  "num_replicas": 1,
+  "max_bytes": 16777216,
+  "max_msgs": -1,
+  "max_msgs_per_subject": -1,
+  "max_msg_size": -1,
+  "max_age": 0,
+  "duplicate_window": 120000000000
+}

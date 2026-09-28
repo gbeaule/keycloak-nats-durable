@@ -192,15 +192,20 @@ class ConsumerHardeningIT {
         """
         CREATE TABLE kc_nats_outbox
           (id text,subject text,created_at bigint,next_attempt_at bigint,
-           attempts bigint,payload text);
-        INSERT INTO kc_nats_outbox VALUES
+           attempts bigint,payload text, ordering_key text, user_sequence bigint,
+           publication_may_have_occurred boolean DEFAULT false);
+        CREATE TABLE kc_nats_discard_audit
+          (subject text,reason text,publication_may_have_occurred boolean,discarded_at bigint);
+        INSERT INTO kc_nats_outbox (id,subject,created_at,next_attempt_at,attempts,payload) VALUES
           ('1','keycloak.events.cmVhbG0.user.login',1000,0,3,'private'),
           ('2','keycloak.events.cmVhbG0.admin.user.create',1000,0,1,'private'),
           ('3','keycloak.events.b3RoZXI.user.login',1000,0,0,'private');
         CREATE ROLE report_reader LOGIN PASSWORD 'integration-only';
         GRANT USAGE ON SCHEMA public TO report_reader;
-        GRANT SELECT (subject,created_at,next_attempt_at,attempts)
+        GRANT SELECT (subject,created_at,next_attempt_at,attempts,ordering_key,user_sequence,
+          publication_may_have_occurred)
           ON kc_nats_outbox TO report_reader;
+        GRANT SELECT ON kc_nats_discard_audit TO report_reader;
         """);
     var reader = new PGSimpleDataSource();
     reader.setURL(postgres.getJdbcUrl());

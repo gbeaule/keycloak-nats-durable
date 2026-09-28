@@ -8,22 +8,29 @@ the intended Keycloak and database versions; demo image versions are not install
 
 1. Back up the Keycloak database. Install the built provider JAR in `$KEYCLOAK_HOME/providers/` on
    every node, then run `kc.sh build --db=postgres`.
-2. Provision the JetStream stream and durable consumers with an administrative identity. The
-   example's [provision command](../consumer-example/src/main/java/io/github/gbeaule/keycloaknats/consumer/ConsumerMain.java)
-   creates a WorkQueue setup. Independent applications needing the same events require Limits
-   retention and separate durables. Provisioning does not migrate existing resource policies.
+2. Provision a safe JetStream stream with an administrative identity. The standalone
+   [stream fixture](../deploy/stream.json) uses WorkQueue retention and requires no consumer.
+   Adapt replication and capacity to the deployment. Receiving applications provision their own
+   subscriptions; independent applications may require Limits retention and separate durables.
 3. Configure the provider's NATS destination and credentials, then restart Keycloak. Its
    [Liquibase migration](../extension/src/main/resources/META-INF/nats-outbox-changelog.xml) owns the
    outbox schema; allow the required DDL through your deployment's migration process.
 4. Add `nats-durable` to each required realm's event listeners, preserving other listeners.
    [The demo realm](../deploy/realm.json) shows the configuration. Saving Keycloak events and including
    admin representations are not prerequisites.
-5. Exercise an account operation and verify its downstream effect. Monitor delivery separately from
-   Keycloak readiness.
+5. Exercise an account operation and verify NATS acceptance and source resolution. Monitor publication
+   separately from Keycloak readiness; downstream processing is outside extension health.
 
 All nodes sharing an outbox must use the same provider version, NATS account, stream and subject
 prefix. Configure Keycloak clustering independently. Drain pending work before removing the provider;
 changing destinations or routing while a backlog exists requires an explicit migration plan.
+
+For a standalone smoke test, follow the [local startup commands](../README.md#build-and-try-locally).
+Disable a demo user, confirm the stream count increases and the outbox drains, and verify the stream
+has no consumers. Stop NATS, repeat an account operation, then restart Keycloak: protected work must
+remain pending. Restart NATS and confirm publication resumes. Keycloak's local metrics are available
+on port 9000. The automated [publisher scenario](../integration-tests/src/test/java/io/github/gbeaule/keycloaknats/PerUserPublicationIT.java)
+also exercises discard, cleanup failure and recovery during an outage.
 
 ## Configuration sources
 
@@ -35,8 +42,8 @@ Exact names, defaults and validation rules belong to these files:
 | Capture policy and reload behavior | [EventFilter](../extension/src/main/java/io/github/gbeaule/keycloaknats/EventFilter.java), [CaptureScope](../extension/src/main/java/io/github/gbeaule/keycloaknats/CaptureScope.java) and [ReloadingEventFilter](../extension/src/main/java/io/github/gbeaule/keycloaknats/ReloadingEventFilter.java) |
 | TLS | [TlsConfig](../nats-transport/src/main/java/io/github/gbeaule/keycloaknats/tls/TlsConfig.java) |
 | Accepted stream configuration | [StreamPolicy](../nats-transport/src/main/java/io/github/gbeaule/keycloaknats/jetstream/StreamPolicy.java) |
-| Example consumer, provisioner and collector | [ConsumerConfig](../consumer-example/src/main/java/io/github/gbeaule/keycloaknats/consumer/ConsumerConfig.java) and [command entry point](../consumer-example/src/main/java/io/github/gbeaule/keycloaknats/consumer/ConsumerMain.java) |
-| Local deployment wiring | [Compose](../compose.yaml) and [deployment files](../deploy) |
+| Standalone collector settings | [ConsumerConfig.report](../consumer-example/src/main/java/io/github/gbeaule/keycloaknats/consumer/ConsumerConfig.java) |
+| Local deployment wiring | [Producer Compose](../compose.producer.yaml) and [deployment files](../deploy) |
 
 Environment names use the `KND_` prefix. Matching Keycloak provider keys, such as `nats-url`,
 take precedence over environment values.
@@ -49,13 +56,21 @@ credential bundles, then roll clients to load them and verify delivery before re
 
 Leave `KND_FILTER_FILE` unset to capture all events reaching the listener, or mount a deployment-owned
 policy directory and point it to the chosen file. Start from the optional [all-events](../config/events-all.json),
-[disabled-user](../config/events-disabled-only.json) or [scoped](../config/events-scoped.json) example.
+[disabled-user](../config/events-disabled-only.json), [scoped](../config/events-scoped.json) or
+[publication-policy](../config/events-with-delivery.json) example. The latter explicitly protects
+user lifecycle events and makes only short-lived login events discardable.
 Replace placeholder realm IDs; these files are not packaged or loaded automatically.
 
 Replace policy files atomically within the mounted directory. Invalid initial policies fail startup;
 invalid reloads retain the last valid policy. Deleting a configured file does not restore capture-all.
 Policy reloads affect future capture and are eventually consistent across nodes. Other settings
 require a restart.
+
+The relay worker count bounds producer concurrency. Batch size and polling intervals bound normal
+and expiry scans; expiry remains eligible during retry backoff. Audit retention, sweep interval,
+batch limits and transaction timeout are independent maintenance settings. These use the same
+provider-over-environment precedence. Event publication policy belongs only in the filter file;
+receiver deadlines and application processing settings do not belong there.
 
 ## Storage and access
 
@@ -77,22 +92,36 @@ Preserve inbox state across restarts.
 
 ## Monitoring and capacity
 
-Monitor oldest pending age and queue growth across the outbox, stream and consumers. Include database
-and broker disk headroom, replication health, pool pressure, redeliveries, quarantine and stalled
-processing. An empty outbox proves publication, not completion of downstream effects. Use a canary
-account operation to measure end-to-end delivery.
+Monitor original backlog and oldest capture age, blocked users, retry activity, local discards,
+outcome uncertainty and cleanup health. Include database and broker disk headroom, replication and
+pool pressure. An empty outbox means publication obligations have resolved through acceptance or
+authorized discard; it proves neither application receipt nor processing. Shared database or broker
+failures can affect all users.
 
 The packaged [OutboxReport](../consumer-example/src/main/java/io/github/gbeaule/keycloaknats/consumer/OutboxReport.java)
-collector emits JSON or Prometheus output using a read-only database identity. It reads backlog
-metadata without payloads. Its settings live in `ConsumerConfig`; run its main class with the consumer
-JAR on the classpath and `json` or `prometheus` as the argument. Combine it with the example
-[consumer metrics](../consumer-example/src/main/java/io/github/gbeaule/keycloaknats/consumer/ConsumerMonitor.java)
-and adapt the [alert rules](../deploy/prometheus-rules.yml) to your delivery objective. Alert on failed
-or stale collection as well as backlog thresholds.
+collector emits JSON or Prometheus output using a read-only database identity with these
+[column grants](../deploy/outbox-monitor.sql). Run its main class from the example JAR with `json`,
+`prometheus` or `audit` as the argument. Only its report settings are loaded: no consumer program,
+consumer database or NATS connection is required. `audit` reads a bounded metadata page; pass
+`audit <afterDiscardedAt> <afterId> <limit>` to continue after its last row.
+
+The report counts users with selected events behind an unresolved predecessor. Predecessor checks
+include rows outside the report's subject filter. Retry-head counts include userless work, and
+unknown-publication counts conservatively include committed send intent. Audit counts describe
+retained history, not lifetime totals. Set the collector's audit retention to match the provider.
+
+Keycloak exposes node activity through [RelayMetrics](../extension/src/main/java/io/github/gbeaule/keycloaknats/RelayMetrics.java)
+and [AuditCleanupMetrics](../extension/src/main/java/io/github/gbeaule/keycloaknats/AuditCleanupMetrics.java).
+Publication failures count failed calls, even if their database transaction later rolls back;
+publication, retry and discard resolutions count only confirmed source commits. Counters reset with
+the process. Discard reasons are bounded labels; event/user IDs appear only in database diagnostics.
+Adapt the [alert rules](../deploy/prometheus-rules.yml) to your objective and collection interval.
+Alert on failed or stale collection as well as backlog thresholds. Do not sum database-wide gauges
+across replicas or treat consumer cursors and effects as extension health.
 
 Budget outage storage from accepted event rate × outage duration × measured storage per event,
-including indexes, WAL, replication and vacuum headroom. Recovery requires sustained delivery and
-processing rates above ongoing capture. More relay workers consume more database connections during
+including indexes, WAL, replication and vacuum headroom. Recovery requires sustained publication
+above ongoing capture. More relay workers consume more database connections during
 broker requests; measure Keycloak request latency and pool pressure before increasing concurrency.
 Use the [benchmark](../integration-tests/src/test/java/io/github/gbeaule/keycloaknats/ThroughputBenchmark.java)
 on representative infrastructure rather than adopting workstation measurements.
@@ -100,23 +129,18 @@ on representative infrastructure rather than adopting workstation measurements.
 Local discard diagnostics expire automatically, independently of NATS. Maintenance settings in
 [AuditCleanupConfig](../extension/src/main/java/io/github/gbeaule/keycloaknats/AuditCleanupConfig.java)
 apply to existing history after restart; they do not change captured publication policies.
-Cleanup touches only audit history. Protected pending events and per-user counters still require
-capacity planning.
+Cleanup defaults to seven days; zero retention makes audits eligible on the next cleanup pass.
+It touches only audit history. Protected pending events and compact per-user counters still require
+separate capacity planning; counters survive user deletion and outbox draining.
 
-[AuditRepository](../extension/src/main/java/io/github/gbeaule/keycloaknats/AuditRepository.java)
-provides bounded, read-only metadata pages and aggregate inspection on a managed session. Start
-inspection with `(Long.MIN_VALUE, "")`, then use the last result's discard time and ID as the cursor.
-Keycloak's metrics endpoint exposes the aggregate signals registered by
-[AuditCleanupMetrics](../extension/src/main/java/io/github/gbeaule/keycloaknats/AuditCleanupMetrics.java).
-Row counts and eligible age are database-wide observations cached after successful sweeps; deletion
-and failure counters are per node. Alert on stale successful-sweep timestamps as well as growing
-eligible age. Runtime cleanup needs SELECT, UPDATE (for row locks) and DELETE on the audit table,
-plus schema USAGE; it needs no DDL privileges.
+Cleanup row counts and eligible age are cached after successful sweeps; scrapes never query the
+database. Runtime cleanup needs SELECT, UPDATE (for row locks) and DELETE on the audit table, plus
+schema USAGE; it needs no DDL privileges. Metadata inspections explain the discarded event, rule,
+reason, time and outcome uncertainty without storing its original payload. They are not a replay feed.
 
 Confirmed publication deletes outbox rows; ordinary vacuum makes their space reusable. Protected pending
 events have no expiry. Expand capacity, narrow future capture deliberately, or stop admitting relevant writes
-before the shared database fills. Purging pending events or aging out inbox identities sacrifices
-delivery guarantees.
+before the shared database fills. Purging protected pending events sacrifices publication guarantees.
 
 ## Consumer recovery
 
@@ -136,6 +160,10 @@ stream recreation or namespace changes need a recovery plan. Command syntax live
 [ConsumerMain](../consumer-example/src/main/java/io/github/gbeaule/keycloaknats/consumer/ConsumerMain.java).
 
 ## Upgrades and coordinated restore
+
+This ordering feature is unreleased and updates initial schemas directly. There is no old-data
+migration or mixed-version rollout. Use fresh, separately named development storage for these
+schemas; existing developer volumes are never deleted automatically.
 
 Test provider and schema upgrades on a restored database with pending events. PostgreSQL major
 upgrades require a rehearsed database migration into appropriate storage; changing an image tag does

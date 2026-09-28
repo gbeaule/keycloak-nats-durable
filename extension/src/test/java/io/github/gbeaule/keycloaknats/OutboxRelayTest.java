@@ -17,6 +17,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
 import jakarta.persistence.Query;
@@ -29,6 +30,7 @@ import java.util.logging.Level;
 import java.util.logging.SimpleFormatter;
 import org.hibernate.Timeouts;
 import org.hibernate.jpa.SpecHints;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -41,6 +43,8 @@ class OutboxRelayTest {
   private EventPublisher publisher;
   private OutboxEvent row;
   private OutboxRelay relay;
+  private SimpleMeterRegistry registry;
+  private RelayMetrics metrics;
 
   @BeforeEach
   @SuppressWarnings("unchecked")
@@ -64,12 +68,23 @@ class OutboxRelayTest {
     row = CaptureFixtures.row("id", "subject", "{}", 0);
     when(query.getResultList()).thenReturn(List.of(row), List.of());
     when(prepared.getResultList()).thenReturn(List.of(row));
-    relay = new OutboxRelay(work -> work.accept(em), publisher, BridgeConfig.from(Map.of()));
+    registry = new SimpleMeterRegistry();
+    metrics = new RelayMetrics(registry);
+    relay =
+        new OutboxRelay(work -> work.accept(em), publisher, BridgeConfig.from(Map.of()), metrics);
+  }
+
+  @AfterEach
+  void closeMetrics() {
+    metrics.close();
+    assertTrue(registry.getMeters().isEmpty());
+    registry.close();
   }
 
   @Test
   void removesOnlyAfterSuccessfulAcknowledgement() throws Exception {
     assertEquals(1, relay.runBatch().published());
+    assertEquals(1, registry.get("knd.publication.confirmed").counter().count());
     var order = inOrder(publisher, em);
     order.verify(publisher).publish(row);
     order.verify(em).remove(row);
@@ -87,6 +102,8 @@ class OutboxRelayTest {
     doThrow(new IOException("ack lost")).when(publisher).publish(row);
     final long before = System.currentTimeMillis();
     assertEquals(0, relay.runBatch().published());
+    assertEquals(1, registry.get("knd.publication.failures").counter().count());
+    assertEquals(1, registry.get("knd.publication.retries").counter().count());
     final long after = System.currentTimeMillis();
     verify(em, never()).remove(any());
     assertEquals("id", row.id());
@@ -167,9 +184,12 @@ class OutboxRelayTest {
               }
             },
             publisher,
-            BridgeConfig.from(Map.of()));
+            BridgeConfig.from(Map.of()),
+            metrics);
     assertEquals(0, worker.runBatch().published());
+    assertEquals(0, registry.get("knd.publication.confirmed").counter().count());
     assertEquals(1, worker.runBatch().published());
+    assertEquals(1, registry.get("knd.publication.confirmed").counter().count());
     verify(publisher, times(2)).publish(row);
     verify(em, times(2)).remove(row);
     assertEquals("id", row.id());
@@ -412,6 +432,11 @@ class OutboxRelayTest {
     var result = relay.runBatch();
     assertEquals(1, result.exhausted());
     assertEquals(0, result.retries());
+    assertEquals(
+        1,
+        registry.get("knd.publication.discards").tag("reason", "max_failures").counter().count());
+    assertEquals(1, registry.get("knd.publication.discards.unknown").counter().count());
+    assertEquals(1, registry.get("knd.publication.failures").counter().count());
     assertEquals(1, row.attempts());
     assertTrue(row.publicationMayHaveOccurred());
     verify(em).persist(any(DiscardAudit.class));
@@ -533,6 +558,42 @@ class OutboxRelayTest {
             });
     assertEquals(OutboxRelay.Outcome.STOPPED, relay.runBatch().outcome());
     verifyNoInteractions(query, prepared, publisher);
+  }
+
+  @Test
+  void metricsCountOnlyCommittedDiscardsAndKeepFailuresSeparate() {
+    usePolicy(new PublicationPolicy(1, null));
+    var commits = new AtomicInteger();
+    when(query.getResultList()).thenReturn(List.of(row), List.of(row), List.of());
+    var worker =
+        new OutboxRelay(
+            work -> {
+              work.accept(em);
+              assertEquals(
+                  0,
+                  registry
+                      .get("knd.publication.discards")
+                      .tag("reason", "expired")
+                      .counter()
+                      .count());
+              if (commits.getAndIncrement() == 0) {
+                throw new IllegalStateException("commit rejected");
+              }
+            },
+            publisher,
+            BridgeConfig.from(Map.of("batch-size", "1")),
+            metrics);
+    assertEquals(0, worker.runBatch().discarded());
+    assertEquals(1, registry.get("knd.publication.transaction.failures").counter().count());
+    assertEquals(1, worker.runBatch().discarded());
+    assertEquals(
+        1, registry.get("knd.publication.discards").tag("reason", "expired").counter().count());
+    assertEquals(0, registry.get("knd.publication.discards.unknown").counter().count());
+    assertEquals(0, registry.get("knd.publication.failures").counter().count());
+    assertTrue(
+        registry.getMeters().stream()
+            .allMatch(
+                m -> m.getId().getTags().stream().allMatch(tag -> tag.getKey().equals("reason"))));
   }
 
   private void usePolicy(PublicationPolicy policy) {

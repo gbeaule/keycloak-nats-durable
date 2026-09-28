@@ -164,8 +164,7 @@ class DurableEventListenerFactoryTest {
 
   @ParameterizedTest
   @ValueSource(booleans = {false, true})
-  void shutdownStopsClaimsAndWakeupsBeforeClosingConnectionsAndWaiting(boolean terminated)
-      throws Exception {
+  void shutdownStopsClaimsAndDrainsBeforeClosingConnections(boolean terminated) throws Exception {
     try (var fixture = new Lifecycle()) {
       fixture.start();
       when(fixture.executor.awaitTermination(5, TimeUnit.SECONDS)).thenReturn(terminated);
@@ -180,10 +179,18 @@ class DurableEventListenerFactoryTest {
         var order = inOrder(relay, wakeup, fixture.executor, publisher);
         order.verify(relay).stop();
         order.verify(wakeup).close();
-        order.verify(fixture.executor).shutdownNow();
-        order.verify(publisher).close();
+        order.verify(fixture.executor).shutdown();
         order.verify(fixture.executor).awaitTermination(5, TimeUnit.SECONDS);
+        if (!terminated) {
+          order.verify(fixture.executor).shutdownNow();
+        }
+        order.verify(publisher).close();
       }
+      var cleanup = fixture.cleanups.constructed().getFirst();
+      var order = inOrder(cleanup, fixture.executor);
+      order.verify(cleanup).stop();
+      order.verify(fixture.executor).shutdown();
+      order.verify(cleanup).close();
     }
   }
 

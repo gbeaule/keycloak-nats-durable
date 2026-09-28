@@ -48,10 +48,11 @@ def main():
             artifacts.append((bom, f"{module or 'aggregate'}-{name}"))
     images = {}
     # Record configured image versions without inventing a digest for a tag.
-    images["compose.yaml"] = re.findall(r"^\s+image:\s*(\S+)\s*$",
-                                        (root / "compose.yaml").read_text(encoding="utf-8"), re.MULTILINE)
-    if len(images["compose.yaml"]) != 2:
-        parser.error("Expected PostgreSQL and NATS image references in compose.yaml")
+    for path in ("compose.yaml", "compose.producer.yaml"):
+        images[path] = re.findall(r"^\s+image:\s*(\S+)\s*$",
+                                  (root / path).read_text(encoding="utf-8"), re.MULTILINE)
+        if len(images[path]) != 2:
+            parser.error(f"Expected two infrastructure image references in {path}")
     for path in ("deploy/Dockerfile.keycloak", "deploy/Dockerfile.consumer"):
         dockerfile = (root / path).read_text(encoding="utf-8")
         defaults = dict(re.findall(r"^ARG\s+(\w+)=(\S+)\s*$", dockerfile, re.MULTILINE))

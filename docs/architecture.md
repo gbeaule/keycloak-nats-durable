@@ -14,9 +14,8 @@ flowchart LR
     R -->|Publish persisted event| J[(NATS JetStream)]
     J -->|Publish ACK| R
     R -->|Delete outbox row and commit| D
-    J --> C[Receiving application]
-    C --> I[(Inbox and business effect)]
-    I -->|Commit before consumer ACK| J
+    R -->|Atomic local discard| A[(Diagnostic audit)]
+    A --> X[Automatic retention cleanup]
 ```
 
 The listener stores selected events in an outbox using Keycloak's existing persistence unit. Capture
@@ -43,32 +42,41 @@ in [development](development.md#compatibility).
 
 ## Relay and failure boundaries
 
-Each Keycloak node can run relay workers against the shared outbox. A worker locks a committed row,
-publishes it, and deletes it only after the expected stream acknowledges acceptance. PostgreSQL row
-locking with `SKIP LOCKED` coordinates workers without a separate leader or lease service. A failed
-node's work becomes available when its database locks are released.
+Each Keycloak node runs a bounded relay pool against the shared outbox. Only a user's earliest
+unresolved event can be attempted. A delayed retry or another worker's lock cannot make its successor
+eligible. Userless events remain independent. PostgreSQL row locks coordinate workers without a
+leader or lease service; a failed node's work becomes available when those locks are released.
+
+Before sending, the relay commits publication intent, then reacquires the unchanged eligible head.
+It retains that row lock through the broker request and resolution transaction. Confirmed NATS
+acceptance followed by committed outbox removal ends the extension's publication responsibility.
 
 Holding the transaction through publication simplifies ownership and crash recovery, at the cost of
 occupying a database connection during bounded broker requests. Local commit notifications reduce
 latency; periodic scans recover work after missed notifications, another node's failure or a restart.
 Worker concurrency must leave database capacity for Keycloak requests.
 
-There are two unavoidable gaps between durable systems:
-
-| Failure point | Recovery |
-| --- | --- |
-| JetStream accepts an event before outbox removal commits | Republish the original ID, subject and payload. |
-| A consumer commits its effect before its ACK reaches JetStream | Redeliver; the consumer's durable idempotency state prevents a repeated effect. |
-
-Delivery is therefore **at least once**. JetStream's message-ID deduplication window helps with short
-retries, but cannot replace consumer deduplication. The example commits an inbox ID and its database
-effect together. HTTP calls, email and other external effects need their own idempotency or outbox.
+A timeout or failed database commit can leave an accepted original whose acknowledgement was lost.
+Retries preserve its ID, subject and payload. The extension guarantees the sequence of publication
+work, not duplicate-free broker history or downstream processing order. JetStream deduplication
+helps with short retries; applications still own their idempotency.
 
 ## Retention and backpressure
 
-Pending outbox events retry indefinitely. They have no age expiry, retry-count deletion or automatic
-purge. Capture-policy changes affect future events; accepted events retain their original identity,
-subject and bytes.
+Pending events retry indefinitely by default. Explicit event policies may allow discard by age,
+failed attempts, or either limit. Age starts at database capture time, independently of the source
+event timestamp. Policy snapshots survive filter reloads, which affect future captures only.
+
+Fair expiry scans share the relay's bounded work allowance and can discard queued successors or
+delayed retries without contacting NATS. Discard inserts metadata-only diagnostics and removes the
+original atomically. A committed discard releases that sequence position without publishing a
+replacement, tombstone or control message. If publication intent was recorded, the audit conservatively
+reports an unknown outcome: discard cannot retract an accepted or in-flight original.
+
+An independent worker removes diagnostic history after seven days by default. Cleanup uses bounded
+transactions and works during broker outages; retention zero makes history eligible on the next
+pass. Cleanup never deletes pending originals or durable per-user counters. Shutdown stops new claims
+and allows bounded draining; restart discovers unresolved database state.
 
 The publisher validates stream settings to reject configurations that can silently evict accepted
 work. A full stream rejects new publications, which remain in PostgreSQL for retry. Durability still
@@ -88,14 +96,17 @@ recovery belong to the deployment owner; see [operations](operations.md).
 
 ## Ordering and event meaning
 
-Capture now assigns transactional per-user positions. Relay coordination is still pending, so the
-bridge does not yet guarantee per-user publication ordering. Concurrent publication and retries can
-reorder events, even with one relay worker. Event timestamps are not commit sequences.
+Capture assigns monotonically increasing positions per affected `(realmId, userId)`, including
+recognized nested user resources. The admin actor is never substituted for the target. Events
+without confident user attribution do not share an unknown-user queue or allocate counter rows.
+
+Publishing positions 10 and 12 after discarding 11 is valid. Subscribers may filter subjects and must
+not wait for absent sequence values. No full-feed subscription or special receiver library is needed.
+After an ambiguous discard, a late original or duplicate may still appear in NATS.
 
 User enablement is an observed state, not proof of a transition. Applications maintaining account or
 authorization projections must reconcile with current Keycloak state so a delayed update cannot undo
-a later disablement or deletion. Publication ordering is a separate relay phase; receiving
-applications remain responsible for their processing order.
+a later disablement or deletion. Receiving applications remain responsible for their processing order.
 
 ## Code map
 
@@ -104,5 +115,6 @@ applications remain responsible for their processing order.
 | Capture | [Listener](../extension/src/main/java/io/github/gbeaule/keycloaknats/DurableEventListener.java), [policy](../extension/src/main/java/io/github/gbeaule/keycloaknats/EventFilter.java) and [envelope](../extension/src/main/java/io/github/gbeaule/keycloaknats/EventEnvelope.java) |
 | Outbox | [Schema migrations](../extension/src/main/resources/META-INF/nats-outbox-changelog.xml), [row claims](../extension/src/main/java/io/github/gbeaule/keycloaknats/OutboxRepository.java) and [relay](../extension/src/main/java/io/github/gbeaule/keycloaknats/OutboxRelay.java) |
 | Transport | [Publisher](../extension/src/main/java/io/github/gbeaule/keycloaknats/JetStreamPublisher.java) and shared [NATS transport module](../nats-transport/src/main/java/io/github/gbeaule/keycloaknats) |
+| Operations | [Lifecycle](../extension/src/main/java/io/github/gbeaule/keycloaknats/DurableEventListenerFactory.java), [publication metrics](../extension/src/main/java/io/github/gbeaule/keycloaknats/RelayMetrics.java), [audit cleanup](../extension/src/main/java/io/github/gbeaule/keycloaknats/AuditCleanup.java) and [read-only reports](../consumer-example/src/main/java/io/github/gbeaule/keycloaknats/consumer/OutboxReport.java) |
 | Example receiver | [Inbox processing](../consumer-example/src/main/java/io/github/gbeaule/keycloaknats/consumer/InboxProcessor.java) and [worker](../consumer-example/src/main/java/io/github/gbeaule/keycloaknats/consumer/ConsumerWorker.java) |
 | Verification | [Container integration tests](../integration-tests/src/test/java/io/github/gbeaule/keycloaknats) exercise the packaged provider and failure boundaries. |

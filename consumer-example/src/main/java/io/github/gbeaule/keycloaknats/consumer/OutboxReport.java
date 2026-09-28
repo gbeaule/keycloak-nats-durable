@@ -3,8 +3,10 @@ package io.github.gbeaule.keycloaknats.consumer;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.gbeaule.keycloaknats.routing.SubjectPattern;
 import java.nio.charset.StandardCharsets;
-import java.time.Instant;
+import java.sql.Connection;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import javax.sql.DataSource;
 
@@ -18,17 +20,33 @@ public final class OutboxReport {
   public static void main(String[] args) {
     boolean prometheus = args.length == 1 && "prometheus".equals(args[0]);
     try {
+      var settings = ConsumerConfig.system().report();
+      if (args.length > 0 && "audit".equals(args[0])) {
+        if (args.length != 1 && args.length != 4) {
+          throw new IllegalArgumentException("Expected audit [afterDiscardedAt afterId limit]");
+        }
+        var rows =
+            inspect(
+                settings.database(),
+                settings.schema(),
+                settings.timeoutSeconds(),
+                args.length == 1 ? Long.MIN_VALUE : Long.parseLong(args[1]),
+                args.length == 1 ? "" : args[2],
+                args.length == 1 ? 100 : Integer.parseInt(args[3]));
+        System.out.println(new ObjectMapper().writeValueAsString(rows));
+        return;
+      }
       if (args.length > 1 || (args.length == 1 && !prometheus && !"json".equals(args[0]))) {
         throw new IllegalArgumentException("Expected json or prometheus");
       }
-      var settings = ConsumerConfig.system().report();
       Map<String, Number> report =
           collect(
               settings.database(),
               settings.schema(),
               settings.subject(),
               settings.realmPrefix(),
-              settings.timeoutSeconds());
+              settings.timeoutSeconds(),
+              settings.auditRetentionSeconds());
       long maxRows = settings.maxRows();
       long maxAge = settings.maxAgeSeconds();
       boolean exceeded =
@@ -55,37 +73,56 @@ public final class OutboxReport {
   public static Map<String, Number> collect(
       DataSource database, String schema, String subject, String realmPrefix, int timeoutSeconds)
       throws Exception {
-    if (schema == null
-        || schema.isBlank()
-        || schema.indexOf('\0') >= 0
-        || schema.getBytes(StandardCharsets.UTF_8).length > 63
-        || timeoutSeconds < 1
-        || timeoutSeconds > 300) {
-      throw new IllegalArgumentException("Invalid report schema or timeout");
+    return collect(
+        database,
+        schema,
+        subject,
+        realmPrefix,
+        timeoutSeconds,
+        ConsumerConfig.DEFAULT_AUDIT_RETENTION_SECONDS);
+  }
+
+  /** Use the provider's retention setting to measure eligibility against the same policy. */
+  public static Map<String, Number> collect(
+      DataSource database,
+      String schema,
+      String subject,
+      String realmPrefix,
+      int timeoutSeconds,
+      int auditRetentionSeconds)
+      throws Exception {
+    if (auditRetentionSeconds < ConsumerConfig.MIN_AUDIT_RETENTION_SECONDS
+        || auditRetentionSeconds > ConsumerConfig.MAX_AUDIT_RETENTION_SECONDS) {
+      throw new IllegalArgumentException("Invalid audit retention");
     }
-    String table = "\"" + schema.replace("\"", "\"\"") + "\".\"kc_nats_outbox\"";
+    String table = table(schema, "kc_nats_outbox");
     String pattern = sqlPattern(subject);
     var report = new LinkedHashMap<String, Number>();
-    try (var db = database.getConnection()) {
-      db.setReadOnly(true);
-      db.setAutoCommit(false);
-      try (var settings =
-          db.prepareStatement(
-              "SELECT set_config('statement_timeout', ?, true),"
-                  + " set_config('lock_timeout', '1000', true)")) {
-        settings.setString(1, Integer.toString(timeoutSeconds * 1000));
-        settings.setQueryTimeout(timeoutSeconds);
-        settings.execute();
-      }
+    try (var db = open(database, timeoutSeconds)) {
       String sql =
           """
+          WITH selected AS (
+            SELECT event.created_at, event.attempts, event.next_attempt_at, event.ordering_key,
+              event.publication_may_have_occurred,
+              event.ordering_key IS NOT NULL AND EXISTS (
+                SELECT 1 FROM %s predecessor
+                WHERE predecessor.ordering_key = event.ordering_key
+                  AND predecessor.user_sequence < event.user_sequence
+              ) AS blocked
+            FROM %s event WHERE (? = '' OR subject ~ ?) AND (? = '' OR starts_with(subject,?))
+          )
           SELECT count(*),
-            greatest(0,coalesce(extract(epoch FROM clock_timestamp())-min(created_at)/1000.0,0)),
+            greatest(0,coalesce(extract(epoch FROM transaction_timestamp())-min(created_at)/1000.0,0)),
             coalesce(max(attempts),0),
-            count(*) FILTER (WHERE next_attempt_at <= extract(epoch FROM clock_timestamp())*1000)
-          FROM %s WHERE (? = '' OR subject ~ ?) AND (? = '' OR starts_with(subject,?))
+            count(*) FILTER (WHERE NOT blocked AND next_attempt_at <= extract(epoch FROM transaction_timestamp())*1000),
+            count(*) FILTER (WHERE blocked),
+            count(DISTINCT ordering_key) FILTER (WHERE blocked),
+            count(*) FILTER (WHERE NOT blocked AND attempts > 0),
+            count(*) FILTER (WHERE publication_may_have_occurred),
+            extract(epoch FROM transaction_timestamp())
+          FROM selected
           """
-              .formatted(table);
+              .formatted(table, table);
       try (var query = db.prepareStatement(sql)) {
         query.setQueryTimeout(timeoutSeconds);
         query.setString(1, ">".equals(subject) ? "" : pattern);
@@ -98,6 +135,41 @@ public final class OutboxReport {
           report.put("oldest_age_seconds", result.getDouble(2));
           report.put("max_attempts", result.getLong(3));
           report.put("due", result.getLong(4));
+          report.put("blocked_events", result.getLong(5));
+          report.put("blocked_users", result.getLong(6));
+          report.put("retrying_heads", result.getLong(7));
+          report.put("publication_unknown", result.getLong(8));
+          report.put("collected_at_timestamp_seconds", result.getDouble(9));
+        }
+      }
+      String auditSql =
+          """
+          SELECT count(*),
+            count(*) FILTER (WHERE reason = 'EXPIRED'),
+            count(*) FILTER (WHERE reason = 'MAX_FAILURES'),
+            count(*) FILTER (WHERE publication_may_have_occurred),
+            count(*) FILTER (WHERE discarded_at <= extract(epoch FROM transaction_timestamp())*1000 - ?),
+            greatest(0,coalesce(extract(epoch FROM transaction_timestamp()) -
+              min(discarded_at) FILTER (WHERE discarded_at <= extract(epoch FROM transaction_timestamp())*1000 - ?)/1000.0,0))
+          FROM %s WHERE (? = '' OR subject ~ ?) AND (? = '' OR starts_with(subject,?))
+          """
+              .formatted(table(schema, "kc_nats_discard_audit"));
+      try (var query = db.prepareStatement(auditSql)) {
+        query.setQueryTimeout(timeoutSeconds);
+        query.setLong(1, auditRetentionSeconds * 1000L);
+        query.setLong(2, auditRetentionSeconds * 1000L);
+        query.setString(3, ">".equals(subject) ? "" : pattern);
+        query.setString(4, pattern);
+        query.setString(5, realmPrefix);
+        query.setString(6, realmPrefix);
+        try (var result = query.executeQuery()) {
+          result.next();
+          report.put("audit_retained", result.getLong(1));
+          report.put("audit_retained_expired", result.getLong(2));
+          report.put("audit_retained_max_failures", result.getLong(3));
+          report.put("audit_retained_unknown", result.getLong(4));
+          report.put("audit_eligible", result.getLong(5));
+          report.put("audit_oldest_eligible_age_seconds", result.getDouble(6));
         }
       }
       try (var query =
@@ -121,9 +193,83 @@ public final class OutboxReport {
       }
       db.commit();
     }
-    report.put("collected_at_timestamp_seconds", Instant.now().getEpochSecond());
     report.put("scrape_success", 1);
     return report;
+  }
+
+  /** Metadata-only keyset page, independent of NATS and the optional example application. */
+  public static List<Map<String, Object>> inspect(
+      DataSource database,
+      String schema,
+      int timeoutSeconds,
+      long afterDiscardedAt,
+      String afterId,
+      int limit)
+      throws Exception {
+    if (afterId == null || limit < 1 || limit > 500) {
+      throw new IllegalArgumentException("Expected a cursor and limit of 1..500");
+    }
+    String sql =
+        """
+        SELECT id, realm_id, event_type, subject, payload_sha256, ordering_key, user_sequence,
+          max_age_seconds, max_failures, expires_at, filter_sha256, rule_id, created_at,
+          discarded_at, reason, attempts, publication_may_have_occurred
+        FROM %s WHERE (discarded_at, id) > (?, ?) ORDER BY discarded_at, id LIMIT ?
+        """
+            .formatted(table(schema, "kc_nats_discard_audit"));
+    var rows = new ArrayList<Map<String, Object>>();
+    try (var db = open(database, timeoutSeconds);
+        var query = db.prepareStatement(sql)) {
+      query.setQueryTimeout(timeoutSeconds);
+      query.setLong(1, afterDiscardedAt);
+      query.setString(2, afterId);
+      query.setInt(3, limit);
+      try (var result = query.executeQuery()) {
+        while (result.next()) {
+          var row = new LinkedHashMap<String, Object>();
+          for (int column = 1; column <= result.getMetaData().getColumnCount(); column++) {
+            row.put(result.getMetaData().getColumnLabel(column), result.getObject(column));
+          }
+          rows.add(row);
+        }
+      }
+      db.commit();
+    }
+    return rows;
+  }
+
+  private static String table(String schema, String name) {
+    if (schema == null
+        || schema.isBlank()
+        || schema.indexOf('\0') >= 0
+        || schema.getBytes(StandardCharsets.UTF_8).length > 63) {
+      throw new IllegalArgumentException("Invalid report schema");
+    }
+    return "\"" + schema.replace("\"", "\"\"") + "\".\"" + name + "\"";
+  }
+
+  private static Connection open(DataSource database, int timeoutSeconds) throws Exception {
+    if (timeoutSeconds < 1 || timeoutSeconds > 300) {
+      throw new IllegalArgumentException("Invalid report timeout");
+    }
+    var db = database.getConnection();
+    try {
+      db.setReadOnly(true);
+      db.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+      db.setAutoCommit(false);
+      try (var settings =
+          db.prepareStatement(
+              "SELECT set_config('statement_timeout', ?, true),"
+                  + " set_config('lock_timeout', '1000', true)")) {
+        settings.setString(1, Integer.toString(timeoutSeconds * 1000));
+        settings.setQueryTimeout(timeoutSeconds);
+        settings.execute();
+      }
+      return db;
+    } catch (Exception failure) {
+      db.close();
+      throw failure;
+    }
   }
 
   /** Fixed metric names keep event/realm cardinality under the monitoring owner's control. */

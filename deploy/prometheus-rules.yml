@@ -1,15 +1,15 @@
-# Starting points only: the Keycloak/application owner sets thresholds, routing and storage budgets.
+# Starting points only: the deployment owner sets thresholds, routing and storage budgets.
 # Collect each outbox once per database (not once per Keycloak replica).
 groups:
-  - name: keycloak-nats-delivery
+  - name: keycloak-nats-publication
     rules:
-      - alert: KeycloakOutboxDeliveryDelayed
+      - alert: KeycloakOutboxPublicationDelayed
         expr: knd_outbox_oldest_age_seconds > 120
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "Keycloak event delivery is behind the example latency budget"
+          summary: "Keycloak publication is behind the example latency budget"
           description: "Inspect relay errors, stream capacity and quorum; keep Keycloak readiness separate."
       - alert: KeycloakOutboxCollectionFailed
         expr: knd_outbox_scrape_success == 0 or time() - knd_outbox_collected_at_timestamp_seconds > 180
@@ -18,6 +18,49 @@ groups:
           severity: warning
         annotations:
           summary: "Outbox monitoring is failing or stale"
+      - alert: KeycloakPublicationRetrying
+        expr: increase(knd_publication_failures_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Keycloak publication attempts are failing"
+      - alert: KeycloakUsersBlocked
+        expr: knd_outbox_blocked_users > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Pending user heads are blocking later publication"
+      - alert: KeycloakLocalDiscard
+        expr: increase(knd_publication_discards_total[5m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Keycloak abandoned pending events under their captured policy"
+      - alert: KeycloakDiscardOutcomeUnknown
+        expr: increase(knd_publication_discards_unknown_total[5m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Discarded originals may already have reached NATS"
+      - alert: KeycloakAuditCleanupFailed
+        expr: increase(knd_audit_cleanup_failures_total[5m]) > 0 or time() - knd_audit_cleanup_last_success_timestamp_seconds > 180
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Local discard audit cleanup is failing or stale"
+      - alert: KeycloakAuditCleanupBehind
+        expr: knd_outbox_audit_eligible > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Discard diagnostics remain past their configured retention"
+  # Optional example application health; separate from the provider's publication obligations.
+  - name: keycloak-nats-example-consumer
+    rules:
       - alert: KeycloakConsumerRetrying
         expr: increase(knd_consumer_retries_total[5m]) > 0
         for: 5m

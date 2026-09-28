@@ -32,6 +32,18 @@ Check `outcome` and the affected identity before applying a business effect.
 Consumer subject filters select stored messages. Capture filters determine which events enter the
 pipeline at all. A consumer filter does not remove unselected messages from the stream.
 
+An attributable user's envelope includes `data.ordering.key` and a positive decimal-string
+`data.ordering.sequence`. These describe capture order across nodes, independently of the event timestamp.
+The relay attempts a successor only after earlier positions resolve by publication or authorized
+local discard. Sequence gaps are valid, including with filtered subscriptions. Unattributable events
+omit ordering metadata and publish independently; no receiver library or full-feed subscription is
+required. Subjects are unchanged.
+
+Publication policy and database capture time are internal snapshots. They are not subscriber
+processing deadlines. Local discard emits no message and cannot retract a previously accepted or
+in-flight original; a timeout is not proof that NATS received nothing. Consumers must tolerate
+duplicates and possible late originals after ambiguous discard.
+
 ## Interpret account events carefully
 
 [Disablement](examples/admin-disable.json) is a successful direct USER update with

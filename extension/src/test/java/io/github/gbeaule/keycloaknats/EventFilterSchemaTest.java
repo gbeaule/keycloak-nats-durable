@@ -21,6 +21,7 @@ import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.keycloak.events.admin.OperationType;
 
 class EventFilterSchemaTest {
   private static final Schema schema =
@@ -52,6 +53,31 @@ class EventFilterSchemaTest {
             .resolve(event, "keycloak.events.realm.user.login")
             .ifPresent(policy -> assertEquals(PublicationPolicy.RETRY, policy.policy()));
       }
+    }
+  }
+
+  @Test
+  void exampleProtectsUserLifecycleWhileLoginPolicyIsExplicitlyDiscardable() throws Exception {
+    try (var input = getClass().getResourceAsStream("/config/events-with-delivery.json")) {
+      var filter = EventFilterTest.parse(new String(input.readAllBytes(), StandardCharsets.UTF_8));
+      for (var operation :
+          new OperationType[] {OperationType.CREATE, OperationType.UPDATE, OperationType.DELETE}) {
+        var policy =
+            filter
+                .resolve(
+                    EventEnvelopeTest.admin(operation),
+                    false,
+                    "keycloak.events.realm.admin.user.update")
+                .orElseThrow();
+        assertEquals(PublicationPolicy.RETRY, policy.policy());
+        assertEquals("protected-user-lifecycle", policy.ruleId());
+      }
+      var policy =
+          filter
+              .resolve(EventEnvelopeTest.login(), "keycloak.events.realm.user.login")
+              .orElseThrow();
+      assertEquals("short-lived-login", policy.ruleId());
+      assertEquals(new PublicationPolicy(300, 20), policy.policy());
     }
   }
 

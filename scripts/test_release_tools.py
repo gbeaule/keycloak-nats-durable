@@ -110,6 +110,9 @@ class ReleaseManifestTest(unittest.TestCase):
                         "components": [{"name": "sample", "version": "1"}]}))
             (root / "compose.yaml").write_text("services:\n  postgres:\n    image: postgres:18.6-alpine\n"
                                                 "  nats:\n    image: nats:2.15.0-alpine\n")
+            (root / "compose.producer.yaml").write_text(
+                "services:\n  postgres:\n    image: postgres:18.6-alpine\n"
+                "  provision:\n    image: natsio/nats-box:0.19.7\n")
             (root / "deploy").mkdir()
             (root / "deploy" / "Dockerfile.keycloak").write_text(
                 "ARG KEYCLOAK_IMAGE=quay.io/keycloak/keycloak:26.7.4\n"
@@ -123,6 +126,8 @@ class ReleaseManifestTest(unittest.TestCase):
             manifest = json.loads((output / "manifest.json").read_text())
             self.assertEqual(manifest["baseImages"]["compose.yaml"],
                              ["postgres:18.6-alpine", "nats:2.15.0-alpine"])
+            self.assertEqual(manifest["baseImages"]["compose.producer.yaml"],
+                             ["postgres:18.6-alpine", "natsio/nats-box:0.19.7"])
             self.assertEqual(manifest["baseImages"]["deploy/Dockerfile.keycloak"],
                              ["quay.io/keycloak/keycloak:26.7.4"])
             self.assertEqual(manifest["baseImages"]["deploy/Dockerfile.consumer"],

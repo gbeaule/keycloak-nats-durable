@@ -16,7 +16,7 @@ final class NatsDiagnostics implements ErrorListener, ConnectionListener {
   @Override
   public void connectionEvent(Connection connection, Events event) {
     if (event == Events.DISCONNECTED) {
-      logger.warn("NATS disconnected; committed events remain in the outbox for retry");
+      logger.warn("NATS disconnected; pending events retry or resolve under their captured policy");
     } else {
       logger.infof("NATS connection event=%s", event);
     }

@@ -103,7 +103,33 @@ class ConsumerConfigTest {
     assertEquals("auth.cmVhbG0vYQ.", report.realmPrefix());
     assertEquals(42, report.maxRows());
     assertEquals(3, report.database().getSocketTimeout());
+    assertEquals(604800, report.auditRetentionSeconds());
     assertThrows(IllegalArgumentException.class, config::nats);
+  }
+
+  @Test
+  void collectorValidatesRetentionIndependentlyOfConsumerSettings() {
+    for (String value : new String[] {"0", "315360000"}) {
+      var report =
+          new ConsumerConfig(
+                  Map.of(
+                          "KND_OUTBOX_DB_URL",
+                          "jdbc:postgresql://database/keycloak",
+                          "KND_AUDIT_RETENTION_SECONDS",
+                          value)
+                      ::get)
+              .report();
+      assertEquals(Integer.parseInt(value), report.auditRetentionSeconds());
+    }
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            new ConsumerConfig(
+                    Map.of(
+                            "KND_OUTBOX_DB_URL", "jdbc:postgresql://database/keycloak",
+                            "KND_AUDIT_RETENTION_SECONDS", "-1")
+                        ::get)
+                .report());
   }
 
   @Test

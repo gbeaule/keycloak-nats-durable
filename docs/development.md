@@ -59,8 +59,21 @@ Apply the selected server's own support and upgrade requirements. Test the deplo
 source/target versions on a restored database; default test images do not require existing
 installations to change their database major version.
 
-Add new database changesets for schema evolution. Preserve applied migration identities and the
-persisted event contract; rewriting old migrations or pending payloads undermines recovery.
+The per-user publication feature is unreleased: its initial schemas and event contract are updated
+directly, without old-data migration, dual formats or mixed-version rollout. Use a separately named
+fresh development deployment when testing it against older local schemas. Do not automatically
+delete developer volumes. Once released, schema evolution must preserve applied migration identities
+and pending event contracts.
+
+The standalone publisher acceptance run requires no receiving application:
+
+```sh
+python scripts/validate.py integration --maven-arg=-Dit.test=ProductionModeIT,NatsReadinessIT,PerUserPublicationIT
+```
+
+These tests verify the optimized provider, broker readiness, ordered originals, local discard and
+cleanup during an outage, read-only diagnostics and recovery after restart. They inspect stored NATS
+messages without provisioning a consumer. See [operations](operations.md) for the manual smoke test.
 
 ## CI and release trust
 

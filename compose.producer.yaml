@@ -1,0 +1,50 @@
+name: keycloak-nats-producer
+services:
+  postgres:
+    image: postgres:18.6-alpine
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: keycloak-local-only
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U keycloak"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  nats:
+    extends:
+      file: compose.yaml
+      service: nats
+  provision:
+    image: natsio/nats-box:0.19.7
+    command: [nats, --server=nats://nats:4222, stream, add, --config=/config/stream.json]
+    volumes:
+      - ./deploy/stream.json:/config/stream.json:ro
+    depends_on:
+      nats: {condition: service_healthy}
+  keycloak:
+    build: {context: ., dockerfile: deploy/Dockerfile.keycloak}
+    command: [start-dev, --import-realm, --metrics-enabled=true]
+    ports: ["127.0.0.1:8080:8080", "127.0.0.1:9000:9000"]
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: keycloak-local-only
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin-local-only
+      KND_NATS_URL: nats://nats:4222
+      KND_MIN_REPLICAS: 1
+      KND_RELAY_WORKERS: 2
+      KND_FILTER_FILE: /opt/keycloak/conf/event-policy/events-with-delivery.json
+    volumes:
+      - ./deploy/realm.json:/opt/keycloak/data/import/realm.json:ro
+      - ./config:/opt/keycloak/conf/event-policy:ro
+    depends_on:
+      postgres: {condition: service_healthy}
+      provision: {condition: service_completed_successfully}
+volumes:
+  postgres-data:
+  nats-data:

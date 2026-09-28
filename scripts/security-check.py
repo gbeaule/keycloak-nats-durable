@@ -89,6 +89,11 @@ def main():
                         (root / "compose.yaml").read_text(encoding="utf-8"), re.MULTILINE)
     if len(images) != 2:
         raise SystemExit("Expected versioned PostgreSQL and NATS images in compose.yaml")
+    provisioner = re.findall(r"^\s+image:\s*(natsio/nats-box:[\w.-]+(?:@sha256:[0-9a-f]{64})?)\s*$",
+                            (root / "compose.producer.yaml").read_text(encoding="utf-8"), re.MULTILINE)
+    if len(provisioner) != 1:
+        raise SystemExit("Expected a versioned NATS provisioner image in compose.producer.yaml")
+    images.extend(provisioner)
     for index, image in enumerate(images):
         name = f"infrastructure-{index}"
         run(*base, "image", *shared, "--scanners", "vuln", "--output", f"/reports/{name}.json", image)

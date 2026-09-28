@@ -4,9 +4,11 @@ A Keycloak event listener that publishes to NATS JetStream through a transaction
 outbox. It uses Keycloak's existing database and connection pool. Applications receive events with
 any compatible NATS client; the optional consumer example demonstrates transactional deduplication.
 
-**Delivery is at least once, with no global or per-user ordering guarantee.** Selected events commit
-with the Keycloak transaction and remain in the outbox until JetStream confirms publication.
-Consumers must handle duplicates and acknowledge only after successful processing.
+**Publication is ordered per affected user across Keycloak nodes.** Selected events commit with the
+Keycloak transaction and retry until JetStream confirms acceptance, unless their captured policy
+explicitly permits local discard. A pending event blocks later publication for that user; other users
+can progress. Sequence gaps are valid, and a timeout can leave an accepted or in-flight original.
+Receiving applications own deduplication and processing order.
 
 ## Start here
 
@@ -24,22 +26,28 @@ Dependency versions and build requirements are defined in [pom.xml](pom.xml).
 
 ```sh
 mvn -B -ntp verify
-docker compose up --build -d
+docker compose -f compose.producer.yaml up --build -d
 ```
 
 Open http://localhost:8080 and sign in as `admin` / `admin-local-only`. Select the `durable-demo`
-realm, then disable or delete the `demo` user. Inspect the example consumer's recorded effects:
+realm, then disable the `demo` user. Inspect the publisher without creating a consumer:
 
 ```sh
-docker compose exec postgres psql -U consumer -d consumer -c 'SELECT * FROM knd_effects ORDER BY applied_at'
-docker compose logs consumer keycloak
-docker compose down
+docker compose -f compose.producer.yaml run --rm provision nats --server=nats://nats:4222 stream info KEYCLOAK_EVENTS
+docker compose -f compose.producer.yaml exec postgres psql -U keycloak -c 'SELECT count(*) FROM kc_nats_outbox'
+docker compose -f compose.producer.yaml logs keycloak
+docker compose -f compose.producer.yaml down
 ```
 
-[Compose](compose.yaml) defines the demo services and credentials; [the realm fixture](deploy/realm.json)
+[Producer Compose](compose.producer.yaml) defines the standalone services and credentials;
+[the realm fixture](deploy/realm.json)
 defines its users and clients. Named volumes preserve state across restarts. The demo uses development
 Keycloak mode, plaintext networking and a single broker. See [operations](docs/operations.md) for
 deployment requirements.
+
+The original [consumer demonstration](compose.yaml) remains optional. The standalone deployment
+creates only a stream, with no subscription or consumer database. An empty outbox means publication
+obligations are resolved, including authorized discards; it does not establish downstream completion.
 
 The installable provider is `extension/target/keycloak-nats-durable-<version>.jar`; the runnable example
 is `consumer-example/target/consumer-example-<version>.jar`. Use the version from your build.

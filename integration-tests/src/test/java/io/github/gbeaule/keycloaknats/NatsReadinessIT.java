@@ -40,7 +40,7 @@ class NatsReadinessIT extends IntegrationSupport {
       database.setUser(postgres.getUsername());
       database.setPassword(postgres.getPassword());
       connectNats(options -> options.token(token.toCharArray()));
-      provision();
+      provisionStream();
       keycloak.start();
       loginAdmin();
       createUser();
@@ -71,7 +71,7 @@ class NatsReadinessIT extends IntegrationSupport {
       broker.start();
       try {
         connectNats(configure);
-        provision();
+        provisionStream();
         nats.jetStream().publish("keycloak.events.readiness", new byte[] {1});
         assertEquals(1, messages());
 

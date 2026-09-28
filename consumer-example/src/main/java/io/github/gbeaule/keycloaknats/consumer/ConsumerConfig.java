@@ -16,6 +16,10 @@ import org.postgresql.ds.PGSimpleDataSource;
  * All environment names and defaults for the example consumer, provisioner and backlog collector.
  */
 public final class ConsumerConfig {
+  static final int DEFAULT_AUDIT_RETENTION_SECONDS = 604_800;
+  static final int MIN_AUDIT_RETENTION_SECONDS = 0;
+  static final int MAX_AUDIT_RETENTION_SECONDS = 315_360_000;
+
   private final Environment environment;
 
   /** Injects configuration without reading the process environment. */
@@ -172,7 +176,12 @@ public final class ConsumerConfig {
         realmPrefix,
         timeout,
         environment.integer("KND_REPORT_MAX_ROWS", 0, 0, Integer.MAX_VALUE),
-        environment.integer("KND_REPORT_MAX_AGE_SECONDS", 0, 0, Integer.MAX_VALUE));
+        environment.integer("KND_REPORT_MAX_AGE_SECONDS", 0, 0, Integer.MAX_VALUE),
+        environment.integer(
+            "KND_AUDIT_RETENTION_SECONDS",
+            DEFAULT_AUDIT_RETENTION_SECONDS,
+            MIN_AUDIT_RETENTION_SECONDS,
+            MAX_AUDIT_RETENTION_SECONDS));
   }
 
   /** Connection configuration with credentials excluded from diagnostic rendering. */
@@ -207,7 +216,8 @@ public final class ConsumerConfig {
       String realmPrefix,
       int timeoutSeconds,
       long maxRows,
-      long maxAgeSeconds) {
+      long maxAgeSeconds,
+      int auditRetentionSeconds) {
     @Override
     public String toString() {
       return "ReportSettings[redacted]";

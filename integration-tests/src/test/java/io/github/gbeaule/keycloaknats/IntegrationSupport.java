@@ -68,6 +68,14 @@ abstract class IntegrationSupport {
   static void startInfrastructure(
       String initialVersion, java.util.function.Consumer<GenericContainer<?>> configureKeycloak)
       throws Exception {
+    startInfrastructure(initialVersion, configureKeycloak, true);
+  }
+
+  static void startInfrastructure(
+      String initialVersion,
+      java.util.function.Consumer<GenericContainer<?>> configureKeycloak,
+      boolean provisionConsumer)
+      throws Exception {
     network = Network.newNetwork();
     postgres =
         postgresContainer()
@@ -91,7 +99,10 @@ abstract class IntegrationSupport {
     database.setUser(postgres.getUsername());
     database.setPassword(postgres.getPassword());
     connectNats();
-    provision();
+    provisionStream();
+    if (provisionConsumer) {
+      consumer();
+    }
     keycloak = keycloakContainer(true, initialVersion);
     configureKeycloak.accept(keycloak);
     try {
@@ -193,6 +204,11 @@ abstract class IntegrationSupport {
   }
 
   static void provision() throws Exception {
+    provisionStream();
+    consumer();
+  }
+
+  static void provisionStream() throws Exception {
     nats.jetStreamManagement()
         .addStream(
             StreamConfiguration.builder()
@@ -205,7 +221,6 @@ abstract class IntegrationSupport {
                 .maxBytes(16777216)
                 .duplicateWindow(Duration.ofMinutes(2))
                 .build());
-    consumer();
   }
 
   static void consumer() throws Exception {

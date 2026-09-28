@@ -1,6 +1,8 @@
 package io.github.gbeaule.keycloaknats;
 
-/** One worker per node: prompt local wakeups, immediate backlog draining and bounded idle scans. */
+/**
+ * Prompt local wakeups, immediate backlog draining and bounded idle scans for each relay worker.
+ */
 final class RelayWorker implements Runnable {
   private final OutboxRelay relay;
   private final RelayWakeup wakeup;

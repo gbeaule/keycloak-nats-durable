@@ -75,7 +75,7 @@ class ProductionModeIT extends IntegrationSupport {
     database.setUser(postgres.getUsername());
     database.setPassword(postgres.getPassword());
     connectAdmin();
-    provision();
+    provisionStream();
     String version = System.getProperty("keycloak.version", "26.7.4");
     Path provider = Path.of(System.getProperty("extension.jar")).toAbsolutePath();
     String artifactVersion =
