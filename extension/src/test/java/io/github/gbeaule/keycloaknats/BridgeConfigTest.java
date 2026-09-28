@@ -206,7 +206,8 @@ class BridgeConfigTest {
         base.token(),
         (TlsConfig) values.getOrDefault("tls", base.tls()),
         base.filterFile(),
-        (Duration) values.getOrDefault("filterReloadInterval", base.filterReloadInterval()));
+        (Duration) values.getOrDefault("filterReloadInterval", base.filterReloadInterval()),
+        base.auditCleanup());
   }
 
   @Test

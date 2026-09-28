@@ -56,6 +56,7 @@ class DurableEventListenerFactoryTest {
       fixture.start();
       assertEquals(2, fixture.publishers.constructed().size());
       assertEquals(2, fixture.relays.constructed().size());
+      verify(fixture.cleanups.constructed().getFirst()).start();
       var tasks = ArgumentCaptor.forClass(Runnable.class);
       verify(fixture.executor, times(2)).execute(tasks.capture());
       tasks.getAllValues().forEach(task -> assertInstanceOf(RelayWorker.class, task));
@@ -135,6 +136,32 @@ class DurableEventListenerFactoryTest {
     }
   }
 
+  @Test
+  void cleanupUsesManagedSessionsAndTheConfiguredTransactionTimeout() throws Exception {
+    try (var fixture = new Lifecycle();
+        var jobs = mockStatic(KeycloakModelUtils.class)) {
+      fixture.start();
+      var session = mock(KeycloakSession.class);
+      var jpa = mock(JpaConnectionProvider.class);
+      var em = mock(EntityManager.class);
+      when(session.getProvider(JpaConnectionProvider.class)).thenReturn(jpa);
+      when(jpa.getEntityManager()).thenReturn(em);
+      jobs.when(
+              () ->
+                  KeycloakModelUtils.runJobInTransactionWithTimeout(
+                      eq(fixture.sessions), any(), eq(10)))
+          .thenAnswer(
+              call -> {
+                KeycloakSessionTask task = call.getArgument(1);
+                task.run(session);
+                return null;
+              });
+      fixture.cleanupTransactions.getFirst().run(actual -> assertSame(em, actual));
+      fixture.factory.close();
+      verify(fixture.cleanups.constructed().getFirst()).close();
+    }
+  }
+
   @ParameterizedTest
   @ValueSource(booleans = {false, true})
   void shutdownStopsClaimsAndWakeupsBeforeClosingConnectionsAndWaiting(boolean terminated)
@@ -198,6 +225,12 @@ class DurableEventListenerFactoryTest {
     private final ExecutorService executor = mock(ExecutorService.class);
     private final KeycloakSessionFactory sessions = mock(KeycloakSessionFactory.class);
     private final List<OutboxRelay.Transactions> transactions = new ArrayList<>();
+    private final List<OutboxRelay.Transactions> cleanupTransactions = new ArrayList<>();
+    private final MockedConstruction<AuditCleanup> cleanups =
+        mockConstruction(
+            AuditCleanup.class,
+            (cleanup, context) ->
+                cleanupTransactions.add((OutboxRelay.Transactions) context.arguments().getFirst()));
     private final MockedStatic<Executors> executors = mockStatic(Executors.class);
     private final MockedConstruction<JetStreamPublisher> publishers =
         mockConstruction(JetStreamPublisher.class);
@@ -234,6 +267,7 @@ class DurableEventListenerFactoryTest {
       try {
         factory.close();
       } finally {
+        cleanups.close();
         relays.close();
         wakeups.close();
         publishers.close();

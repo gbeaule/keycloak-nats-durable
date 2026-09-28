@@ -64,6 +64,26 @@ public class DiscardAudit {
   @Column(name = "PUBLICATION_MAY_HAVE_OCCURRED", nullable = false)
   private boolean publicationMayHaveOccurred;
 
+  /** Immutable inspection result containing only the diagnostic allowlist. */
+  public record Metadata(
+      String id,
+      String realmId,
+      String eventType,
+      String subject,
+      String payloadSha256,
+      String orderingKey,
+      Long userSequence,
+      Integer maxAgeSeconds,
+      Integer maxFailures,
+      Long expiresAt,
+      String filterSha256,
+      String ruleId,
+      long createdAt,
+      long discardedAt,
+      DiscardReason reason,
+      long attempts,
+      boolean publicationMayHaveOccurred) {}
+
   /** Required by JPA for hydration. */
   protected DiscardAudit() {}
 
@@ -86,5 +106,26 @@ public class DiscardAudit {
     this.reason = reason;
     this.attempts = row.attempts();
     this.publicationMayHaveOccurred = row.publicationMayHaveOccurred();
+  }
+
+  Metadata metadata() {
+    return new Metadata(
+        id,
+        realmId,
+        eventType,
+        subject,
+        payloadSha256,
+        orderingKey,
+        userSequence,
+        maxAgeSeconds,
+        maxFailures,
+        expiresAt,
+        filterSha256,
+        ruleId,
+        createdAt,
+        discardedAt,
+        reason,
+        attempts,
+        publicationMayHaveOccurred);
   }
 }

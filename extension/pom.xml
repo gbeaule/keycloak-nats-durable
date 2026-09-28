@@ -13,6 +13,11 @@
   </properties>
   <dependencies>
     <dependency>
+      <groupId>io.micrometer</groupId>
+      <artifactId>micrometer-core</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
       <groupId>io.github.gbeaule</groupId>
       <artifactId>nats-transport</artifactId>
       <version>${project.version}</version>

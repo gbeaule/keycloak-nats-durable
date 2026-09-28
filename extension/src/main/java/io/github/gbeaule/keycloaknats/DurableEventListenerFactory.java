@@ -1,5 +1,6 @@
 package io.github.gbeaule.keycloaknats;
 
+import io.micrometer.core.instrument.Metrics;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -23,6 +24,7 @@ public final class DurableEventListenerFactory implements EventListenerProviderF
   private BridgeConfig config;
   private ReloadingEventFilter filter;
   private ExecutorService executor;
+  private AuditCleanup auditCleanup;
   private final List<RelayWakeup> wakeups = new CopyOnWriteArrayList<>();
   private final List<OutboxRelay> relays = new ArrayList<>();
   private final List<EventPublisher> publishers = new ArrayList<>();
@@ -60,6 +62,18 @@ public final class DurableEventListenerFactory implements EventListenerProviderF
       return;
     }
     filter.start(config.filterReloadInterval().toMillis());
+    auditCleanup =
+        new AuditCleanup(
+            work ->
+                KeycloakModelUtils.runJobInTransactionWithTimeout(
+                    factory,
+                    session ->
+                        work.accept(
+                            session.getProvider(JpaConnectionProvider.class).getEntityManager()),
+                    config.auditCleanup().timeoutSeconds()),
+            config.auditCleanup(),
+            Metrics.globalRegistry);
+    auditCleanup.start();
     AtomicInteger workerNumber = new AtomicInteger();
     executor =
         Executors.newFixedThreadPool(
@@ -96,6 +110,7 @@ public final class DurableEventListenerFactory implements EventListenerProviderF
   @Override
   public void close() {
     ExecutorService stoppingExecutor;
+    AuditCleanup stoppingCleanup;
     List<EventPublisher> stoppingPublishers;
     synchronized (this) {
       if (closed) {
@@ -108,6 +123,7 @@ public final class DurableEventListenerFactory implements EventListenerProviderF
         filter.close();
       }
       stoppingExecutor = executor;
+      stoppingCleanup = auditCleanup;
       stoppingPublishers = List.copyOf(publishers);
     }
     // Do not hold the lifecycle monitor while closing sockets or waiting for the worker.
@@ -115,6 +131,9 @@ public final class DurableEventListenerFactory implements EventListenerProviderF
       stoppingExecutor.shutdownNow();
     }
     stoppingPublishers.forEach(EventPublisher::close);
+    if (stoppingCleanup != null) {
+      stoppingCleanup.close();
+    }
     if (stoppingExecutor != null) {
       try {
         if (!stoppingExecutor.awaitTermination(5, TimeUnit.SECONDS)) {

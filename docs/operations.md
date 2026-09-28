@@ -97,8 +97,24 @@ broker requests; measure Keycloak request latency and pool pressure before incre
 Use the [benchmark](../integration-tests/src/test/java/io/github/gbeaule/keycloaknats/ThroughputBenchmark.java)
 on representative infrastructure rather than adopting workstation measurements.
 
-Confirmed publication deletes outbox rows; ordinary vacuum makes their space reusable. Pending events
-have no expiry. Expand capacity, narrow future capture deliberately, or stop admitting relevant writes
+Local discard diagnostics expire automatically, independently of NATS. Maintenance settings in
+[AuditCleanupConfig](../extension/src/main/java/io/github/gbeaule/keycloaknats/AuditCleanupConfig.java)
+apply to existing history after restart; they do not change captured publication policies.
+Cleanup touches only audit history. Protected pending events and per-user counters still require
+capacity planning.
+
+[AuditRepository](../extension/src/main/java/io/github/gbeaule/keycloaknats/AuditRepository.java)
+provides bounded, read-only metadata pages and aggregate inspection on a managed session. Start
+inspection with `(Long.MIN_VALUE, "")`, then use the last result's discard time and ID as the cursor.
+Keycloak's metrics endpoint exposes the aggregate signals registered by
+[AuditCleanupMetrics](../extension/src/main/java/io/github/gbeaule/keycloaknats/AuditCleanupMetrics.java).
+Row counts and eligible age are database-wide observations cached after successful sweeps; deletion
+and failure counters are per node. Alert on stale successful-sweep timestamps as well as growing
+eligible age. Runtime cleanup needs SELECT, UPDATE (for row locks) and DELETE on the audit table,
+plus schema USAGE; it needs no DDL privileges.
+
+Confirmed publication deletes outbox rows; ordinary vacuum makes their space reusable. Protected pending
+events have no expiry. Expand capacity, narrow future capture deliberately, or stop admitting relevant writes
 before the shared database fills. Purging pending events or aging out inbox identities sacrifices
 delivery guarantees.
 

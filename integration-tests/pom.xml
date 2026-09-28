@@ -9,6 +9,11 @@
   <artifactId>integration-tests</artifactId>
   <dependencies>
     <dependency>
+      <groupId>io.micrometer</groupId>
+      <artifactId>micrometer-core</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
       <groupId>org.keycloak</groupId>
       <artifactId>keycloak-model-jpa</artifactId>
       <scope>test</scope>

@@ -27,7 +27,8 @@ public record BridgeConfig(
     String token,
     TlsConfig tls,
     String filterFile,
-    Duration filterReloadInterval) {
+    Duration filterReloadInterval,
+    AuditCleanupConfig auditCleanup) {
   /** Reads provider settings, falling back to matching environment variables. */
   public static BridgeConfig from(Config.Scope scope) {
     Environment environment = Environment.system();
@@ -64,11 +65,18 @@ public record BridgeConfig(
         input.apply("token"),
         TlsConfig.from(servers, get),
         get.apply("filter-file"),
-        Duration.ofMillis(number(get, "filter-reload-ms", 1000)));
+        Duration.ofMillis(number(get, "filter-reload-ms", 1000)),
+        new AuditCleanupConfig(
+            Duration.ofSeconds(number(get, "audit-retention-seconds", 604800)),
+            Duration.ofMillis(number(get, "audit-cleanup-interval-ms", 60000)),
+            number(get, "audit-cleanup-batch-size", 500),
+            number(get, "audit-cleanup-max-batches", 10),
+            number(get, "audit-cleanup-timeout-seconds", 10)));
   }
 
   /** Validates all limits and defensively copies the server list. */
   public BridgeConfig {
+    java.util.Objects.requireNonNull(auditCleanup, "auditCleanup");
     servers = NatsServers.validate(servers);
     if (stream == null || !stream.matches("[A-Za-z0-9_-]{1,128}")) {
       throw new IllegalArgumentException("Invalid stream name");
