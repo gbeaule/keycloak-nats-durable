@@ -1,12 +1,23 @@
 package io.github.gbeaule.keycloaknats;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
 
 class PublicationPolicyTest {
+  @Test
+  void expiryWinsWhenBothLimitsAreReached() {
+    var policy = new PublicationPolicy(1, 2);
+    assertNull(policy.discardReason(1000, 1999, 1));
+    assertEquals(DiscardReason.MAX_FAILURES, policy.discardReason(1000, 1999, 2));
+    assertEquals(DiscardReason.EXPIRED, policy.discardReason(1000, 2000, 1));
+    assertEquals(DiscardReason.EXPIRED, policy.discardReason(1000, 2000, 2));
+  }
+
   @Test
   void limitsAreInclusiveAlternativesAndRetryNeverExpires() {
     var both = new PublicationPolicy(300, 20);

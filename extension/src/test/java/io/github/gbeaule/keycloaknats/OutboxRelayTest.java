@@ -19,6 +19,7 @@ import static org.mockito.Mockito.when;
 
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
+import jakarta.persistence.Query;
 import jakarta.persistence.TypedQuery;
 import java.io.IOException;
 import java.util.List;
@@ -35,6 +36,8 @@ class OutboxRelayTest {
   private EntityManager em;
   private TypedQuery<OutboxEvent> query;
   private TypedQuery<OutboxEvent> prepared;
+  private TypedQuery<OutboxEvent> expired;
+  private Query clock;
   private EventPublisher publisher;
   private OutboxEvent row;
   private OutboxRelay relay;
@@ -46,8 +49,18 @@ class OutboxRelayTest {
     publisher = mock(EventPublisher.class);
     query = mock(TypedQuery.class, RETURNS_SELF);
     prepared = mock(TypedQuery.class, RETURNS_SELF);
+    expired = mock(TypedQuery.class, RETURNS_SELF);
+    clock = mock(Query.class);
+    when(em.createNativeQuery(anyString(), eq(Long.class))).thenReturn(clock);
+    when(clock.getSingleResult()).thenAnswer(call -> System.currentTimeMillis());
     when(em.createQuery(anyString(), eq(OutboxEvent.class)))
-        .thenAnswer(call -> call.<String>getArgument(0).contains(":version") ? prepared : query);
+        .thenAnswer(
+            call -> {
+              String hql = call.getArgument(0);
+              return hql.contains(":version")
+                  ? prepared
+                  : hql.contains("event.expiresAt") ? expired : query;
+            });
     row = CaptureFixtures.row("id", "subject", "{}", 0);
     when(query.getResultList()).thenReturn(List.of(row), List.of());
     when(prepared.getResultList()).thenReturn(List.of(row));
@@ -310,7 +323,7 @@ class OutboxRelayTest {
         new OutboxRelay(
             work -> work.accept(em), publisher, BridgeConfig.from(Map.of("batch-size", "2")));
     assertEquals(
-        new OutboxRelay.BatchResult(2, 0, 0, OutboxRelay.Outcome.STALE), worker.runBatch());
+        new OutboxRelay.BatchResult(2, 0, 0, 0, 0, OutboxRelay.Outcome.STALE), worker.runBatch());
     verify(query, times(2)).getResultList();
     verify(prepared, times(2)).getResultList();
     verifyNoInteractions(publisher);
@@ -327,7 +340,8 @@ class OutboxRelayTest {
         new OutboxRelay(
             work -> work.accept(em), publisher, BridgeConfig.from(Map.of("batch-size", "2")));
     assertEquals(
-        new OutboxRelay.BatchResult(2, 1, 1, OutboxRelay.Outcome.PUBLISHED), worker.runBatch());
+        new OutboxRelay.BatchResult(2, 1, 1, 0, 0, OutboxRelay.Outcome.PUBLISHED),
+        worker.runBatch());
     verify(publisher).publish(second);
     verify(em).remove(second);
     verify(em, never()).remove(row);
@@ -361,5 +375,178 @@ class OutboxRelayTest {
     assertTrue(row.publicationMayHaveOccurred());
     verifyNoInteractions(publisher);
     verify(em, never()).remove(any());
+  }
+
+  @Test
+  void expiredRowsAreDiscardedWithoutIntentOrNetworkWork() {
+    usePolicy(new PublicationPolicy(1, null));
+    when(expired.getResultList()).thenReturn(List.of(row), List.of());
+    when(query.getResultList()).thenReturn(List.of());
+    var result = relay.runBatch();
+    assertEquals(1, result.expired());
+    assertEquals(1, result.discarded());
+    assertFalse(row.publicationMayHaveOccurred());
+    verify(em).persist(any(DiscardAudit.class));
+    verify(em).remove(row);
+    verifyNoInteractions(publisher, prepared);
+    verify(expired, times(2)).setMaxResults(1);
+    verify(expired, times(2)).setLockMode(LockModeType.PESSIMISTIC_WRITE);
+    verify(expired, times(2)).setHint(SpecHints.HINT_SPEC_LOCK_TIMEOUT, Timeouts.SKIP_LOCKED_MILLI);
+  }
+
+  @Test
+  void failureLimitIsCheckedBeforeIntent() {
+    usePolicy(new PublicationPolicy(null, 1));
+    row.failed(0, "IOException");
+    var result = relay.runBatch();
+    assertEquals(1, result.exhausted());
+    assertEquals(1, result.discarded());
+    assertFalse(row.publicationMayHaveOccurred());
+    verifyNoInteractions(publisher);
+  }
+
+  @Test
+  void failureThatReachesLimitCommitsAuditInsteadOfRetry() throws Exception {
+    usePolicy(new PublicationPolicy(null, 1));
+    doThrow(new IOException("private error")).when(publisher).publish(row);
+    var result = relay.runBatch();
+    assertEquals(1, result.exhausted());
+    assertEquals(0, result.retries());
+    assertEquals(1, row.attempts());
+    assertTrue(row.publicationMayHaveOccurred());
+    verify(em).persist(any(DiscardAudit.class));
+    verify(em).remove(row);
+  }
+
+  @Test
+  void expiryAfterIntentIsRecheckedBeforeSend() {
+    usePolicy(new PublicationPolicy(1, null));
+    when(clock.getSingleResult()).thenReturn(999L, 1000L);
+    assertEquals(1, relay.runBatch().expired());
+    assertTrue(row.publicationMayHaveOccurred());
+    verifyNoInteractions(publisher);
+  }
+
+  @Test
+  void expiryDuringFailedSendWinsOverTheFailureLimit() throws Exception {
+    usePolicy(new PublicationPolicy(1, 1));
+    when(clock.getSingleResult()).thenReturn(999L, 999L, 999L, 1000L);
+    doThrow(new IOException()).when(publisher).publish(row);
+    var result = relay.runBatch();
+    assertEquals(1, result.expired());
+    assertEquals(0, result.exhausted());
+  }
+
+  @Test
+  void expiryDuringSuccessfulSendDoesNotDiscardAcceptedMessage() throws Exception {
+    usePolicy(new PublicationPolicy(1, null));
+    when(clock.getSingleResult()).thenReturn(999L);
+    org.mockito.Mockito.doAnswer(
+            call -> {
+              when(clock.getSingleResult()).thenReturn(1000L);
+              return null;
+            })
+        .when(publisher)
+        .publish(row);
+    assertEquals(1, relay.runBatch().published());
+    verify(em, never()).persist(any());
+  }
+
+  @Test
+  void expiryScanningAndPublicationShareTheLimitAcrossSingleRowBatches() throws Exception {
+    var head = row;
+    usePolicy(new PublicationPolicy(1, null));
+    var expiring = row;
+    when(expired.getResultList()).thenReturn(List.of(expiring));
+    when(query.getResultList()).thenReturn(List.of(head));
+    when(prepared.getResultList()).thenReturn(List.of(head));
+    relay =
+        new OutboxRelay(
+            work -> work.accept(em), publisher, BridgeConfig.from(Map.of("batch-size", "1")));
+    assertEquals(1, relay.runBatch().expired());
+    assertEquals(1, relay.runBatch().published());
+    verify(publisher).publish(head);
+    verify(publisher, never()).publish(expiring);
+  }
+
+  @Test
+  void expiryScanFallsBackWhenNoHeadIsDue() {
+    relay.runBatch();
+    usePolicy(new PublicationPolicy(1, null));
+    when(query.getResultList()).thenReturn(List.of());
+    when(expired.getResultList()).thenReturn(List.of(row), List.of());
+    assertEquals(1, relay.runBatch().expired());
+  }
+
+  @Test
+  void failedAuditWriteOrCommitNeverCountsDiscard() {
+    usePolicy(new PublicationPolicy(1, null));
+    doThrow(new IllegalStateException("audit rejected")).when(em).persist(any(DiscardAudit.class));
+    var result = relay.runBatch();
+    assertEquals(OutboxRelay.Outcome.TRANSACTION_FAILED, result.outcome());
+    assertEquals(0, result.discarded());
+    verify(em, never()).remove(any());
+    verifyNoInteractions(publisher);
+  }
+
+  @Test
+  void failedDiscardCommitNeverCountsOrReleasesAnotherHead() {
+    usePolicy(new PublicationPolicy(1, null));
+    var worker =
+        new OutboxRelay(
+            work -> {
+              work.accept(em);
+              throw new IllegalStateException("commit unknown");
+            },
+            publisher,
+            BridgeConfig.from(Map.of()));
+    var result = worker.runBatch();
+    assertEquals(OutboxRelay.Outcome.TRANSACTION_FAILED, result.outcome());
+    assertEquals(0, result.discarded());
+    verify(query).getResultList();
+    verifyNoInteractions(publisher);
+  }
+
+  @Test
+  void committedDiscardStillCountsWhenShutdownFollowsCommit() {
+    usePolicy(new PublicationPolicy(1, null));
+    var ref = new java.util.concurrent.atomic.AtomicReference<OutboxRelay>();
+    var worker =
+        new OutboxRelay(
+            work -> {
+              work.accept(em);
+              ref.get().stop();
+            },
+            publisher,
+            BridgeConfig.from(Map.of()));
+    ref.set(worker);
+    assertEquals(1, worker.runBatch().discarded());
+  }
+
+  @Test
+  void stopDuringEmptyExpiryLookupDoesNotTryAnotherQuery() {
+    when(expired.getResultList())
+        .thenAnswer(
+            call -> {
+              relay.stop();
+              return List.of();
+            });
+    assertEquals(OutboxRelay.Outcome.STOPPED, relay.runBatch().outcome());
+    verifyNoInteractions(query, prepared, publisher);
+  }
+
+  private void usePolicy(PublicationPolicy policy) {
+    row =
+        new OutboxEvent(
+            "discard",
+            "subject",
+            "{}",
+            0,
+            "realm",
+            "io.keycloak.user.login",
+            new EventOrdering("realm", "user", 11),
+            new ResolvedPublicationPolicy(policy, EventFilter.digest(new byte[0]), "rule"));
+    when(query.getResultList()).thenReturn(List.of(row), List.of());
+    when(prepared.getResultList()).thenReturn(List.of(row));
   }
 }

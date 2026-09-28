@@ -30,7 +30,9 @@ class OutboxEntityProviderFactoryTest {
     assertEquals("nats-durable-outbox", factory.getId());
     var provider = factory.create(session);
     try {
-      assertEquals(List.of(OutboxEvent.class, CaptureCounter.class), provider.getEntities());
+      assertEquals(
+          List.of(OutboxEvent.class, CaptureCounter.class, DiscardAudit.class),
+          provider.getEntities());
       assertEquals(factory.getId(), provider.getFactoryId());
       assertEquals("META-INF/nats-outbox-changelog.xml", provider.getChangelogLocation());
       assertNotNull(getClass().getClassLoader().getResource(provider.getChangelogLocation()));

@@ -32,9 +32,13 @@ public final class CaptureConstraintsMigration implements CustomSqlChange {
   public SqlStatement[] generateStatements(Database database) {
     var statements = new ArrayList<SqlStatement>();
     for (String name : new String[] {"KC_NATS_OUTBOX", "KC_NATS_DISCARD_AUDIT"}) {
-      statements.add(
-          new RawSqlStatement(
-              "ALTER TABLE " + table(database, name) + EVENT_CHECKS.formatted(name, name, name)));
+      String checks = EVENT_CHECKS.formatted(name, name, name);
+      if (name.equals("KC_NATS_DISCARD_AUDIT")) {
+        checks +=
+            ", ADD CONSTRAINT CK_KC_NATS_DISCARD_REASON"
+                + " CHECK (REASON IN ('EXPIRED', 'MAX_FAILURES'))";
+      }
+      statements.add(new RawSqlStatement("ALTER TABLE " + table(database, name) + checks));
     }
     statements.add(
         new RawSqlStatement(

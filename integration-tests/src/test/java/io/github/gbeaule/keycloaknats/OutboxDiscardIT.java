@@ -1,0 +1,443 @@
+package io.github.gbeaule.keycloaknats;
+
+import static org.awaitility.Awaitility.await;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.io.IOException;
+import java.time.Duration;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+/** Local discard uses PostgreSQL ownership; only original events ever enter JetStream. */
+@SuppressWarnings("checkstyle:AbbreviationAsWordInName")
+class OutboxDiscardIT extends RelayIntegrationSupport {
+  @Test
+  void offlineExpiryRemovesPayloadAndLeavesOnlyDiagnosticMetadata() throws Exception {
+    capture("expired", "offline", new PublicationPolicy(1, 2), 2000);
+    final var original = row("expired");
+    var docker = broker.getDockerClient();
+    docker.stopContainerCmd(broker.getContainerId()).withTimeout(1).exec();
+    try {
+      var result = new OutboxRelay(OutboxDiscardIT::transaction, neverPublish(), config).runBatch();
+      assertEquals(1, result.expired());
+      assertEquals(0, result.published());
+      assertNull(row("expired"));
+      assertAudit("expired", "EXPIRED", 0, false);
+      try (var session = sessions.openSession()) {
+        String sql =
+            """
+            SELECT realm_id, ordering_key, user_sequence, event_type, subject,
+                   payload_sha256, created_at, discarded_at, filter_sha256, rule_id,
+                   max_age_seconds, max_failures, expires_at
+            FROM "relay-data".kc_nats_discard_audit WHERE id='expired'
+            """;
+        Object[] audit = session.createNativeQuery(sql, Object[].class).getSingleResult();
+        assertEquals(original.realmId(), audit[0]);
+        assertEquals(original.orderingKey(), audit[1]);
+        assertEquals(original.userSequence(), audit[2]);
+        assertEquals(original.eventType(), audit[3]);
+        assertEquals(original.subject(), audit[4]);
+        assertEquals(original.payloadSha256(), audit[5]);
+        assertEquals(original.createdAt(), audit[6]);
+        assertTrue(((Number) audit[7]).longValue() >= original.expiresAt());
+        assertEquals(original.publicationPolicy().filterSha256(), audit[8]);
+        assertEquals("discard-rule", audit[9]);
+        assertEquals(1, audit[10]);
+        assertEquals(2, audit[11]);
+        assertEquals(original.expiresAt(), audit[12]);
+      }
+    } finally {
+      docker.startContainerCmd(broker.getContainerId()).exec();
+      connectNats();
+    }
+    assertEquals(0, messages());
+    capture("recovered", "offline");
+    try (var publisher = new JetStreamPublisher(liveConfig())) {
+      assertEquals(
+          1,
+          new OutboxRelay(OutboxDiscardIT::transaction, publisher, config).runBatch().published());
+    }
+    assertEquals(List.of("recovered"), storedIds(1));
+    assertEquals(1, audits());
+  }
+
+  @Test
+  void nonHeadExpiryIgnoresBackoffWithoutBypassingProtectedPredecessor() throws Exception {
+    capture("protected", "queued", PublicationPolicy.RETRY, 100_000_000);
+    capture("expired", "queued", new PublicationPolicy(1, null), 2000);
+    capture("successor", "queued");
+    capture("other", "other");
+    transaction(
+        em -> {
+          var head = em.find(OutboxEvent.class, "protected");
+          for (int i = 0; i < 100; i++) {
+            head.failed(Long.MAX_VALUE, "IOException");
+          }
+          em.find(OutboxEvent.class, "expired").failed(Long.MAX_VALUE, "IOException");
+        });
+    try (var publisher = new JetStreamPublisher(config)) {
+      var relay = new OutboxRelay(OutboxDiscardIT::transaction, publisher, config);
+      var result = relay.runBatch();
+      assertEquals(1, result.expired());
+      assertEquals(1, result.published());
+      assertNotNull(row("protected"));
+      assertFalse(row("successor").publicationMayHaveOccurred());
+      assertNull(row("expired"));
+      assertEquals(List.of("other"), storedIds(1));
+      long headSequence = row("protected").userSequence();
+      assertEquals(headSequence + 2, row("successor").userSequence());
+      transaction(em -> em.find(OutboxEvent.class, "protected").failed(0, "due"));
+      assertEquals(2, relay.runBatch().published());
+    }
+    assertEquals(List.of("other", "protected", "successor"), storedIds(3));
+    assertEquals(1, audits());
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"audit", "delete", "commit", "rollback"})
+  void rejectedDiscardRetainsOriginalAndBlocksSuccessor(String failure) throws Exception {
+    capture("expired", "atomic", new PublicationPolicy(1, null), 2000);
+    capture("successor", "atomic");
+    String table = failure.equals("delete") ? "kc_nats_outbox" : "kc_nats_discard_audit";
+    execute(
+        "CREATE FUNCTION \"relay-data\".reject_discard() RETURNS trigger LANGUAGE plpgsql"
+            + " AS $$ BEGIN RAISE EXCEPTION 'injected discard rejection'; END $$");
+    if (!failure.equals("rollback")) {
+      String trigger =
+          failure.equals("commit")
+              ? "CREATE CONSTRAINT TRIGGER reject_discard AFTER INSERT"
+              : "CREATE TRIGGER reject_discard BEFORE "
+                  + (failure.equals("delete") ? "DELETE" : "INSERT");
+      execute(
+          trigger
+              + " ON \"relay-data\"."
+              + table
+              + (failure.equals("commit") ? " DEFERRABLE INITIALLY DEFERRED" : "")
+              + " FOR EACH ROW EXECUTE FUNCTION \"relay-data\".reject_discard()");
+    }
+    try {
+      var result =
+          new OutboxRelay(
+                  work ->
+                      transaction(
+                          em -> {
+                            work.accept(em);
+                            em.flush();
+                            if (failure.equals("rollback")) {
+                              throw new IllegalStateException("rollback discard");
+                            }
+                          }),
+                  neverPublish(),
+                  config)
+              .runBatch();
+      assertEquals(OutboxRelay.Outcome.TRANSACTION_FAILED, result.outcome());
+      assertEquals(0, result.discarded());
+      assertNotNull(row("expired"));
+      assertFalse(row("successor").publicationMayHaveOccurred());
+      assertEquals(0, audits());
+      assertEquals(0, messages());
+    } finally {
+      execute("DROP TRIGGER IF EXISTS reject_discard ON \"relay-data\"." + table);
+      execute("DROP FUNCTION \"relay-data\".reject_discard()");
+    }
+    try (var publisher = new JetStreamPublisher(config)) {
+      var result = new OutboxRelay(OutboxDiscardIT::transaction, publisher, config).runBatch();
+      assertEquals(1, result.discarded());
+      assertEquals(1, result.published());
+    }
+    assertEquals(List.of("successor"), storedIds(1));
+  }
+
+  @Test
+  void uncommittedDiscardCannotReleaseTheHead() throws Exception {
+    capture("expired", "uncommitted", new PublicationPolicy(1, null), 2000);
+    capture("successor", "uncommitted");
+    try (var owner = sessions.openSession()) {
+      owner.beginTransaction();
+      var head =
+          OutboxRepository.lockNextExpired(owner, CaptureRepository.databaseTime(owner))
+              .orElseThrow();
+      OutboxRepository.discard(
+          owner, head, DiscardReason.EXPIRED, CaptureRepository.databaseTime(owner));
+      owner.flush();
+      assertEquals(
+          OutboxRelay.Outcome.NO_WORK,
+          new OutboxRelay(OutboxDiscardIT::transaction, neverPublish(), config)
+              .runBatch()
+              .outcome());
+      assertNotNull(row("expired"));
+      assertEquals(0, audits());
+      owner.getTransaction().rollback();
+    }
+    assertNotNull(row("expired"));
+    assertFalse(row("successor").publicationMayHaveOccurred());
+  }
+
+  @Test
+  void lostCommitAcknowledgementIsNotCountedAndNextRunRechecksDatabase() throws Exception {
+    capture("expired", "commit-unknown", new PublicationPolicy(1, null), 2000);
+    capture("successor", "commit-unknown");
+    var result =
+        new OutboxRelay(
+                work -> {
+                  transaction(work);
+                  throw new IllegalStateException("commit acknowledgement lost");
+                },
+                neverPublish(),
+                config)
+            .runBatch();
+    assertEquals(OutboxRelay.Outcome.TRANSACTION_FAILED, result.outcome());
+    assertEquals(0, result.discarded());
+    assertNull(row("expired"));
+    assertEquals(1, audits());
+    assertFalse(row("successor").publicationMayHaveOccurred());
+    try (var publisher = new JetStreamPublisher(config)) {
+      assertEquals(
+          1,
+          new OutboxRelay(OutboxDiscardIT::transaction, publisher, config).runBatch().published());
+    }
+  }
+
+  @Test
+  void lostPubAckAtFailureLimitDiscardsWithUnknownOutcome() throws Exception {
+    capture("abandoned", "lost-ack", new PublicationPolicy(null, 1), 0);
+    capture("successor", "lost-ack");
+    final var original = row("abandoned");
+    try (var actual = new JetStreamPublisher(config)) {
+      var relay =
+          new OutboxRelay(
+              OutboxDiscardIT::transaction,
+              publisher(
+                  event -> {
+                    actual.publish(event);
+                    if (event.id().equals("abandoned")) {
+                      throw new IOException("ack lost");
+                    }
+                  }),
+              config);
+      var result = relay.runBatch();
+      assertEquals(1, result.exhausted());
+      assertEquals(1, result.published());
+      assertEquals(0, result.retries());
+    }
+    assertAudit("abandoned", "MAX_FAILURES", 1, true);
+    assertEquals(List.of("abandoned", "successor"), storedIds(2));
+    assertEquals(original.subject(), storedMessages(2).getFirst().getSubject());
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void crashAfterIntentOrSendCannotEraseAmbiguity(boolean send) throws Exception {
+    capture("abandoned", "crashed", new PublicationPolicy(1, null), 0);
+    final var original = row("abandoned");
+    var transactions = new AtomicInteger();
+    try (var actual = new JetStreamPublisher(config)) {
+      var relay =
+          new OutboxRelay(
+              work -> {
+                if (!send) {
+                  transaction(work);
+                  throw new IllegalStateException("crash after intent commit");
+                }
+                transaction(
+                    em -> {
+                      work.accept(em);
+                      em.flush();
+                      if (transactions.incrementAndGet() == 2) {
+                        throw new IllegalStateException("rollback failed attempt");
+                      }
+                    });
+              },
+              publisher(
+                  event -> {
+                    actual.publish(event);
+                    throw new IOException("lost ack");
+                  }),
+              config);
+      assertEquals(OutboxRelay.Outcome.TRANSACTION_FAILED, relay.runBatch().outcome());
+    }
+    assertTrue(row("abandoned").publicationMayHaveOccurred());
+    assertEquals(0, row("abandoned").attempts());
+    awaitExpiry(original);
+    assertEquals(
+        1,
+        new OutboxRelay(OutboxDiscardIT::transaction, neverPublish(), config)
+            .runBatch()
+            .discarded());
+    assertAudit("abandoned", "EXPIRED", 0, true);
+    assertEquals(send ? 1 : 0, messages());
+  }
+
+  @Test
+  void discardBetweenIntentAndReacquisitionPreventsThePreparedSend() throws Exception {
+    capture("abandoned", "between", new PublicationPolicy(1, null), 0);
+    final var original = row("abandoned");
+    var transactions = new AtomicInteger();
+    var result =
+        new OutboxRelay(
+                work -> {
+                  transaction(work);
+                  if (transactions.incrementAndGet() == 1) {
+                    awaitExpiry(original);
+                    assertEquals(
+                        1,
+                        new OutboxRelay(OutboxDiscardIT::transaction, neverPublish(), config)
+                            .runBatch()
+                            .discarded());
+                  }
+                },
+                neverPublish(),
+                singleRowConfig())
+            .runBatch();
+    assertEquals(OutboxRelay.Outcome.STALE, result.outcome());
+    assertAudit("abandoned", "EXPIRED", 0, true);
+    assertEquals(0, messages());
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void activeSendIsSkippedAndLateSendAfterOwnershipLossRemainsAmbiguous(boolean loseOwnership)
+      throws Exception {
+    capture("abandoned", "active", new PublicationPolicy(1, null), 0);
+    capture("successor", "active");
+    final var original = row("abandoned");
+    var backend = new AtomicLong();
+    var sending = new CountDownLatch(1);
+    var release = new CountDownLatch(1);
+    try (var executor = Executors.newVirtualThreadPerTaskExecutor();
+        var actual = new JetStreamPublisher(config)) {
+      var relay =
+          new OutboxRelay(
+              work ->
+                  transaction(
+                      em -> {
+                        backend.set(
+                            ((Number)
+                                    em.createNativeQuery("select pg_backend_pid()")
+                                        .getSingleResult())
+                                .longValue());
+                        work.accept(em);
+                      }),
+              publisher(
+                  event -> {
+                    sending.countDown();
+                    assertTrue(release.await(15, TimeUnit.SECONDS));
+                    actual.publish(event);
+                  }),
+              singleRowConfig());
+      var running = executor.submit(relay::runBatch);
+      try {
+        assertTrue(sending.await(10, TimeUnit.SECONDS));
+        awaitExpiry(original);
+        assertEquals(
+            OutboxRelay.Outcome.NO_WORK,
+            new OutboxRelay(OutboxDiscardIT::transaction, neverPublish(), config)
+                .runBatch()
+                .outcome());
+        assertFalse(row("successor").publicationMayHaveOccurred());
+        if (loseOwnership) {
+          transaction(
+              em ->
+                  assertEquals(
+                      Boolean.TRUE,
+                      em.createNativeQuery("select pg_terminate_backend(:pid)", Boolean.class)
+                          .setParameter("pid", Math.toIntExact(backend.get()))
+                          .getSingleResult()));
+          var result = new OutboxRelay(OutboxDiscardIT::transaction, actual, config).runBatch();
+          assertEquals(1, result.expired());
+          assertEquals(1, result.published());
+          assertAudit("abandoned", "EXPIRED", 0, true);
+        }
+      } finally {
+        release.countDown();
+      }
+      assertEquals(
+          loseOwnership ? OutboxRelay.Outcome.TRANSACTION_FAILED : OutboxRelay.Outcome.PUBLISHED,
+          running.get(10, TimeUnit.SECONDS).outcome());
+    }
+    if (loseOwnership) {
+      // Database ownership cannot recall a request that is already in flight.
+      assertEquals(List.of("successor", "abandoned"), storedIds(2));
+    } else {
+      assertNull(row("abandoned"));
+      assertNotNull(row("successor"));
+      assertEquals(0, audits());
+      assertEquals(List.of("abandoned"), storedIds(1));
+    }
+  }
+
+  private static void capture(String id, String user, PublicationPolicy policy, long ageMillis) {
+    transaction(
+        em ->
+            em.persist(
+                new OutboxEvent(
+                    id,
+                    "keycloak.events.relay." + id,
+                    "{\"id\":\"" + id + "\",\"private\":\"payload\"}",
+                    CaptureRepository.databaseTime(em) - ageMillis,
+                    "relay",
+                    "io.keycloak.user.login",
+                    CaptureRepository.next(em, "relay", user),
+                    new ResolvedPublicationPolicy(
+                        policy, EventFilter.digest(new byte[0]), "discard-rule"))));
+  }
+
+  private static void awaitExpiry(OutboxEvent row) {
+    await()
+        .atMost(Duration.ofSeconds(5))
+        .until(
+            () -> {
+              try (var session = sessions.openSession()) {
+                return CaptureRepository.databaseTime(session) >= row.expiresAt();
+              }
+            });
+  }
+
+  private static EventPublisher neverPublish() {
+    return publisher(
+        event -> {
+          throw new AssertionError("Unexpected publication: " + event.id());
+        });
+  }
+
+  private static BridgeConfig liveConfig() {
+    return BridgeConfig.from(Map.of("nats-url", natsUrl(), "min-replicas", "1"));
+  }
+
+  private static BridgeConfig singleRowConfig() {
+    return BridgeConfig.from(Map.of("batch-size", "1"));
+  }
+
+  private static long audits() throws Exception {
+    return scalar("SELECT count(*) FROM \"relay-data\".kc_nats_discard_audit");
+  }
+
+  private static void assertAudit(String id, String reason, long attempts, boolean ambiguous)
+      throws Exception {
+    try (var session = sessions.openSession()) {
+      var audit =
+          session
+              .createQuery(
+                  "select a.reason, a.attempts, a.publicationMayHaveOccurred"
+                      + " from NatsDiscardAudit a where a.id = :id",
+                  Object[].class)
+              .setParameter("id", id)
+              .getSingleResult();
+      assertEquals(DiscardReason.valueOf(reason), audit[0]);
+      assertEquals(attempts, audit[1]);
+      assertEquals(ambiguous, audit[2]);
+    }
+  }
+}

@@ -22,6 +22,23 @@ final class OutboxRepository {
 
   private OutboxRepository() {}
 
+  static Optional<OutboxEvent> lockNextExpired(EntityManager entityManager, long now) {
+    // Expiry applies to queued successors and delayed retries, but never races a locked send.
+    return lock(
+        entityManager
+            .createQuery(
+                "select event from NatsOutboxEvent event where event.expiresAt <= :now"
+                    + " order by event.expiresAt, event.id",
+                OutboxEvent.class)
+            .setParameter("now", now));
+  }
+
+  static void discard(
+      EntityManager entityManager, OutboxEvent row, DiscardReason reason, long now) {
+    entityManager.persist(new DiscardAudit(row, reason, now));
+    entityManager.remove(row);
+  }
+
   static Optional<OutboxEvent> lockNextDue(EntityManager entityManager, long now) {
     // The predecessor scan includes locked and delayed rows; only eligible heads skip locks.
     return lock(

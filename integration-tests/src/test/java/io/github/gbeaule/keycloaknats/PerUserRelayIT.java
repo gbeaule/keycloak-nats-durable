@@ -1,16 +1,12 @@
 package io.github.gbeaule.keycloaknats;
 
-import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.nats.client.api.MessageInfo;
-import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -18,79 +14,13 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.Consumer;
-import org.hibernate.SessionFactory;
-import org.hibernate.cfg.Configuration;
-import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 /** Exercises the production relay with PostgreSQL ownership and real JetStream acknowledgements. */
 @SuppressWarnings("checkstyle:AbbreviationAsWordInName")
-class PerUserRelayIT extends IntegrationSupport {
-  private static SessionFactory sessions;
-  private static BridgeConfig config;
-
-  @BeforeAll
-  static void start() throws Exception {
-    startInfrastructure(
-        System.getProperty("keycloak.version"),
-        container -> {
-          try {
-            execute("CREATE SCHEMA \"relay-data\"");
-          } catch (Exception e) {
-            throw new IllegalStateException(e);
-          }
-          container.withEnv("KC_DB_SCHEMA", "relay-data");
-        });
-    await()
-        .atMost(Duration.ofSeconds(20))
-        .until(() -> scalar("SELECT count(*) FROM \"relay-data\".kc_nats_outbox") == 0);
-    // Keep the installed schema but control every worker and transaction from the test.
-    keycloak.stop();
-    sessions =
-        new Configuration()
-            .addAnnotatedClass(OutboxEvent.class)
-            .addAnnotatedClass(CaptureCounter.class)
-            .setProperty("hibernate.connection.url", postgres.getJdbcUrl())
-            .setProperty("hibernate.connection.username", postgres.getUsername())
-            .setProperty("hibernate.connection.password", postgres.getPassword())
-            .setProperty("hibernate.default_schema", "\"relay-data\"")
-            .setProperty("hibernate.hbm2ddl.auto", "validate")
-            .buildSessionFactory();
-    config =
-        BridgeConfig.from(
-            Map.of(
-                "nats-url",
-                natsUrl(),
-                "min-replicas",
-                "1",
-                "timeout-ms",
-                "1000",
-                "retry-initial-ms",
-                "60000",
-                "retry-max-ms",
-                "60000"));
-  }
-
-  @BeforeEach
-  void reset() throws Exception {
-    transaction(em -> em.createQuery("delete from NatsOutboxEvent").executeUpdate());
-    nats.jetStreamManagement().deleteStream(STREAM);
-    provision();
-  }
-
-  @AfterAll
-  static void stop() throws Exception {
-    if (sessions != null) {
-      sessions.close();
-    }
-    stopInfrastructure();
-  }
-
+class PerUserRelayIT extends RelayIntegrationSupport {
   @Test
   void lockedHeadAndUncommittedRemovalBlockSuccessorsAcrossSubjects() throws Exception {
     capture("a1", "a");
@@ -140,7 +70,7 @@ class PerUserRelayIT extends IntegrationSupport {
                 actual.publish(event);
               });
       var result = new OutboxRelay(PerUserRelayIT::transaction, failing, config).runBatch();
-      assertEquals(new OutboxRelay.BatchResult(2, 1, 1, OutboxRelay.Outcome.NO_WORK), result);
+      assertEquals(new OutboxRelay.BatchResult(2, 1, 1, 0, 0, OutboxRelay.Outcome.NO_WORK), result);
       assertEquals(1, failures.get());
       assertFalse(row("a2").publicationMayHaveOccurred());
     }
@@ -350,75 +280,5 @@ class PerUserRelayIT extends IntegrationSupport {
         scalar(
             "SELECT count(*) FROM pg_tables WHERE schemaname='public'"
                 + " AND tablename='kc_nats_outbox'"));
-  }
-
-  private static void transaction(Consumer<EntityManager> work) {
-    sessions.inTransaction(work::accept);
-  }
-
-  private static void capture(String id, String user) {
-    transaction(em -> capture(em, id, "relay", user));
-  }
-
-  private static void capture(EntityManager em, String id, String realm, String user) {
-    var policy =
-        new ResolvedPublicationPolicy(
-            PublicationPolicy.RETRY, EventFilter.digest(new byte[0]), null);
-    em.persist(
-        new OutboxEvent(
-            id,
-            "keycloak.events.relay." + id,
-            "{\"id\":\"" + id + "\",\"value\":\"é\"}",
-            CaptureRepository.databaseTime(em),
-            realm,
-            "io.keycloak.user.login",
-            CaptureRepository.next(em, realm, user),
-            policy));
-  }
-
-  private static OutboxEvent row(String id) {
-    try (var session = sessions.openSession()) {
-      return session.find(OutboxEvent.class, id);
-    }
-  }
-
-  private static List<MessageInfo> storedMessages(int count) throws Exception {
-    var management = nats.jetStreamManagement();
-    var state = management.getStreamInfo(STREAM).getStreamState();
-    assertEquals(count, state.getMsgCount());
-    var messages = new java.util.ArrayList<MessageInfo>();
-    for (long sequence = state.getFirstSequence();
-        sequence <= state.getLastSequence();
-        sequence++) {
-      messages.add(management.getMessage(STREAM, sequence));
-    }
-    return messages;
-  }
-
-  private static List<String> storedIds(int count) throws Exception {
-    var delivered = storedMessages(count);
-    assertEquals(count, delivered.size());
-    var ids = new java.util.ArrayList<String>();
-    for (var message : delivered) {
-      ids.add(objectMapper.readTree(message.getData()).path("id").asText());
-    }
-    return ids;
-  }
-
-  @FunctionalInterface
-  private interface Send {
-    void publish(OutboxEvent event) throws Exception;
-  }
-
-  private static EventPublisher publisher(Send send) {
-    return new EventPublisher() {
-      @Override
-      public void publish(OutboxEvent event) throws Exception {
-        send.publish(event);
-      }
-
-      @Override
-      public void close() {}
-    };
   }
 }

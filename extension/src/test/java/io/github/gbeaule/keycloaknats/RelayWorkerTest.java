@@ -148,7 +148,7 @@ class RelayWorkerTest {
     var wakeup = mock(RelayWakeup.class);
     when(wakeup.isOpen()).thenReturn(true);
     when(relay.runBatch())
-        .thenReturn(new OutboxRelay.BatchResult(0, 0, 0, OutboxRelay.Outcome.STOPPED));
+        .thenReturn(new OutboxRelay.BatchResult(0, 0, 0, 0, 0, OutboxRelay.Outcome.STOPPED));
     new RelayWorker(relay, wakeup, BridgeConfig.from(Map.of())).run();
     verify(wakeup).isOpen();
     verifyNoMoreInteractions(wakeup);
@@ -160,6 +160,8 @@ class RelayWorkerTest {
         processed,
         0,
         processed,
+        0,
+        0,
         processed == 0 ? OutboxRelay.Outcome.NO_WORK : OutboxRelay.Outcome.RETRY_SCHEDULED);
   }
 
@@ -170,7 +172,8 @@ class RelayWorkerTest {
     final var config = BridgeConfig.from(Map.of("batch-size", "1", "poll-ms", "100"));
     when(wakeup.isOpen()).thenReturn(true);
     when(relay.runBatch())
-        .thenReturn(new OutboxRelay.BatchResult(1, 0, 0, OutboxRelay.Outcome.TRANSACTION_FAILED));
+        .thenReturn(
+            new OutboxRelay.BatchResult(1, 0, 0, 0, 0, OutboxRelay.Outcome.TRANSACTION_FAILED));
     when(wakeup.awaitSignal(100)).thenReturn(false);
     new RelayWorker(relay, wakeup, config).run();
     verify(wakeup).awaitSignal(100);
