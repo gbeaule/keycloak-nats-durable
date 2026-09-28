@@ -4,6 +4,7 @@ import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
+import jakarta.persistence.Version;
 import java.nio.charset.StandardCharsets;
 
 /** Durable event identity and payload, with bounded retry metadata updated under a row lock. */
@@ -13,6 +14,10 @@ public class OutboxEvent {
   @Id
   @Column(name = "ID", length = 36, nullable = false)
   private String id;
+
+  @Version
+  @Column(name = "VERSION", nullable = false)
+  private long version;
 
   @Column(name = "SUBJECT", length = 512, nullable = false, updatable = false)
   private String subject;
@@ -134,6 +139,10 @@ public class OutboxEvent {
 
   void markPublicationIntent() {
     publicationMayHaveOccurred = true;
+  }
+
+  long version() {
+    return version;
   }
 
   /** Returns the persisted deduplication identity shared by the envelope and NATS header. */

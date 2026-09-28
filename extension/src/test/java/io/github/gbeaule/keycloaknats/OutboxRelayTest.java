@@ -34,6 +34,7 @@ import org.junit.jupiter.api.Test;
 class OutboxRelayTest {
   private EntityManager em;
   private TypedQuery<OutboxEvent> query;
+  private TypedQuery<OutboxEvent> prepared;
   private EventPublisher publisher;
   private OutboxEvent row;
   private OutboxRelay relay;
@@ -44,20 +45,27 @@ class OutboxRelayTest {
     em = mock(EntityManager.class);
     publisher = mock(EventPublisher.class);
     query = mock(TypedQuery.class, RETURNS_SELF);
-    when(em.createQuery(anyString(), eq(OutboxEvent.class))).thenReturn(query);
+    prepared = mock(TypedQuery.class, RETURNS_SELF);
+    when(em.createQuery(anyString(), eq(OutboxEvent.class)))
+        .thenAnswer(call -> call.<String>getArgument(0).contains(":version") ? prepared : query);
     row = CaptureFixtures.row("id", "subject", "{}", 0);
     when(query.getResultList()).thenReturn(List.of(row), List.of());
-    relay = new OutboxRelay(work -> work.apply(em), publisher, BridgeConfig.from(Map.of()));
+    when(prepared.getResultList()).thenReturn(List.of(row));
+    relay = new OutboxRelay(work -> work.accept(em), publisher, BridgeConfig.from(Map.of()));
   }
 
   @Test
   void removesOnlyAfterSuccessfulAcknowledgement() throws Exception {
-    assertEquals(1, relay.runBatch());
+    assertEquals(1, relay.runBatch().published());
     var order = inOrder(publisher, em);
     order.verify(publisher).publish(row);
     order.verify(em).remove(row);
     verify(query, times(2)).setMaxResults(1);
     verify(query, times(2)).setLockMode(LockModeType.PESSIMISTIC_WRITE);
+    verify(prepared).setLockMode(LockModeType.PESSIMISTIC_WRITE);
+    verify(prepared).setParameter("id", row.id());
+    verify(prepared).setParameter("version", row.version());
+    verify(prepared).setHint(SpecHints.HINT_SPEC_LOCK_TIMEOUT, Timeouts.SKIP_LOCKED_MILLI);
     verify(query, times(2)).setHint(SpecHints.HINT_SPEC_LOCK_TIMEOUT, Timeouts.SKIP_LOCKED_MILLI);
   }
 
@@ -65,7 +73,7 @@ class OutboxRelayTest {
   void lostPublishAckLeavesOriginalIdAndPayloadForRetry() throws Exception {
     doThrow(new IOException("ack lost")).when(publisher).publish(row);
     final long before = System.currentTimeMillis();
-    assertEquals(0, relay.runBatch());
+    assertEquals(0, relay.runBatch().published());
     final long after = System.currentTimeMillis();
     verify(em, never()).remove(any());
     assertEquals("id", row.id());
@@ -82,7 +90,7 @@ class OutboxRelayTest {
   void interruptedPublishRetainsRowAndInterruptFlag() throws Exception {
     doThrow(new InterruptedException()).when(publisher).publish(row);
     try {
-      assertEquals(0, relay.runBatch());
+      assertEquals(0, relay.runBatch().published());
       assertTrue(Thread.currentThread().isInterrupted());
       verify(em, never()).remove(any());
       assertEquals(0, row.attempts());
@@ -93,12 +101,30 @@ class OutboxRelayTest {
   }
 
   @Test
+  void shutdownDuringNetworkFailureDoesNotIncrementAttempts() throws Exception {
+    org.mockito.Mockito.doAnswer(
+            call -> {
+              relay.stop();
+              throw new IOException("connection closed during shutdown");
+            })
+        .when(publisher)
+        .publish(row);
+    assertEquals(OutboxRelay.Outcome.STOPPED, relay.runBatch().outcome());
+    assertEquals(0, row.attempts());
+    assertTrue(row.publicationMayHaveOccurred());
+    verify(em, never()).remove(any());
+  }
+
+  @Test
   void sustainedFailuresLogAtPowersOfTwoWithoutExposingRemoteText() throws Exception {
     when(query.getResultList()).thenReturn(List.of(row));
+    relay =
+        new OutboxRelay(
+            work -> work.accept(em), publisher, BridgeConfig.from(Map.of("batch-size", "1")));
     doThrow(new IOException("private-server-message")).when(publisher).publish(row);
     try (var logs = new LogCapture(OutboxRelay.class)) {
       for (int attempt = 1; attempt <= 9; attempt++) {
-        assertEquals(0, relay.runBatch());
+        assertEquals(0, relay.runBatch().published());
       }
       var records = logs.records();
       assertEquals(4, records.size());
@@ -122,16 +148,15 @@ class OutboxRelayTest {
     var worker =
         new OutboxRelay(
             work -> {
-              boolean published = work.apply(em);
-              if (completed.getAndIncrement() == 0) {
+              work.accept(em);
+              if (completed.getAndIncrement() == 1) {
                 throw new IllegalStateException("commit failed after broker acknowledgement");
               }
-              return published;
             },
             publisher,
             BridgeConfig.from(Map.of()));
-    assertEquals(0, worker.runBatch());
-    assertEquals(1, worker.runBatch());
+    assertEquals(0, worker.runBatch().published());
+    assertEquals(1, worker.runBatch().published());
     verify(publisher, times(2)).publish(row);
     verify(em, times(2)).remove(row);
     assertEquals("id", row.id());
@@ -182,7 +207,7 @@ class OutboxRelayTest {
   @Test
   void anEmptyQueueDoesNotPublishOrDeleteAnything() {
     when(query.getResultList()).thenReturn(List.of());
-    assertEquals(0, relay.runBatch());
+    assertEquals(0, relay.runBatch().published());
     verifyNoInteractions(publisher);
     verify(em, never()).remove(any());
     verify(query).getResultList();
@@ -192,10 +217,11 @@ class OutboxRelayTest {
   void fullBatchStopsAtItsConfiguredSizeWithoutClaimingAnotherRow() throws Exception {
     var second = CaptureFixtures.row("second", "subject", "{\"n\":2}", 10);
     when(query.getResultList()).thenReturn(List.of(row), List.of(second));
+    when(prepared.getResultList()).thenReturn(List.of(row), List.of(second));
     var worker =
         new OutboxRelay(
-            work -> work.apply(em), publisher, BridgeConfig.from(Map.of("batch-size", "2")));
-    assertEquals(2, worker.runBatch());
+            work -> work.accept(em), publisher, BridgeConfig.from(Map.of("batch-size", "2")));
+    assertEquals(2, worker.runBatch().published());
     verify(query, times(2)).getResultList();
     var order = inOrder(publisher, em);
     order.verify(publisher).publish(row);
@@ -208,7 +234,7 @@ class OutboxRelayTest {
   void interruptionBeforeStartingPreventsOpeningTransactions() {
     try {
       Thread.currentThread().interrupt();
-      assertEquals(0, relay.runBatch());
+      assertEquals(0, relay.runBatch().published());
       verifyNoInteractions(em, query, publisher);
       assertTrue(Thread.currentThread().isInterrupted());
     } finally {
@@ -219,9 +245,12 @@ class OutboxRelayTest {
   @Test
   void repeatedPublicationFailuresKeepRetryingWithoutChangingOriginalEvent() throws Exception {
     when(query.getResultList()).thenReturn(List.of(row));
+    relay =
+        new OutboxRelay(
+            work -> work.accept(em), publisher, BridgeConfig.from(Map.of("batch-size", "1")));
     doThrow(new IOException("private-server-message")).when(publisher).publish(row);
     for (int attempt = 1; attempt <= 4; attempt++) {
-      assertEquals(0, relay.runBatch());
+      assertEquals(0, relay.runBatch().published());
       assertEquals(attempt, row.attempts());
       assertEquals("IOException", row.lastError());
       assertEquals("id", row.id());
@@ -229,6 +258,108 @@ class OutboxRelayTest {
       assertEquals("{}", row.payload());
       assertEquals(0, row.createdAt());
     }
+    verify(em, never()).remove(any());
+  }
+
+  @Test
+  void publicationStartsOnlyAfterIntentCommits() throws Exception {
+    var committed = new AtomicInteger();
+    var worker =
+        new OutboxRelay(
+            work -> {
+              work.accept(em);
+              committed.incrementAndGet();
+            },
+            publisher,
+            BridgeConfig.from(Map.of()));
+    org.mockito.Mockito.doAnswer(
+            call -> {
+              assertEquals(1, committed.get());
+              assertTrue(row.publicationMayHaveOccurred());
+              return null;
+            })
+        .when(publisher)
+        .publish(row);
+    assertEquals(1, worker.runBatch().published());
+    var order = inOrder(em, publisher);
+    order.verify(em).flush();
+    order.verify(publisher).publish(row);
+    order.verify(em).remove(row);
+  }
+
+  @Test
+  void failedIntentCommitNeverStartsPublication() {
+    var worker =
+        new OutboxRelay(
+            work -> {
+              work.accept(em);
+              throw new IllegalStateException("intent commit failed");
+            },
+            publisher,
+            BridgeConfig.from(Map.of()));
+    assertEquals(OutboxRelay.Outcome.TRANSACTION_FAILED, worker.runBatch().outcome());
+    verifyNoInteractions(publisher);
+    verify(em, never()).remove(any());
+  }
+
+  @Test
+  void staleClaimsConsumeTheBatchWithoutPublishingOrSpinning() {
+    when(query.getResultList()).thenReturn(List.of(row));
+    when(prepared.getResultList()).thenReturn(List.of());
+    var worker =
+        new OutboxRelay(
+            work -> work.accept(em), publisher, BridgeConfig.from(Map.of("batch-size", "2")));
+    assertEquals(
+        new OutboxRelay.BatchResult(2, 0, 0, OutboxRelay.Outcome.STALE), worker.runBatch());
+    verify(query, times(2)).getResultList();
+    verify(prepared, times(2)).getResultList();
+    verifyNoInteractions(publisher);
+    verify(em, never()).remove(any());
+  }
+
+  @Test
+  void failedHeadLeavesRoomForOtherUsersInTheSameBatch() throws Exception {
+    var second = CaptureFixtures.row("other", "other.subject", "{}", 10);
+    when(query.getResultList()).thenReturn(List.of(row), List.of(second));
+    when(prepared.getResultList()).thenReturn(List.of(row), List.of(second));
+    doThrow(new IOException("unavailable")).when(publisher).publish(row);
+    var worker =
+        new OutboxRelay(
+            work -> work.accept(em), publisher, BridgeConfig.from(Map.of("batch-size", "2")));
+    assertEquals(
+        new OutboxRelay.BatchResult(2, 1, 1, OutboxRelay.Outcome.PUBLISHED), worker.runBatch());
+    verify(publisher).publish(second);
+    verify(em).remove(second);
+    verify(em, never()).remove(row);
+  }
+
+  @Test
+  void stopAfterIntentCommitPreventsSending() {
+    var workerRef = new java.util.concurrent.atomic.AtomicReference<OutboxRelay>();
+    var worker =
+        new OutboxRelay(
+            work -> {
+              work.accept(em);
+              workerRef.get().stop();
+            },
+            publisher,
+            BridgeConfig.from(Map.of()));
+    workerRef.set(worker);
+    assertEquals(OutboxRelay.Outcome.STOPPED, worker.runBatch().outcome());
+    verifyNoInteractions(publisher, prepared);
+  }
+
+  @Test
+  void stopWhileReacquiringOwnershipRetainsThePreparedRow() {
+    when(prepared.getResultList())
+        .thenAnswer(
+            call -> {
+              relay.stop();
+              return List.of(row);
+            });
+    assertEquals(OutboxRelay.Outcome.STOPPED, relay.runBatch().outcome());
+    assertTrue(row.publicationMayHaveOccurred());
+    verifyNoInteractions(publisher);
     verify(em, never()).remove(any());
   }
 }

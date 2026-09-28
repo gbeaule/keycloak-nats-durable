@@ -41,6 +41,7 @@ class RelayWorkerTest {
     var wakeup = mock(RelayWakeup.class);
     when(wakeup.isOpen()).thenReturn(true);
     when(wakeup.awaitSignal(anyLong())).thenThrow(new InterruptedException());
+    when(relay.runBatch()).thenReturn(batch(0));
     try {
       new RelayWorker(relay, wakeup, BridgeConfig.from(Map.of())).run();
       assertTrue(Thread.currentThread().isInterrupted());
@@ -56,7 +57,8 @@ class RelayWorkerTest {
     var relay = mock(OutboxRelay.class);
     var wakeup = mock(RelayWakeup.class);
     when(wakeup.isOpen()).thenReturn(true);
-    when(relay.runBatch()).thenReturn(0, 0, 0, 0, 1, 2, 0);
+    when(relay.runBatch())
+        .thenReturn(batch(0), batch(0), batch(0), batch(0), batch(1), batch(2), batch(0));
     when(wakeup.awaitSignal(anyLong())).thenReturn(true, true, true, true, true, true, false);
     var config =
         BridgeConfig.from(Map.of("batch-size", "2", "poll-ms", "100", "idle-poll-max-ms", "500"));
@@ -90,13 +92,13 @@ class RelayWorkerTest {
             call -> {
               emptyScan.countDown();
               assertTrue(finishScan.await(2, TimeUnit.SECONDS));
-              return 0;
+              return batch(0);
             })
         .doAnswer(
             call -> {
               recovered.countDown();
               wakeup.close();
-              return 1;
+              return batch(1);
             })
         .when(relay)
         .runBatch();
@@ -122,11 +124,11 @@ class RelayWorkerTest {
     var relay = mock(OutboxRelay.class);
     var wakeup = new RelayWakeup();
     var config = BridgeConfig.from(Map.of("poll-ms", "60000", "idle-poll-max-ms", "60000"));
-    doAnswer(call -> config.batchSize())
+    doAnswer(call -> batch(config.batchSize()))
         .doAnswer(
             call -> {
               wakeup.close();
-              return 0;
+              return batch(0);
             })
         .when(relay)
         .runBatch();
@@ -138,5 +140,40 @@ class RelayWorkerTest {
       wakeup.close();
       executor.shutdownNow();
     }
+  }
+
+  @Test
+  void stoppedBatchExitsWithoutWaiting() {
+    var relay = mock(OutboxRelay.class);
+    var wakeup = mock(RelayWakeup.class);
+    when(wakeup.isOpen()).thenReturn(true);
+    when(relay.runBatch())
+        .thenReturn(new OutboxRelay.BatchResult(0, 0, 0, OutboxRelay.Outcome.STOPPED));
+    new RelayWorker(relay, wakeup, BridgeConfig.from(Map.of())).run();
+    verify(wakeup).isOpen();
+    verifyNoMoreInteractions(wakeup);
+  }
+
+  private static OutboxRelay.BatchResult batch(int processed) {
+    // Failed publications count as useful work for polling just like successful ones.
+    return new OutboxRelay.BatchResult(
+        processed,
+        0,
+        processed,
+        processed == 0 ? OutboxRelay.Outcome.NO_WORK : OutboxRelay.Outcome.RETRY_SCHEDULED);
+  }
+
+  @Test
+  void failedDatabaseCommitDoesNotStartAnImmediateRescan() throws Exception {
+    var relay = mock(OutboxRelay.class);
+    var wakeup = mock(RelayWakeup.class);
+    final var config = BridgeConfig.from(Map.of("batch-size", "1", "poll-ms", "100"));
+    when(wakeup.isOpen()).thenReturn(true);
+    when(relay.runBatch())
+        .thenReturn(new OutboxRelay.BatchResult(1, 0, 0, OutboxRelay.Outcome.TRANSACTION_FAILED));
+    when(wakeup.awaitSignal(100)).thenReturn(false);
+    new RelayWorker(relay, wakeup, config).run();
+    verify(wakeup).awaitSignal(100);
+    verify(relay).runBatch();
   }
 }

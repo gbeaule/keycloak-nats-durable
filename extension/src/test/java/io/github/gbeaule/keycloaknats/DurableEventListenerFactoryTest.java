@@ -33,7 +33,7 @@ import org.keycloak.Config;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.KeycloakSessionFactory;
-import org.keycloak.models.KeycloakSessionTaskWithResult;
+import org.keycloak.models.KeycloakSessionTask;
 import org.keycloak.models.KeycloakTransaction;
 import org.keycloak.models.KeycloakTransactionManager;
 import org.keycloak.models.utils.KeycloakModelUtils;
@@ -99,10 +99,8 @@ class DurableEventListenerFactoryTest {
     }
   }
 
-  @ParameterizedTest
-  @ValueSource(booleans = {false, true})
-  void relayWorkUsesTheSessionOwnedByTheKeycloakTransactionRunner(boolean published)
-      throws Exception {
+  @Test
+  void relayWorkUsesTheSessionOwnedByTheKeycloakTransactionRunner() throws Exception {
     try (var fixture = new Lifecycle();
         var jobs = mockStatic(KeycloakModelUtils.class)) {
       fixture.start();
@@ -111,22 +109,16 @@ class DurableEventListenerFactoryTest {
       var entityManager = mock(EntityManager.class);
       when(session.getProvider(JpaConnectionProvider.class)).thenReturn(jpa);
       when(jpa.getEntityManager()).thenReturn(entityManager);
-      jobs.when(() -> KeycloakModelUtils.runJobInTransactionWithResult(eq(fixture.sessions), any()))
+      jobs.when(() -> KeycloakModelUtils.runJobInTransaction(eq(fixture.sessions), any()))
           .thenAnswer(
               invocation -> {
-                KeycloakSessionTaskWithResult<?> task = invocation.getArgument(1);
-                return task.run(session);
+                KeycloakSessionTask task = invocation.getArgument(1);
+                task.run(session);
+                return null;
               });
-      assertEquals(
-          published,
-          fixture
-              .transactions
-              .getFirst()
-              .run(
-                  actual -> {
-                    assertSame(entityManager, actual);
-                    return published;
-                  }));
+      var received = new java.util.concurrent.atomic.AtomicReference<EntityManager>();
+      fixture.transactions.getFirst().run(received::set);
+      assertSame(entityManager, received.get());
       var failure = new IllegalStateException("database failed");
       assertSame(
           failure,

@@ -201,6 +201,13 @@ class PerUserCaptureIT extends IntegrationSupport {
                   capture.onEvent(event("capture", user));
                   capture.onEvent(
                       event("capture", user)); // The replacement excludes this callback.
+                  assertFalse(
+                      session
+                          .createQuery(
+                              "from NatsOutboxEvent where orderingKey=:key", OutboxEvent.class)
+                          .setParameter("key", new EventOrdering("capture", user, 1).key())
+                          .getSingleResult()
+                          .publicationMayHaveOccurred());
                   session.getTransaction().commit();
                 }
               });
@@ -235,7 +242,6 @@ class PerUserCaptureIT extends IntegrationSupport {
           initial.resolve(event("capture", user), row.subject()).orElseThrow(),
           row.publicationPolicy());
       assertEquals(row.createdAt() + 60_000, row.expiresAt());
-      assertFalse(row.publicationMayHaveOccurred());
       assertFalse(row.payload().contains("maxAgeSeconds"));
       assertEquals(
           "1", objectMapper.readTree(row.payload()).at("/data/ordering/sequence").asText());
@@ -396,6 +402,7 @@ class PerUserCaptureIT extends IntegrationSupport {
           session
               .createQuery("from NatsOutboxEvent where orderingKey=:key", OutboxEvent.class)
               .setParameter("key", key)
+              .setLockMode(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
               .getResultList();
       assertEquals(5, rows.size());
       for (var row : rows) {

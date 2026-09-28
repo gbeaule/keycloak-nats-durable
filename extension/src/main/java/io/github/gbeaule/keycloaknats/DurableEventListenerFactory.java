@@ -76,10 +76,10 @@ public final class DurableEventListenerFactory implements EventListenerProviderF
       OutboxRelay relay =
           new OutboxRelay(
               work ->
-                  KeycloakModelUtils.runJobInTransactionWithResult(
+                  KeycloakModelUtils.runJobInTransaction(
                       factory,
                       session ->
-                          work.apply(
+                          work.accept(
                               session.getProvider(JpaConnectionProvider.class).getEntityManager())),
               publisher,
               config);
