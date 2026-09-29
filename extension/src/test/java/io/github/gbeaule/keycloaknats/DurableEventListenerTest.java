@@ -316,6 +316,75 @@ class DurableEventListenerTest {
     verify(tx, never()).setRollbackOnly();
   }
 
+  @Test
+  void routedIdentityIsSharedByStateFilteringPolicyEnvelopeAndOrdering() throws Exception {
+    String id = "f:provider:opaque/credentials";
+    var event = EventEnvelopeTest.admin(OperationType.UPDATE);
+    event.setResourcePath("users/" + id);
+    var request = AdminRequestFixtures.request(event, id, Map.of());
+    var context = request.getContext();
+    when(session.getContext()).thenReturn(context);
+    var parameters = request.getContext().getUri().getPathParameters();
+    var realms = mock(RealmProvider.class);
+    var users = mock(UserProvider.class);
+    var realm = mock(RealmModel.class);
+    var user = mock(UserModel.class);
+    when(session.realms()).thenReturn(realms);
+    when(session.users()).thenReturn(users);
+    when(realms.getRealm("realm")).thenReturn(realm);
+    when(users.getUserById(realm, id)).thenReturn(user);
+    when(user.isEnabled())
+        .thenAnswer(
+            call -> {
+              parameters.putSingle("user-id", "different-later-context");
+              return false;
+            });
+    var filter =
+        EventFilterTest.parse(
+            """
+            {"userEvents":[],"adminEvents":[
+              {"resourceType":"USER","operations":["UPDATE"],"userEnabled":false}],
+             "delivery":{"rules":[{"id":"disabled",
+               "match":{"kind":"admin","resourceType":"USER",
+                        "operations":["UPDATE"],"userEnabled":false},
+               "policy":{"action":"discard","maxFailures":2}}]}}
+            """);
+    listener =
+        new DurableEventListener(session, BridgeConfig.from(Map.of()), wakeRelay, () -> filter);
+    listener.onEvent(event, false);
+    var captured = ArgumentCaptor.forClass(OutboxEvent.class);
+    verify(em).persist(captured.capture());
+    var row = captured.getValue();
+    var data = new ObjectMapper().readTree(row.payload()).path("data");
+    assertEquals(id, data.path("userId").asText());
+    assertEquals("1", data.path("ordering").path("sequence").asText());
+    assertEquals(new EventOrdering("realm", id, 1).key(), row.orderingKey());
+    assertEquals("disabled", row.publicationPolicy().ruleId());
+    assertEquals(2, row.publicationPolicy().policy().maxFailures());
+    assertFalse(data.path("userEnabled").asBoolean());
+    verify(users).getUserById(realm, id);
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"ACTION", "DELETE"})
+  void routedNestedActionsAndDeletedUsersDoNotRequireAccountLookup(String operation)
+      throws Exception {
+    String id = "f:provider:opaque/consents";
+    var event = EventEnvelopeTest.admin(OperationType.valueOf(operation));
+    event.setResourcePath("users/" + id + (operation.equals("ACTION") ? "/reset-password" : ""));
+    var request = AdminRequestFixtures.request(event, id, Map.of());
+    var context = request.getContext();
+    when(session.getContext()).thenReturn(context);
+    listener.onEvent(event, false);
+    var captured = ArgumentCaptor.forClass(OutboxEvent.class);
+    verify(em).persist(captured.capture());
+    var data = new ObjectMapper().readTree(captured.getValue().payload()).path("data");
+    assertEquals(id, data.path("userId").asText());
+    assertFalse(data.has("userEnabled"));
+    verify(session, never()).realms();
+    verify(session, never()).users();
+  }
+
   @ParameterizedTest
   @ValueSource(booleans = {false, true})
   void missingRealmOrUserDoesNotInventAnEnablementState(boolean realmExists) throws Exception {

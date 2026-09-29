@@ -83,9 +83,12 @@ public final class OutboxRelay implements Runnable {
     int expired = 0;
     int exhausted = 0;
     Outcome outcome = Outcome.STOPPED;
+    var discard = new AtomicReference<Claim>();
     try {
       while (processed < config.batchSize() && !isStopped()) {
-        Preparation prepared = transact(this::prepareNext);
+        discard.set(null);
+        Preparation prepared = transact(em -> prepareNext(em, discard));
+        discard.set(null);
         if (prepared.claim() != null && isStopped()) {
           outcome = Outcome.STOPPED;
           break;
@@ -99,7 +102,7 @@ public final class OutboxRelay implements Runnable {
         Resolution resolution =
             prepared.claim() == null
                 ? prepared.resolution()
-                : transact(em -> publishPrepared(em, prepared.claim()));
+                : transact(em -> publishPrepared(em, prepared.claim(), discard));
         if (metrics != null) {
           metrics.committed(resolution);
         }
@@ -125,11 +128,14 @@ public final class OutboxRelay implements Runnable {
       if (metrics != null) {
         metrics.transactionFailed();
       }
+      if (discard.get() != null) {
+        deferFailedDiscard(discard.get());
+      }
     }
     return new BatchResult(processed, published, retries, expired, exhausted, outcome);
   }
 
-  private Preparation prepareNext(EntityManager em) {
+  private Preparation prepareNext(EntityManager em, AtomicReference<Claim> discard) {
     long now = CaptureRepository.databaseTime(em);
     // Share the batch allowance fairly, including when batch-size is one.
     boolean expiryFirst = preferExpiry;
@@ -151,7 +157,7 @@ public final class OutboxRelay implements Runnable {
       return new Preparation(null, new Resolution(Outcome.NO_WORK));
     }
     OutboxEvent row = next.get();
-    Resolution discarded = discardIfEligible(em, row, now);
+    Resolution discarded = discardIfEligible(em, row, now, discard);
     if (discarded != null) {
       return new Preparation(null, discarded);
     }
@@ -161,7 +167,8 @@ public final class OutboxRelay implements Runnable {
     return new Preparation(new Claim(row.id(), row.version()), new Resolution(Outcome.PREPARED));
   }
 
-  private Resolution publishPrepared(EntityManager em, Claim claim) {
+  private Resolution publishPrepared(
+      EntityManager em, Claim claim, AtomicReference<Claim> discard) {
     var next =
         OutboxRepository.lockPrepared(
             em, claim.id(), claim.version(), CaptureRepository.databaseTime(em));
@@ -173,7 +180,7 @@ public final class OutboxRelay implements Runnable {
       return new Resolution(Outcome.STALE);
     }
     OutboxEvent row = next.get();
-    Resolution discarded = discardIfEligible(em, row, CaptureRepository.databaseTime(em));
+    Resolution discarded = discardIfEligible(em, row, CaptureRepository.databaseTime(em), discard);
     if (discarded != null) {
       return discarded;
     }
@@ -191,7 +198,7 @@ public final class OutboxRelay implements Runnable {
       }
       long now = CaptureRepository.databaseTime(em);
       row.failed(now + RetryBackoff.delay(config, row.attempts()), e.getClass().getSimpleName());
-      discarded = discardIfEligible(em, row, now);
+      discarded = discardIfEligible(em, row, now, discard);
       if (discarded != null) {
         return discarded;
       }
@@ -206,18 +213,36 @@ public final class OutboxRelay implements Runnable {
     return new Resolution(Outcome.PUBLISHED);
   }
 
-  private Resolution discardIfEligible(EntityManager em, OutboxEvent row, long now) {
+  private Resolution discardIfEligible(
+      EntityManager em, OutboxEvent row, long now, AtomicReference<Claim> discard) {
     var reason =
         row.publicationPolicy().policy().discardReason(row.createdAt(), now, row.attempts());
     if (reason == null) {
       return null;
     }
+    discard.set(new Claim(row.id(), row.version()));
     OutboxRepository.discard(em, row, reason, now);
     return new Resolution(
         reason == DiscardReason.EXPIRED
             ? Outcome.DISCARDED_EXPIRED
             : Outcome.DISCARDED_MAX_FAILURES,
         row.publicationMayHaveOccurred());
+  }
+
+  private void deferFailedDiscard(Claim claim) {
+    try {
+      // The failed transaction has ended. Never update its detached row or a newer owner's state.
+      transactions.run(
+          em ->
+              OutboxRepository.lockUnchanged(em, claim.id(), claim.version())
+                  .ifPresent(
+                      row ->
+                          row.deferDiscard(
+                              CaptureRepository.databaseTime(em) + RetryBackoff.delay(config, 0))));
+    } catch (RuntimeException e) {
+      // A database-wide failure may also prevent backoff; leave the original unresolved.
+      logger.errorf("NATS outbox discard backoff failed; %s", NatsDiagnostics.describe(e));
+    }
   }
 
   private <T> T transact(Function<EntityManager, T> work) {

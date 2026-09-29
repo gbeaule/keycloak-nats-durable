@@ -231,10 +231,12 @@ class ReloadingEventFilterTest {
       assertEquals(digest, resolved.filterSha256());
       assertEquals(new PublicationPolicy(null, 2), resolved.policy());
       var second = filter.current();
+      var event = EventEnvelopeTest.admin(OperationType.UPDATE);
       assertTrue(
           second
               .resolve(
-                  EventEnvelopeTest.admin(OperationType.UPDATE),
+                  event,
+                  AffectedUser.resolve(event),
                   false,
                   "keycloak.events.realm.admin.user.update")
               .isEmpty());

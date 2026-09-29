@@ -44,7 +44,8 @@ class EventFilterTest {
   }
 
   static boolean accepts(EventFilter policy, AdminEvent event, Boolean enabled) {
-    return policy.accepts(event, enabled, envelopes.adminSubject(event));
+    return policy.accepts(
+        event, AffectedUser.resolve(event), enabled, envelopes.adminSubject(event));
   }
 
   static EventFilter parse(String json) throws IOException {

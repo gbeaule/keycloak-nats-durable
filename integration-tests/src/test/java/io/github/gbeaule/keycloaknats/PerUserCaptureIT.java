@@ -10,6 +10,8 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -466,6 +468,65 @@ class PerUserCaptureIT extends IntegrationSupport {
       session.getTransaction().commit();
     }
     assertEquals(List.of(6L), sequences(user));
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"/credentials", "/consents", "/%2F+用户/credentials"})
+  void routedUserIdsRemainIntactAcrossActionsUpdatesAndDeletion(String suffix) throws Exception {
+    String prefix = UUID.randomUUID().toString().substring(0, 8);
+    String user = prefix + suffix;
+    // Seed an opaque ID directly because the create-user API generates UUIDs for local users.
+    try (var connection = database.getConnection();
+        var insert =
+            connection.prepareStatement(
+                "INSERT INTO user_entity"
+                    + " (id,realm_id,username,enabled,email_verified,not_before,created_timestamp)"
+                    + " SELECT ?,id,?,true,false,0,0 FROM realm WHERE name='durable-test'")) {
+      insert.setString(1, user);
+      insert.setString(2, "routed-" + prefix);
+      assertEquals(1, insert.executeUpdate());
+    }
+    String path =
+        "/admin/realms/durable-test/users/"
+            + URLEncoder.encode(user, StandardCharsets.UTF_8).replace("+", "%20");
+    var reset =
+        request(
+            "PUT",
+            path + "/reset-password",
+            Map.of("type", "password", "value", "integration-password", "temporary", false));
+    assertEquals(204, reset.statusCode(), reset.body());
+    var update = request("PUT", path, Map.of("enabled", false));
+    assertEquals(204, update.statusCode(), update.body());
+    var credentials = objectMapper.readTree(request("GET", path + "/credentials", null).body());
+    assertEquals(
+        204,
+        request("DELETE", path + "/credentials/" + credentials.get(0).path("id").asText(), null)
+            .statusCode());
+    assertEquals(204, request("DELETE", path, null).statusCode());
+    assertEquals(List.of(1L, 2L, 3L, 4L), sequences(user));
+    assertEquals(List.of(), sequences(prefix));
+    try (var session = sessions.openSession()) {
+      var rows =
+          session
+              .createQuery(
+                  "from NatsOutboxEvent where orderingKey in"
+                      + " (select c.orderingKey from NatsCaptureCounter c where c.userId=:user)",
+                  OutboxEvent.class)
+              .setParameter("user", user)
+              .getResultList();
+      assertEquals(4, rows.size());
+      for (var row : rows) {
+        var data = objectMapper.readTree(row.payload()).path("data");
+        assertEquals(user, data.path("userId").asText());
+        assertNotEquals(user, data.path("actorUserId").asText());
+        if (data.path("operationType").asText().equals("UPDATE")) {
+          assertTrue(data.has("userEnabled"));
+          assertFalse(data.path("userEnabled").asBoolean());
+        } else {
+          assertFalse(data.has("userEnabled"));
+        }
+      }
+    }
   }
 
   private static Event event(String realm, String user) {

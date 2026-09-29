@@ -64,6 +64,9 @@ public class OutboxEvent {
   @Column(name = "NEXT_ATTEMPT_AT", nullable = false)
   private long nextAttemptAt;
 
+  @Column(name = "NEXT_EXPIRY_ATTEMPT_AT")
+  private Long nextExpiryAttemptAt;
+
   @Column(name = "ATTEMPTS", nullable = false)
   private long attempts;
 
@@ -100,6 +103,7 @@ public class OutboxEvent {
     this.maxFailures = policy.policy().maxFailures();
     this.expiresAt =
         maxAgeSeconds == null ? null : Math.addExact(createdAt, maxAgeSeconds.longValue() * 1000);
+    this.nextExpiryAttemptAt = expiresAt;
     this.filterSha256 = policy.filterSha256();
     this.ruleId = policy.ruleId();
   }
@@ -143,6 +147,16 @@ public class OutboxEvent {
 
   long version() {
     return version;
+  }
+
+  Long nextExpiryAttemptAt() {
+    return nextExpiryAttemptAt;
+  }
+
+  void deferDiscard(long next) {
+    // Move behind other ready work even if the cooldown elapses before the next worker scan.
+    nextAttemptAt = next;
+    nextExpiryAttemptAt = expiresAt == null ? null : Math.max(expiresAt, next);
   }
 
   /** Returns the persisted deduplication identity shared by the envelope and NATS header. */

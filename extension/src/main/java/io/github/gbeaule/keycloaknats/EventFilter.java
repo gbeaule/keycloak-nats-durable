@@ -53,8 +53,10 @@ final class EventFilter {
           && scope.accepts(event.getRealmId(), event.getClientId(), event.getError(), subject);
     }
 
-    boolean matches(AdminEvent event, Boolean enabled, String subject) {
-      return admin != null && admin.matches(event, enabled) && inScope(scope, event, subject);
+    boolean matches(AdminEvent event, String userId, Boolean enabled, String subject) {
+      return admin != null
+          && admin.matches(event, userId, enabled)
+          && inScope(scope, event, subject);
     }
   }
 
@@ -64,7 +66,7 @@ final class EventFilter {
           && (operations.contains("*") || operations.contains(event.getOperationType().name()));
     }
 
-    boolean matches(AdminEvent event, Boolean enabled) {
+    boolean matches(AdminEvent event, String userId, Boolean enabled) {
       if (!matches(event)) {
         return false;
       }
@@ -72,7 +74,7 @@ final class EventFilter {
         return true;
       }
       boolean successful = event.getError() == null;
-      boolean directUser = AffectedUser.directUserId(event) != null;
+      boolean directUser = AffectedUser.isDirectUser(event, userId);
       boolean enabledMatches = userEnabled.equals(enabled);
       return successful && directUser && enabledMatches;
     }
@@ -242,13 +244,14 @@ final class EventFilter {
             .orElseGet(this::defaultPolicy));
   }
 
-  Optional<ResolvedPublicationPolicy> resolve(AdminEvent event, Boolean enabled, String subject) {
-    if (!accepts(event, enabled, subject)) {
+  Optional<ResolvedPublicationPolicy> resolve(
+      AdminEvent event, String userId, Boolean enabled, String subject) {
+    if (!accepts(event, userId, enabled, subject)) {
       return Optional.empty();
     }
     return Optional.of(
         deliveryRules.stream()
-            .filter(rule -> rule.matches(event, enabled, subject))
+            .filter(rule -> rule.matches(event, userId, enabled, subject))
             .map(DeliveryRule::resolved)
             .findFirst()
             .orElseGet(this::defaultPolicy));
@@ -263,9 +266,9 @@ final class EventFilter {
         && scope.accepts(event.getRealmId(), event.getClientId(), event.getError(), subject);
   }
 
-  boolean accepts(AdminEvent event, Boolean enabled, String subject) {
+  boolean accepts(AdminEvent event, String userId, Boolean enabled, String subject) {
     return inScope(scope, event, subject)
-        && adminEvents.stream().anyMatch(rule -> rule.matches(event, enabled));
+        && adminEvents.stream().anyMatch(rule -> rule.matches(event, userId, enabled));
   }
 
   boolean mayAccept(AdminEvent event, String subject) {

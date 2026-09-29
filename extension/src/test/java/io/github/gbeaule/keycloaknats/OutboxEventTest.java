@@ -94,6 +94,30 @@ class OutboxEventTest {
   }
 
   @Test
+  void discardBackoffReschedulesBothQueuesWithoutChangingPolicyOrFailureCount() {
+    var policy =
+        new ResolvedPublicationPolicy(new PublicationPolicy(60, 1), "a".repeat(64), "short");
+    var row = new OutboxEvent("id", "subject", "{}", 1000, "realm", "type", null, policy);
+    assertEquals(row.expiresAt(), row.nextExpiryAttemptAt());
+    row.failed(1500, "IOException");
+    row.deferDiscard(2000);
+    assertEquals(2000, row.nextAttemptAt());
+    assertEquals(61000L, row.nextExpiryAttemptAt());
+    row.deferDiscard(70000);
+    assertEquals(70000, row.nextAttemptAt());
+    assertEquals(70000L, row.nextExpiryAttemptAt());
+    assertEquals(61000L, row.expiresAt());
+    assertEquals(policy, row.publicationPolicy());
+    assertEquals(1, row.attempts());
+    assertEquals("IOException", row.lastError());
+    assertFalse(row.publicationMayHaveOccurred());
+    var unexpiring = CaptureFixtures.row("other", "subject", "{}", 0);
+    unexpiring.deferDiscard(2000);
+    assertEquals(2000, unexpiring.nextAttemptAt());
+    assertNull(unexpiring.nextExpiryAttemptAt());
+  }
+
+  @Test
   void exhaustedAttemptCounterSaturatesButRetrySchedulingContinues() throws Exception {
     var row = CaptureFixtures.row("id", "subject", "{}", 0);
     // Simulate persisted state near the limit, rather than performing a lifetime of retries.

@@ -27,8 +27,8 @@ final class OutboxRepository {
     return lock(
         entityManager
             .createQuery(
-                "select event from NatsOutboxEvent event where event.expiresAt <= :now"
-                    + " order by event.expiresAt, event.id",
+                "select event from NatsOutboxEvent event where event.nextExpiryAttemptAt <= :now"
+                    + " order by event.nextExpiryAttemptAt, event.id",
                 OutboxEvent.class)
             .setParameter("now", now));
   }
@@ -59,6 +59,17 @@ final class OutboxRepository {
                     + " and event.publicationMayHaveOccurred = true",
                 OutboxEvent.class)
             .setParameter("now", now)
+            .setParameter("id", id)
+            .setParameter("version", version));
+  }
+
+  static Optional<OutboxEvent> lockUnchanged(EntityManager entityManager, String id, long version) {
+    return lock(
+        entityManager
+            .createQuery(
+                "select event from NatsOutboxEvent event"
+                    + " where event.id = :id and event.version = :version",
+                OutboxEvent.class)
             .setParameter("id", id)
             .setParameter("version", version));
   }

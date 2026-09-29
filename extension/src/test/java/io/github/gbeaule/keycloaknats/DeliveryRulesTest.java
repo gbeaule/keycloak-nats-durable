@@ -41,7 +41,9 @@ class DeliveryRulesTest {
   }
 
   static ResolvedPublicationPolicy resolve(EventFilter filter, AdminEvent event, Boolean enabled) {
-    return filter.resolve(event, enabled, envelopes.adminSubject(event)).orElseThrow();
+    return filter
+        .resolve(event, AffectedUser.resolve(event), enabled, envelopes.adminSubject(event))
+        .orElseThrow();
   }
 
   @Test
@@ -82,7 +84,10 @@ class DeliveryRulesTest {
     assertTrue(filter.resolve(EventEnvelopeTest.login(), "anything").isEmpty());
     var admin = EventEnvelopeTest.admin(OperationType.UPDATE);
     assertFalse(filter.mayAccept(admin, envelopes.adminSubject(admin)));
-    assertTrue(filter.resolve(admin, false, envelopes.adminSubject(admin)).isEmpty());
+    assertTrue(
+        filter
+            .resolve(admin, AffectedUser.resolve(admin), false, envelopes.adminSubject(admin))
+            .isEmpty());
   }
 
   @Test

@@ -39,6 +39,7 @@ class OutboxRelayTest {
   private TypedQuery<OutboxEvent> query;
   private TypedQuery<OutboxEvent> prepared;
   private TypedQuery<OutboxEvent> expired;
+  private TypedQuery<OutboxEvent> unchanged;
   private Query clock;
   private EventPublisher publisher;
   private OutboxEvent row;
@@ -54,6 +55,7 @@ class OutboxRelayTest {
     query = mock(TypedQuery.class, RETURNS_SELF);
     prepared = mock(TypedQuery.class, RETURNS_SELF);
     expired = mock(TypedQuery.class, RETURNS_SELF);
+    unchanged = mock(TypedQuery.class, RETURNS_SELF);
     clock = mock(Query.class);
     when(em.createNativeQuery(anyString(), eq(Long.class))).thenReturn(clock);
     when(clock.getSingleResult()).thenAnswer(call -> System.currentTimeMillis());
@@ -62,12 +64,13 @@ class OutboxRelayTest {
             call -> {
               String hql = call.getArgument(0);
               return hql.contains(":version")
-                  ? prepared
-                  : hql.contains("event.expiresAt") ? expired : query;
+                  ? (hql.contains("event.nextAttemptAt") ? prepared : unchanged)
+                  : hql.contains("event.nextExpiryAttemptAt") ? expired : query;
             });
     row = CaptureFixtures.row("id", "subject", "{}", 0);
     when(query.getResultList()).thenReturn(List.of(row), List.of());
     when(prepared.getResultList()).thenReturn(List.of(row));
+    when(unchanged.getResultList()).thenAnswer(call -> List.of(row));
     registry = new SimpleMeterRegistry();
     metrics = new RelayMetrics(registry);
     relay =
@@ -512,6 +515,50 @@ class OutboxRelayTest {
     assertEquals(0, result.discarded());
     verify(em, never()).remove(any());
     verifyNoInteractions(publisher);
+  }
+
+  @Test
+  void failedDiscardDefersOnlyTheUnchangedOriginalWithoutConsumingPublicationAttempts() {
+    usePolicy(new PublicationPolicy(1, 1));
+    when(clock.getSingleResult()).thenReturn(10_000L);
+    doThrow(new IllegalStateException("audit rejected")).when(em).persist(any(DiscardAudit.class));
+    assertEquals(OutboxRelay.Outcome.TRANSACTION_FAILED, relay.runBatch().outcome());
+    assertTrue(row.nextAttemptAt() >= 10_500);
+    assertTrue(row.nextAttemptAt() <= 11_000);
+    assertEquals(row.nextAttemptAt(), row.nextExpiryAttemptAt());
+    assertEquals(0, row.attempts());
+    assertEquals(1000L, row.expiresAt());
+    assertNull(row.lastError());
+    assertFalse(row.publicationMayHaveOccurred());
+    verify(unchanged).setParameter("id", row.id());
+    verify(unchanged).setParameter("version", row.version());
+    verify(unchanged).setLockMode(LockModeType.PESSIMISTIC_WRITE);
+    verify(unchanged).setHint(SpecHints.HINT_SPEC_LOCK_TIMEOUT, Timeouts.SKIP_LOCKED_MILLI);
+    assertEquals(1, registry.get("knd.publication.transaction.failures").counter().count());
+    assertEquals(0, registry.get("knd.publication.failures").counter().count());
+    assertEquals(0, registry.get("knd.publication.retries").counter().count());
+  }
+
+  @Test
+  void failedDiscardDoesNotChangeResolvedOrLockedOriginal() {
+    usePolicy(new PublicationPolicy(1, null));
+    when(unchanged.getResultList()).thenReturn(List.of());
+    doThrow(new IllegalStateException("commit unknown")).when(em).persist(any(DiscardAudit.class));
+    assertEquals(OutboxRelay.Outcome.TRANSACTION_FAILED, relay.runBatch().outcome());
+    assertEquals(0, row.nextAttemptAt());
+    verify(unchanged).getResultList();
+  }
+
+  @Test
+  void failedLookupAfterCommittedDiscardDoesNotBackOffThePreviousRow() {
+    usePolicy(new PublicationPolicy(1, null));
+    when(query.getResultList())
+        .thenReturn(List.of(row))
+        .thenThrow(new IllegalStateException("lookup failed"));
+    var result = relay.runBatch();
+    assertEquals(OutboxRelay.Outcome.TRANSACTION_FAILED, result.outcome());
+    assertEquals(1, result.discarded());
+    verifyNoInteractions(unchanged);
   }
 
   @Test

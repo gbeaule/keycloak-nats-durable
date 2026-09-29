@@ -59,12 +59,12 @@ public final class EventEnvelope {
     return description(event.getRealmId(), suffix, suffix, event.getTime(), data);
   }
 
-  Description describe(AdminEvent event, Boolean userEnabled) {
+  Description describe(AdminEvent event, String userId, Boolean userEnabled) {
     Map<String, Object> data = common("admin", event.getId(), event.getRealmId(), event.getError());
     data.put("resourceType", event.getResourceTypeAsString());
     data.put("operationType", event.getOperationType().name());
     data.put("resourcePath", event.getResourcePath());
-    data.put("userId", AffectedUser.resolve(event));
+    data.put("userId", userId);
     data.put("userEnabled", userEnabled);
     if (event.getAuthDetails() != null) {
       data.put("actorUserId", event.getAuthDetails().getUserId());

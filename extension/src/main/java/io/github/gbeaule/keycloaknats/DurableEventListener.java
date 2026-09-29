@@ -54,20 +54,22 @@ public final class DurableEventListener implements EventListenerProvider {
           if (!policy.mayAccept(event, subject)) {
             return null;
           }
-          Boolean enabled = enabledState(event);
+          String userId = AffectedUser.resolve(event, session);
+          Boolean enabled = enabledState(event, userId);
           return policy
-              .resolve(event, enabled, subject)
-              .map(resolved -> new Capture(envelopes.describe(event, enabled), resolved))
+              .resolve(event, userId, enabled, subject)
+              .map(resolved -> new Capture(envelopes.describe(event, userId, enabled), resolved))
               .orElse(null);
         });
   }
 
-  private Boolean enabledState(AdminEvent event) {
-    String userId = AffectedUser.directUserId(event);
+  private Boolean enabledState(AdminEvent event, String userId) {
     OperationType operation = event.getOperationType();
     boolean observesUserState =
         operation == OperationType.CREATE || operation == OperationType.UPDATE;
-    if (userId == null || event.getError() != null || !observesUserState) {
+    if (!AffectedUser.isDirectUser(event, userId)
+        || event.getError() != null
+        || !observesUserState) {
       return null;
     }
     RealmModel realm = session.realms().getRealm(event.getRealmId());

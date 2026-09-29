@@ -29,6 +29,11 @@ until commit or rollback, and a deadlock or lock timeout rolls back the entire K
 Counters survive user deletion and outbox draining. Publication workers must never lock these
 counters during broker requests.
 
+For supported admin requests, affected-user identity comes from Keycloak's routed `user-id`
+parameter after matching the request to the event's realm and resource. Capture resolves this ID
+once for filtering, message metadata and ordering. Without matching request context, only an
+unambiguous direct user path supplies an ID; ambiguous nested events remain independent.
+
 This boundary covers events that Keycloak actually sends to an enabled listener. Direct SQL changes,
 external LDAP/identity-provider changes and custom integrations that emit no event are outside it.
 External mutations are not made transactional by this bridge. Events are not backfilled after
@@ -72,6 +77,10 @@ delayed retries without contacting NATS. Discard inserts metadata-only diagnosti
 original atomically. A committed discard releases that sequence position without publishing a
 replacement, tombstone or control message. If publication intent was recorded, the audit conservatively
 reports an unknown outcome: discard cannot retract an accepted or in-flight original.
+
+A failed discard backs off through a separate database transaction. Both relay scans respect this
+cooldown, allowing other users to progress while the original continues to block its own successors.
+Database failures do not consume the event's publication-failure allowance.
 
 An independent worker removes diagnostic history after seven days by default. Cleanup uses bounded
 transactions and works during broker outages; retention zero makes history eligible on the next

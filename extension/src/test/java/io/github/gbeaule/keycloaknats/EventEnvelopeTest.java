@@ -226,7 +226,8 @@ class EventEnvelopeTest {
     var event = admin(OperationType.UPDATE);
     event.setRealmId("r".repeat(358));
     assertEquals(512, encoder.adminSubject(event).length());
-    assertEquals(512, encoder.describe(event, false).subject().length());
+    assertEquals(
+        512, encoder.describe(event, AffectedUser.resolve(event), false).subject().length());
     event.setRealmId("r".repeat(359));
     var failure =
         assertThrows(

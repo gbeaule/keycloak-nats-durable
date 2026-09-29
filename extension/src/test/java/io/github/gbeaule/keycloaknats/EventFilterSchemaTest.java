@@ -62,10 +62,12 @@ class EventFilterSchemaTest {
       var filter = EventFilterTest.parse(new String(input.readAllBytes(), StandardCharsets.UTF_8));
       for (var operation :
           new OperationType[] {OperationType.CREATE, OperationType.UPDATE, OperationType.DELETE}) {
+        var event = EventEnvelopeTest.admin(operation);
         var policy =
             filter
                 .resolve(
-                    EventEnvelopeTest.admin(operation),
+                    event,
+                    AffectedUser.resolve(event),
                     false,
                     "keycloak.events.realm.admin.user.update")
                 .orElseThrow();

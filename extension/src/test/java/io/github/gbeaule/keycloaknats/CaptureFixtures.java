@@ -24,7 +24,10 @@ final class CaptureFixtures {
   static OutboxEvent admin(
       EventEnvelope encoder, AdminEvent event, Boolean enabled, EventOrdering ordering) {
     return encoder.serialize(
-        encoder.describe(event, enabled), ordering, System.currentTimeMillis(), RETRY);
+        encoder.describe(event, AffectedUser.resolve(event), enabled),
+        ordering,
+        System.currentTimeMillis(),
+        RETRY);
   }
 
   static OutboxEvent row(String id, String subject, String payload, long capturedAt) {

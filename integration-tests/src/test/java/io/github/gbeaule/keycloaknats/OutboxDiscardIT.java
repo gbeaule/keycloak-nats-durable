@@ -18,11 +18,199 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 /** Local discard uses PostgreSQL ownership; only original events ever enter JetStream. */
 @SuppressWarnings("checkstyle:AbbreviationAsWordInName")
 class OutboxDiscardIT extends RelayIntegrationSupport {
+  @ParameterizedTest
+  @CsvSource({"1,audit", "64,audit", "1,delete", "64,delete", "1,commit", "64,commit"})
+  void rejectedDiscardDoesNotStarveOtherUsersAcrossWorkers(int batchSize, String failure)
+      throws Exception {
+    capture("expired", "blocked", new PublicationPolicy(1, null), 2000);
+    capture("successor", "blocked");
+    capture("other", "healthy");
+    rejectDiscard(failure);
+    var workerConfig =
+        BridgeConfig.from(
+            Map.of(
+                "batch-size", Integer.toString(batchSize),
+                "retry-initial-ms", "60000",
+                "retry-max-ms", "60000"));
+    try (var actual = new JetStreamPublisher(config)) {
+      var firstWorker = new OutboxRelay(OutboxDiscardIT::transaction, actual, workerConfig);
+      assertEquals(OutboxRelay.Outcome.TRANSACTION_FAILED, firstWorker.runBatch().outcome());
+      // A different worker must observe the cooldown through PostgreSQL.
+      var secondWorker = new OutboxRelay(OutboxDiscardIT::transaction, actual, workerConfig);
+      assertEquals(1, secondWorker.runBatch().published());
+      assertNotNull(row("expired"));
+      assertEquals(0, row("expired").attempts());
+      assertFalse(row("expired").publicationMayHaveOccurred());
+      assertFalse(row("successor").publicationMayHaveOccurred());
+      assertEquals(0, audits());
+      assertEquals(List.of("other"), storedIds(1));
+      assertTrue(row("expired").nextExpiryAttemptAt() > row("expired").expiresAt());
+
+      // Another failed retry must also leave room for newly captured users.
+      transaction(em -> em.find(OutboxEvent.class, "expired").deferDiscard(0));
+      capture("another", "another-healthy");
+      assertEquals(OutboxRelay.Outcome.TRANSACTION_FAILED, firstWorker.runBatch().outcome());
+      assertEquals(1, secondWorker.runBatch().published());
+      assertFalse(row("successor").publicationMayHaveOccurred());
+      assertEquals(0, audits());
+      assertEquals(List.of("other", "another"), storedIds(2));
+    } finally {
+      allowDiscard(failure);
+    }
+    transaction(em -> em.find(OutboxEvent.class, "expired").deferDiscard(0));
+    try (var actual = new JetStreamPublisher(config)) {
+      var result = new OutboxRelay(OutboxDiscardIT::transaction, actual, config).runBatch();
+      assertEquals(1, result.expired());
+      assertEquals(1, result.published());
+    }
+    assertAudit("expired", "EXPIRED", 0, false);
+    assertEquals(List.of("other", "another", "successor"), storedIds(3));
+  }
+
+  @Test
+  void pollingWorkerMakesProgressAfterDiscardCooldownHasAlreadyElapsed() throws Exception {
+    capture("expired", "blocked", new PublicationPolicy(1, null), 2000);
+    capture("successor", "blocked");
+    capture("other", "healthy");
+    rejectDiscard("audit");
+    var workerConfig =
+        BridgeConfig.from(
+            Map.of(
+                "batch-size", "1",
+                "poll-ms", "200",
+                "idle-poll-max-ms", "200",
+                "retry-initial-ms", "1",
+                "retry-max-ms", "1"));
+    var wakeup = new RelayWakeup();
+    try (var executor = Executors.newVirtualThreadPerTaskExecutor();
+        var actual = new JetStreamPublisher(config)) {
+      var relay = new OutboxRelay(OutboxDiscardIT::transaction, actual, workerConfig);
+      var running = executor.submit(new RelayWorker(relay, wakeup, workerConfig));
+      try {
+        await().atMost(Duration.ofSeconds(10)).until(() -> row("other") == null);
+      } finally {
+        relay.stop();
+        wakeup.close();
+        running.get(10, TimeUnit.SECONDS);
+      }
+      assertNotNull(row("expired"));
+      assertFalse(row("successor").publicationMayHaveOccurred());
+      assertEquals(0, audits());
+      assertEquals(List.of("other"), storedIds(1));
+    } finally {
+      allowDiscard("audit");
+    }
+  }
+
+  @Test
+  void discardBackoffDoesNotOverwriteNewerOwnership() throws Exception {
+    capture("expired", "changed", new PublicationPolicy(1, null), 2000);
+    final var original = row("expired");
+    rejectDiscard("audit");
+    var transactions = new AtomicInteger();
+    try {
+      var result =
+          new OutboxRelay(
+                  work -> {
+                    int call = transactions.incrementAndGet();
+                    try {
+                      transaction(work);
+                    } catch (RuntimeException failure) {
+                      if (call == 1) {
+                        transaction(
+                            em ->
+                                em.find(OutboxEvent.class, "expired").deferDiscard(Long.MAX_VALUE));
+                      }
+                      throw failure;
+                    }
+                  },
+                  neverPublish(),
+                  config)
+              .runBatch();
+      assertEquals(OutboxRelay.Outcome.TRANSACTION_FAILED, result.outcome());
+      assertEquals(2, transactions.get());
+      assertEquals(Long.MAX_VALUE, row("expired").nextAttemptAt());
+      assertEquals(Long.MAX_VALUE, row("expired").nextExpiryAttemptAt());
+      assertEquals(original.version() + 1, row("expired").version());
+      assertEquals(0, audits());
+    } finally {
+      allowDiscard("audit");
+    }
+  }
+
+  @Test
+  void uncertainDiscardCommitDoesNotDeferTheSuccessor() throws Exception {
+    capture("expired", "committed", new PublicationPolicy(1, null), 2000);
+    capture("successor", "committed");
+    var transactions = new AtomicInteger();
+    try (var actual = new JetStreamPublisher(config)) {
+      var relay =
+          new OutboxRelay(
+              work -> {
+                transaction(work);
+                if (transactions.incrementAndGet() == 1) {
+                  throw new IllegalStateException("discard commit acknowledgement lost");
+                }
+              },
+              actual,
+              config);
+      var result = relay.runBatch();
+      assertEquals(OutboxRelay.Outcome.TRANSACTION_FAILED, result.outcome());
+      assertEquals(0, result.discarded());
+      assertNull(row("expired"));
+      assertEquals(row("successor").createdAt(), row("successor").nextAttemptAt());
+      assertNull(row("successor").nextExpiryAttemptAt());
+      assertEquals(1, audits());
+      assertEquals(1, relay.runBatch().published());
+    }
+    assertEquals(List.of("successor"), storedIds(1));
+  }
+
+  @Test
+  void failedDiscardAfterSendPreservesIntentAndLetsOtherUsersPublish() throws Exception {
+    capture("abandoned", "ambiguous", new PublicationPolicy(null, 1), 2000);
+    capture("successor", "ambiguous");
+    capture("other", "healthy");
+    rejectDiscard("audit");
+    try (var actual = new JetStreamPublisher(config)) {
+      var relay =
+          new OutboxRelay(
+              OutboxDiscardIT::transaction,
+              publisher(
+                  event -> {
+                    actual.publish(event);
+                    if (event.id().equals("abandoned")) {
+                      throw new IOException("ack lost");
+                    }
+                  }),
+              config);
+      assertEquals(OutboxRelay.Outcome.TRANSACTION_FAILED, relay.runBatch().outcome());
+      assertTrue(row("abandoned").publicationMayHaveOccurred());
+      assertEquals(0, row("abandoned").attempts());
+      assertTrue(row("abandoned").nextAttemptAt() > row("abandoned").createdAt());
+      assertEquals(1, relay.runBatch().published());
+      assertFalse(row("successor").publicationMayHaveOccurred());
+      assertEquals(0, audits());
+      assertEquals(List.of("abandoned", "other"), storedIds(2));
+      allowDiscard("audit");
+      transaction(em -> em.find(OutboxEvent.class, "abandoned").deferDiscard(0));
+      var result = relay.runBatch();
+      assertEquals(1, result.exhausted());
+      assertEquals(1, result.published());
+      assertAudit("abandoned", "MAX_FAILURES", 1, true);
+    } finally {
+      execute("DROP TRIGGER IF EXISTS reject_discard ON \"relay-data\".kc_nats_discard_audit");
+      execute("DROP FUNCTION IF EXISTS \"relay-data\".reject_discard()");
+    }
+    assertEquals(List.of("abandoned", "other", "successor"), storedIds(3));
+  }
+
   @Test
   void offlineExpiryRemovesPayloadAndLeavesOnlyDiagnosticMetadata() throws Exception {
     capture("expired", "offline", new PublicationPolicy(1, 2), 2000);
@@ -110,23 +298,7 @@ class OutboxDiscardIT extends RelayIntegrationSupport {
   void rejectedDiscardRetainsOriginalAndBlocksSuccessor(String failure) throws Exception {
     capture("expired", "atomic", new PublicationPolicy(1, null), 2000);
     capture("successor", "atomic");
-    String table = failure.equals("delete") ? "kc_nats_outbox" : "kc_nats_discard_audit";
-    execute(
-        "CREATE FUNCTION \"relay-data\".reject_discard() RETURNS trigger LANGUAGE plpgsql"
-            + " AS $$ BEGIN RAISE EXCEPTION 'injected discard rejection'; END $$");
-    if (!failure.equals("rollback")) {
-      String trigger =
-          failure.equals("commit")
-              ? "CREATE CONSTRAINT TRIGGER reject_discard AFTER INSERT"
-              : "CREATE TRIGGER reject_discard BEFORE "
-                  + (failure.equals("delete") ? "DELETE" : "INSERT");
-      execute(
-          trigger
-              + " ON \"relay-data\"."
-              + table
-              + (failure.equals("commit") ? " DEFERRABLE INITIALLY DEFERRED" : "")
-              + " FOR EACH ROW EXECUTE FUNCTION \"relay-data\".reject_discard()");
-    }
+    rejectDiscard(failure);
     try {
       var result =
           new OutboxRelay(
@@ -149,9 +321,9 @@ class OutboxDiscardIT extends RelayIntegrationSupport {
       assertEquals(0, audits());
       assertEquals(0, messages());
     } finally {
-      execute("DROP TRIGGER IF EXISTS reject_discard ON \"relay-data\"." + table);
-      execute("DROP FUNCTION \"relay-data\".reject_discard()");
+      allowDiscard(failure);
     }
+    transaction(em -> em.find(OutboxEvent.class, "expired").deferDiscard(0));
     try (var publisher = new JetStreamPublisher(config)) {
       var result = new OutboxRelay(OutboxDiscardIT::transaction, publisher, config).runBatch();
       assertEquals(1, result.discarded());
@@ -376,6 +548,36 @@ class OutboxDiscardIT extends RelayIntegrationSupport {
       assertEquals(0, audits());
       assertEquals(List.of("abandoned"), storedIds(1));
     }
+  }
+
+  private static void rejectDiscard(String failure) throws Exception {
+    execute(
+        "CREATE FUNCTION \"relay-data\".reject_discard() RETURNS trigger LANGUAGE plpgsql"
+            + " AS $$ BEGIN RAISE EXCEPTION 'injected discard rejection'; END $$");
+    if (!failure.equals("rollback")) {
+      String trigger =
+          failure.equals("commit")
+              ? "CREATE CONSTRAINT TRIGGER reject_discard AFTER INSERT"
+              : "CREATE TRIGGER reject_discard BEFORE "
+                  + (failure.equals("delete") ? "DELETE" : "INSERT");
+      String table = failure.equals("delete") ? "kc_nats_outbox" : "kc_nats_discard_audit";
+      String affected = failure.equals("delete") ? "OLD" : "NEW";
+      execute(
+          trigger
+              + " ON \"relay-data\"."
+              + table
+              + (failure.equals("commit") ? " DEFERRABLE INITIALLY DEFERRED" : "")
+              + " FOR EACH ROW WHEN ("
+              + affected
+              + ".id IN ('expired', 'abandoned'))"
+              + " EXECUTE FUNCTION \"relay-data\".reject_discard()");
+    }
+  }
+
+  private static void allowDiscard(String failure) throws Exception {
+    String table = failure.equals("delete") ? "kc_nats_outbox" : "kc_nats_discard_audit";
+    execute("DROP TRIGGER IF EXISTS reject_discard ON \"relay-data\"." + table);
+    execute("DROP FUNCTION \"relay-data\".reject_discard()");
   }
 
   private static void capture(String id, String user, PublicationPolicy policy, long ageMillis) {

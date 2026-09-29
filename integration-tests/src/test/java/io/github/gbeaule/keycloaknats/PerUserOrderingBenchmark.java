@@ -377,8 +377,8 @@ class PerUserOrderingBenchmark extends RelayIntegrationSupport {
             connection.prepareStatement(
                 "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM "
                     + OUTBOX
-                    + " WHERE expires_at <= ?"
-                    + " ORDER BY expires_at,id LIMIT 1 FOR UPDATE SKIP LOCKED")) {
+                    + " WHERE next_expiry_attempt_at <= ?"
+                    + " ORDER BY next_expiry_attempt_at,id LIMIT 1 FOR UPDATE SKIP LOCKED")) {
       query.setLong(1, now);
       try (var rows = query.executeQuery()) {
         assertTrue(rows.next());
