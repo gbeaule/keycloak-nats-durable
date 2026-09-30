@@ -3,6 +3,7 @@ package io.github.gbeaule.keycloaknats;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
+import java.lang.reflect.Modifier;
 import java.util.HashMap;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -26,6 +27,10 @@ class DiscardAuditTest {
     var audit = new DiscardAudit(row, DiscardReason.EXPIRED, 11000);
     var metadata = new HashMap<String, Object>();
     for (var field : DiscardAudit.class.getDeclaredFields()) {
+      // Coverage tools may inject static probe fields; only instance state can be persisted.
+      if (Modifier.isStatic(field.getModifiers()) || field.isSynthetic()) {
+        continue;
+      }
       field.setAccessible(true);
       metadata.put(field.getName(), field.get(audit));
     }
@@ -49,6 +54,26 @@ class DiscardAuditTest {
             Map.entry("attempts", 1L),
             Map.entry("publicationMayHaveOccurred", true)),
         metadata);
+    assertEquals(
+        new DiscardAudit.Metadata(
+            "id",
+            "realm",
+            "type",
+            "subject",
+            row.payloadSha256(),
+            row.orderingKey(),
+            11L,
+            10,
+            2,
+            11000L,
+            "digest",
+            "rule",
+            1000,
+            11000,
+            DiscardReason.EXPIRED,
+            1,
+            true),
+        audit.metadata());
     assertNotNull(new DiscardAudit());
   }
 }

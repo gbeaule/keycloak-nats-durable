@@ -15,6 +15,7 @@ import java.util.function.Consumer;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.postgresql.ds.PGSimpleDataSource;
@@ -48,6 +49,49 @@ class ConsumerSettingsTest {
   void deadlinesCannotBeSilentlyDisabled(String name) {
     assertThrows(
         IllegalArgumentException.class, () -> ConsumerSettings.from(Map.of(name, "0")::get));
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "KND_CONSUMER_ACK_WAIT_MS,1000,3600000",
+    "KND_CONSUMER_ACK_TIMEOUT_MS,1,60000",
+    "KND_CONSUMER_PROGRESS_MS,1,300000",
+    "KND_CONSUMER_MAX_ACK_PENDING,1,1000000",
+    "KND_CONSUMER_MONITOR_SECONDS,1,3600",
+    "KND_CONSUMER_HEALTH_PORT,0,65535"
+  })
+  void numericSettingsAcceptBothLimitsAndRejectValuesOutsideThem(String name, int min, int max) {
+    var values =
+        new java.util.HashMap<>(
+            Map.of("KND_CONSUMER_ACK_WAIT_MS", "3600000", "KND_CONSUMER_PROGRESS_MS", "1"));
+    for (int valid : new int[] {min, max}) {
+      values.put(name, Integer.toString(valid));
+      assertDoesNotThrow(() -> ConsumerSettings.from(values::get));
+    }
+    for (int invalid : new int[] {min - 1, max + 1}) {
+      values.put(name, Integer.toString(invalid));
+      assertThrows(IllegalArgumentException.class, () -> ConsumerSettings.from(values::get));
+    }
+  }
+
+  @Test
+  void progressRequiresStrictlyMoreThanTwiceItsIntervalLocallyAndOnTheBroker() {
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> ConsumerSettings.from(Map.of("KND_CONSUMER_ACK_WAIT_MS", "10000")::get));
+    assertDoesNotThrow(
+        () -> ConsumerSettings.from(Map.of("KND_CONSUMER_ACK_WAIT_MS", "10001")::get));
+    var settings = ConsumerSettings.from(name -> null);
+    var exact = safe().ackWait(Duration.ofMillis(10000)).build();
+    var above = safe().ackWait(Duration.ofMillis(10001)).build();
+    assertThrows(IllegalStateException.class, () -> settings.validateProgress(exact));
+    assertDoesNotThrow(() -> settings.validateProgress(above));
+    var backoff =
+        safe()
+            .ackWait(Duration.ofMinutes(1))
+            .backoff(Duration.ofMinutes(1), Duration.ofMillis(10000))
+            .build();
+    assertThrows(IllegalStateException.class, () -> settings.validateProgress(backoff));
   }
 
   @Test
@@ -102,6 +146,7 @@ class ConsumerSettingsTest {
   void rejectsLossyConsumers(Consumer<ConsumerConfiguration.Builder> change) {
     var builder = safe();
     change.accept(builder);
-    assertThrows(IllegalStateException.class, () -> ConsumerMain.validateConsumer(builder.build()));
+    var configuration = builder.build();
+    assertThrows(IllegalStateException.class, () -> ConsumerMain.validateConsumer(configuration));
   }
 }

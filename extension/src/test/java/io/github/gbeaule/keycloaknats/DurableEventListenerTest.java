@@ -16,6 +16,7 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.BooleanNode;
 import jakarta.persistence.EntityManager;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
@@ -312,7 +313,11 @@ class DurableEventListenerTest {
     listener = new DurableEventListener(session, BridgeConfig.from(Map.of()), wakeRelay, source);
     listener.onEvent(EventEnvelopeTest.admin(OperationType.UPDATE), false);
     verify(source).get();
-    verify(em).persist(any(OutboxEvent.class));
+    var captured = ArgumentCaptor.forClass(OutboxEvent.class);
+    verify(em).persist(captured.capture());
+    assertEquals(
+        new ResolvedPublicationPolicy(new PublicationPolicy(null, 2), initial.sha256(), "disabled"),
+        captured.getValue().publicationPolicy());
     listener.onEvent(EventEnvelopeTest.login());
     verify(source, times(2)).get();
     verify(em).persist(any(OutboxEvent.class));
@@ -402,7 +407,7 @@ class DurableEventListenerTest {
     assertEquals(new EventOrdering("realm", id, 1).key(), row.orderingKey());
     assertEquals("disabled", row.publicationPolicy().ruleId());
     assertEquals(2, row.publicationPolicy().policy().maxFailures());
-    assertFalse(data.path("userEnabled").asBoolean());
+    assertEquals(BooleanNode.FALSE, data.get("userEnabled"));
     verify(users).getUserById(realm, id);
   }
 

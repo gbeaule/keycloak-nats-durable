@@ -51,6 +51,20 @@ class OutboxEventTest {
         () -> new OutboxEvent("id", "s", "{}", 0, value, "type", null, CaptureFixtures.RETRY));
   }
 
+  @ParameterizedTest
+  @ValueSource(ints = {0x0078, 0x20000})
+  void realmStorageLimitCountsUnicodeCodePoints(int codePoint) {
+    String character = Character.toString(codePoint);
+    String realm = character.repeat(255);
+    var row = new OutboxEvent("id", "s", "{}", 0, realm, "type", null, CaptureFixtures.RETRY);
+    assertEquals(realm, row.realmId());
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            new OutboxEvent(
+                "id", "s", "{}", 0, realm + character, "type", null, CaptureFixtures.RETRY));
+  }
+
   @Test
   void hibernateFieldHydrationRestoresRetryStateWithoutRecreatingTheEvent() throws Exception {
     var row = ReflectHelper.getDefaultConstructor(OutboxEvent.class).newInstance();
@@ -68,6 +82,8 @@ class OutboxEventTest {
             456L,
             "attempts",
             7L,
+            "version",
+            23L,
             "lastError",
             "IOException");
     persisted.forEach(
@@ -82,9 +98,11 @@ class OutboxEventTest {
     assertEquals(123, row.createdAt());
     assertEquals(456, row.nextAttemptAt());
     assertEquals(7, row.attempts());
+    assertEquals(23, row.version());
     assertEquals("IOException", row.lastError());
     row.failed(789, "TimeoutException");
     assertEquals(8, row.attempts());
+    assertEquals(23, row.version());
     assertEquals(789, row.nextAttemptAt());
     assertEquals("TimeoutException", row.lastError());
     assertEquals("persisted-id", row.id());

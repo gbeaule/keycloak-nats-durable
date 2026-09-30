@@ -429,6 +429,8 @@ class DurabilityIT extends IntegrationSupport {
     var second = keycloakContainer(false);
     try {
       second.start();
+      // Starting another node can outlast the short-lived admin token acquired by reset().
+      loginAdmin();
       try (var pool = Executors.newFixedThreadPool(6)) {
         var futures = new ArrayList<java.util.concurrent.Future<String>>();
         for (int i = 0; i < 24; i++) {

@@ -9,6 +9,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -43,6 +44,8 @@ class PerUserRelayIT extends RelayIntegrationSupport {
       assertEquals(2, relay.runBatch().published());
     }
     var ids = storedIds(6);
+    assertEquals(
+        Set.of("a1", "a2", "b1", "independent1", "independent2", "other-realm"), Set.copyOf(ids));
     assertTrue(ids.indexOf("a1") < ids.indexOf("a2"));
   }
 

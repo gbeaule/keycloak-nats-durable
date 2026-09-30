@@ -8,6 +8,9 @@ on:
       - '**/*.md'
       - LICENSE
   pull_request:
+  schedule:
+    # Keep the full compatibility matrix weekly; pushes exercise the default runtime.
+    - cron: '43 7 * * 1'
   workflow_dispatch:
     inputs:
       keycloak_version:
@@ -57,9 +60,35 @@ jobs:
           name: quick-check-results
           retention-days: 3
           path: '**/target/surefire-reports/**'
+  integration-baseline:
+    needs: quick-checks
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Verify the full integration suite on the default runtime
+        # Read default Keycloak and PostgreSQL versions from the POM.
+        run: python3 scripts/validate.py integration
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: test-results-baseline
+          retention-days: 3
+          path: |
+            **/target/surefire-reports/**
+            **/target/failsafe-reports/**
+            integration-tests/target/*.log
   test:
     needs: quick-checks
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     strategy:
@@ -90,13 +119,13 @@ jobs:
             integration-tests/target/*.log
   postgres-compatibility:
     needs: quick-checks
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
       fail-fast: true
       matrix:
-        # PostgreSQL 18 runs the full Keycloak matrix above. Track supported older major lines too.
+        # The POM's default PostgreSQL runs above. Track supported older major lines too.
         postgres: ${{ fromJSON(needs.quick-checks.outputs.matrix).postgres }}
     steps:
       - uses: actions/checkout@v7.0.1

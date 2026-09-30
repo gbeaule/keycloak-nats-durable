@@ -2,6 +2,8 @@ package io.github.gbeaule.keycloaknats;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -18,6 +20,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import io.micrometer.core.instrument.Metrics;
 import jakarta.persistence.EntityManager;
 import java.util.ArrayList;
 import java.util.List;
@@ -177,8 +180,10 @@ class DurableEventListenerFactoryTest {
   void shutdownStopsClaimsAndDrainsBeforeClosingConnections(boolean terminated) throws Exception {
     try (var fixture = new Lifecycle()) {
       fixture.start();
+      assertNotNull(Metrics.globalRegistry.find("knd.publication.failures").counter());
       when(fixture.executor.awaitTermination(5, TimeUnit.SECONDS)).thenReturn(terminated);
       fixture.factory.close();
+      assertNull(Metrics.globalRegistry.find("knd.publication.failures").counter());
       fixture.factory.close();
       fixture.start();
       assertEquals(2, fixture.publishers.constructed().size());

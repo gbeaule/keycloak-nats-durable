@@ -2,9 +2,17 @@ name: security
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - '**/*.md'
-      - LICENSE
+    # Dependency/image scans need fresh runs when their inputs change.
+    # The weekly scan also catches new advisories without a source change.
+    paths:
+      - '**/pom.xml'
+      - '.mvn/**'
+      - 'deploy/**'
+      - 'compose*.yaml'
+      - 'compose*.yml'
+      - '.dockerignore'
+      - 'scripts/**'
+      - '.github/workflows/security.yml'
   schedule:
     # Every Monday at 08:17 UTC (minute, hour, day of month, month, day of week).
     - cron: '17 8 * * 1'

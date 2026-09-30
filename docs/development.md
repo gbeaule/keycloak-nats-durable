@@ -83,10 +83,13 @@ messages without provisioning a consumer. See [operations](operations.md) for th
 
 ## CI and release trust
 
-[Verification](../.github/workflows/verify.yml) runs quick PR checks, with broader compatibility checks
-on qualifying pushes to `main` and manual runs. Workflow files define triggers, job selections and
-artifact retention. Require `quick-checks` for PRs through repository settings, and require passing
-matrix and security evidence before release.
+[Verification](../.github/workflows/verify.yml) runs quick PR checks and the full integration suite on
+the default runtime for qualifying pushes to `main`. The wider compatibility matrix runs weekly and
+on demand. [Security scans](../.github/workflows/security.yml) run weekly, on demand and when build,
+dependency or deployment inputs change. This keeps routine feedback affordable while retaining
+broader coverage. Workflow files define triggers, job selections and artifact retention. Require
+`quick-checks` for PRs through repository settings, and require passing matrix and security evidence
+for the release commit before release; a weekly result for an older commit is not sufficient.
 
 PR builds execute untrusted code. Keep them on disposable hosted runners without production secrets,
 write tokens or access to private infrastructure. Repository administrators own fork approval,

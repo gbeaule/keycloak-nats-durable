@@ -1,5 +1,6 @@
 """Regression checks for release input validation and the owner-accepted upstream scan policy."""
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -48,6 +49,24 @@ class ReleaseIdentityTest(unittest.TestCase):
 
 
 class SecurityPolicyTest(unittest.TestCase):
+    def test_only_fixable_high_and_critical_runtime_findings_block(self):
+        module = load("security-check")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "runtime-dependencies.json"
+            for severity in ("LOW", "MEDIUM", "HIGH", "CRITICAL", "UNKNOWN"):
+                for fixed in ("", "2"):
+                    with self.subTest(severity=severity, fixed=fixed):
+                        finding = {"VulnerabilityID": "CVE-test", "PkgName": "example",
+                                   "InstalledVersion": "1", "FixedVersion": fixed,
+                                   "Severity": severity}
+                        path.write_text(json.dumps({"SchemaVersion": 2, "Results": [
+                            {"Class": "lang-pkgs", "Type": "jar", "Packages": [{"Name": "example"}],
+                             "Vulnerabilities": [finding]}]}))
+                        gate = module.evaluate([path])
+                        blocked = severity in ("HIGH", "CRITICAL") and bool(fixed)
+                        self.assertEqual(len(gate["blockingFindings"]), int(blocked))
+                        self.assertEqual(gate["advisoryFindings"], [])
+
     def test_shipped_fixes_block_while_upstream_findings_remain_visible(self):
         module = load("security-check")
         vulnerability = {"VulnerabilityID": "CVE-test", "PkgName": "example", "InstalledVersion": "1",
@@ -124,6 +143,15 @@ class ReleaseManifestTest(unittest.TestCase):
                 with patch("builtins.print"):
                     module.main()
             manifest = json.loads((output / "manifest.json").read_text())
+            self.assertEqual(manifest["version"], "1.2.3")
+            self.assertEqual(manifest["sourceCommit"], "b" * 40)
+            self.assertEqual(len(manifest["artifacts"]), 8)
+            for name, digest in manifest["artifacts"].items():
+                self.assertEqual(hashlib.sha256((output / name).read_bytes()).hexdigest(), digest)
+            checksums = dict(line.split("  ", 1)[::-1]
+                             for line in (output / "SHA256SUMS").read_text().splitlines())
+            self.assertEqual(checksums, {**manifest["artifacts"],
+                "manifest.json": hashlib.sha256((output / "manifest.json").read_bytes()).hexdigest()})
             self.assertEqual(manifest["baseImages"]["compose.yaml"],
                              ["postgres:18.6-alpine", "nats:2.15.0-alpine"])
             self.assertEqual(manifest["baseImages"]["compose.producer.yaml"],
@@ -135,6 +163,14 @@ class ReleaseManifestTest(unittest.TestCase):
             for name in ("aggregate", "extension", "consumer-example"):
                 self.assertIn(name + "-bom.json", manifest["artifacts"])
                 self.assertIn(name + "-runtime-bom.json", manifest["artifacts"])
+
+            original = {path.name: path.read_bytes() for path in output.iterdir()}
+            with patch("sys.argv", ["release-manifest", "--version", "1.2.3", "--commit", "b" * 40,
+                                    "--output", str(output)]):
+                with patch("sys.stderr"), self.assertRaises(SystemExit) as failure:
+                    module.main()
+            self.assertEqual(failure.exception.code, 2)
+            self.assertEqual(original, {path.name: path.read_bytes() for path in output.iterdir()})
 
 
 if __name__ == "__main__":

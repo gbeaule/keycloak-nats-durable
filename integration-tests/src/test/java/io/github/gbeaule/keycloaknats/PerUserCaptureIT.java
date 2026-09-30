@@ -10,15 +10,19 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.fasterxml.jackson.databind.node.BooleanNode;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.sql.SQLException;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
@@ -345,6 +349,66 @@ class PerUserCaptureIT extends IntegrationSupport {
     assertEquals(List.of(1L), sequences(earlier));
   }
 
+  @Test
+  void deadlockVictimRollsBackEveryCaptureAndCounter() throws Exception {
+    String realm = "deadlock-" + UUID.randomUUID();
+    var users = List.of(UUID.randomUUID().toString(), UUID.randomUUID().toString());
+    var earlier = List.of(UUID.randomUUID().toString(), UUID.randomUUID().toString());
+    var locked = new CountDownLatch(2);
+    var outcomes = new ArrayList<Future<Boolean>>();
+    try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+      for (int index = 0; index < 2; index++) {
+        int side = index;
+        outcomes.add(
+            executor.submit(
+                () -> {
+                  try (var session = sessions.openSession()) {
+                    session.beginTransaction();
+                    session
+                        .createNativeMutationQuery("SET LOCAL lock_timeout='10s'")
+                        .executeUpdate();
+                    var capture = listener(session, EventFilter::all);
+                    capture.onEvent(event(realm, earlier.get(side)));
+                    capture.onEvent(event(realm, users.get(side)));
+                    locked.countDown();
+                    assertTrue(locked.await(10, TimeUnit.SECONDS));
+                    try {
+                      capture.onEvent(event(realm, users.get(1 - side)));
+                      session.getTransaction().commit();
+                      return true;
+                    } catch (RuntimeException failure) {
+                      Throwable cause = failure;
+                      while (cause != null && !(cause instanceof SQLException)) {
+                        cause = cause.getCause();
+                      }
+                      assertTrue(cause instanceof SQLException, failure::toString);
+                      assertEquals(
+                          "40P01",
+                          ((SQLException) cause).getSQLState(),
+                          "Only a PostgreSQL deadlock proves this scenario");
+                      assertTrue(session.getTransaction().getRollbackOnly());
+                      session.getTransaction().rollback();
+                      return false;
+                    }
+                  }
+                }));
+      }
+      boolean first = outcomes.get(0).get(20, TimeUnit.SECONDS);
+      boolean second = outcomes.get(1).get(20, TimeUnit.SECONDS);
+      assertNotEquals(first, second, "Exactly one transaction must survive the deadlock");
+      assertEquals(List.of(1L), sequences(users.get(0)));
+      assertEquals(List.of(1L), sequences(users.get(1)));
+      assertEquals(List.of(1L), sequences(earlier.get(first ? 0 : 1)));
+      String rolledBackUser = earlier.get(first ? 1 : 0);
+      assertEquals(List.of(), sequences(rolledBackUser));
+      commitEvent(event(realm, rolledBackUser));
+      assertEquals(
+          List.of(1L),
+          sequences(rolledBackUser),
+          "The victim's earlier counter increment must also roll back");
+    }
+  }
+
   @ParameterizedTest
   @ValueSource(
       strings = {
@@ -364,7 +428,8 @@ class PerUserCaptureIT extends IntegrationSupport {
             connection.prepareStatement(
                 "UPDATE kc_nats_outbox SET " + assignment + " WHERE ordering_key=?")) {
       update.setString(1, new EventOrdering("capture", user, 1).key());
-      assertThrows(java.sql.SQLException.class, update::executeUpdate);
+      assertEquals(
+          "23514", assertThrows(java.sql.SQLException.class, update::executeUpdate).getSQLState());
     }
     assertEquals(List.of(1L), sequences(user));
   }
@@ -520,8 +585,7 @@ class PerUserCaptureIT extends IntegrationSupport {
         assertEquals(user, data.path("userId").asText());
         assertNotEquals(user, data.path("actorUserId").asText());
         if (data.path("operationType").asText().equals("UPDATE")) {
-          assertTrue(data.has("userEnabled"));
-          assertFalse(data.path("userEnabled").asBoolean());
+          assertEquals(BooleanNode.FALSE, data.get("userEnabled"));
         } else {
           assertFalse(data.has("userEnabled"));
         }

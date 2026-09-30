@@ -49,7 +49,7 @@ jobs:
         if: always()
         with:
           name: release-candidate-${{ github.sha }}-${{ github.run_id }}
-          retention-days: 90
+          retention-days: 30
           path: |
             target/release/**
             target/security/*.json

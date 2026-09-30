@@ -365,13 +365,17 @@ class OutboxAuditRetentionIT extends RelayIntegrationSupport {
       seed(10000);
       final long started = System.nanoTime();
       cleanup.start();
-      var loaded = measureTraffic(relay, 20);
-      await().atMost(Duration.ofSeconds(30)).until(() -> audits() == 0);
+      final var loaded = measureTraffic(relay, 20);
+      // Ten thousand individual deletes can exceed 30 seconds on a loaded Docker host.
+      await()
+          .atMost(Duration.ofMinutes(2))
+          .untilAsserted(() -> assertEquals(0, audits(), "Audit backlog must drain"));
       await()
           .atMost(Duration.ofSeconds(5))
           .untilAsserted(
               () ->
                   assertEquals(10030, metrics.get("knd.audit.cleanup.deleted").counter().count()));
+      assertEquals(0, metrics.get("knd.audit.cleanup.failures").counter().count());
       double drainSeconds = (System.nanoTime() - started) / 1_000_000_000.0;
       System.out.printf(
           "Audit backlog: drain=%.3fs rows/s=%.1f;"

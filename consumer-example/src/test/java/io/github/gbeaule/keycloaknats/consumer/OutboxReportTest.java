@@ -20,10 +20,13 @@ import java.util.Map;
 import java.util.regex.Pattern;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class OutboxReportTest {
-  @Test
-  void aggregateCollectionUsesBoundedReadOnlySnapshotsAndPreservesDatabaseCounts()
+  @ParameterizedTest
+  @ValueSource(strings = {">", "events.tenant[1].*"})
+  void aggregateCollectionUsesBoundedReadOnlySnapshotsAndPreservesDatabaseCounts(String subject)
       throws Exception {
     var db = mock(Connection.class);
     var source = source(db);
@@ -44,7 +47,7 @@ class OutboxReportTest {
     when(audits.executeQuery().getLong(5)).thenReturn(1L);
     when(storage.executeQuery().getLong(1)).thenReturn(4096L);
 
-    var report = OutboxReport.collect(source, "tenant-data", ">", "", 5, 60);
+    var report = OutboxReport.collect(source, "tenant-data", subject, "events.tenant", 5, 60);
     assertEquals(12L, report.get("pending"));
     assertEquals(6.25, report.get("oldest_age_seconds"));
     assertEquals(8L, report.get("blocked_events"));
@@ -59,10 +62,24 @@ class OutboxReportTest {
     verify(db).setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
     verify(db).setAutoCommit(false);
     verify(settings).setString(1, "5000");
-    verify(backlog).setString(1, "");
+    verify(settings).setQueryTimeout(5);
+    String pattern =
+        subject.equals(">") ? "^[^.]+(\\.[^.]+)*$" : "^events\\.tenant\\[1\\]\\.[^.]+$";
+    verify(backlog).setString(1, subject.equals(">") ? "" : pattern);
+    verify(backlog).setString(2, pattern);
+    verify(backlog).setString(3, "events.tenant");
+    verify(backlog).setString(4, "events.tenant");
     verify(audits).setLong(1, 60000L);
     verify(audits).setLong(2, 60000L);
+    verify(audits).setString(3, subject.equals(">") ? "" : pattern);
+    verify(audits).setString(4, pattern);
+    verify(audits).setString(5, "events.tenant");
+    verify(audits).setString(6, "events.tenant");
+    verify(storage).setString(1, "\"tenant-data\".\"kc_nats_outbox\"");
+    verify(storage).setString(2, "tenant-data");
     verify(backlog).setQueryTimeout(5);
+    verify(audits).setQueryTimeout(5);
+    verify(storage).setQueryTimeout(5);
     verify(db).commit();
     verify(db).close();
   }

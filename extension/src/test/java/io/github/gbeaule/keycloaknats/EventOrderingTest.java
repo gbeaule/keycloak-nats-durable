@@ -18,6 +18,10 @@ import org.keycloak.events.admin.AuthDetails;
 import org.keycloak.events.admin.OperationType;
 
 class EventOrderingTest {
+  // CJK ideographs with three and four bytes in UTF-8, respectively.
+  private static final String THREE_BYTE_CHARACTER = Character.toString(0x4E00);
+  private static final String FOUR_BYTE_CHARACTER = Character.toString(0x20000);
+
   private final EventEnvelope envelopes = new EventEnvelope(BridgeConfig.from(Map.of()));
   private final ObjectMapper mapper = new ObjectMapper();
 
@@ -93,7 +97,20 @@ class EventOrderingTest {
         IllegalArgumentException.class, () -> new EventOrdering("realm", "x".repeat(256), 1));
     assertThrows(
         IllegalArgumentException.class,
-        () -> new EventOrdering("😀".repeat(255), "😀".repeat(255), 1));
+        () ->
+            new EventOrdering(FOUR_BYTE_CHARACTER.repeat(255), FOUR_BYTE_CHARACTER.repeat(255), 1));
+  }
+
+  @Test
+  void orderingKeyMayFillButNeverExceedItsStorageLimit() {
+    String realm = THREE_BYTE_CHARACTER.repeat(254) + FOUR_BYTE_CHARACTER;
+    String user = THREE_BYTE_CHARACTER.repeat(253) + FOUR_BYTE_CHARACTER.repeat(2);
+    var ordering = new EventOrdering(realm, user, 1);
+    assertEquals(2048, ordering.key().length());
+    assertEquals(realm, ordering.realmId());
+    assertEquals(user, ordering.userId());
+    String oversized = THREE_BYTE_CHARACTER.repeat(252) + FOUR_BYTE_CHARACTER.repeat(3);
+    assertThrows(IllegalArgumentException.class, () -> new EventOrdering(realm, oversized, 1));
   }
 
   @Test

@@ -220,17 +220,27 @@ class AuditCleanupTest {
     assertTrue(Thread.currentThread().isInterrupted());
     assertEquals(0, counter("deleted"));
     assertEquals(1, counter("failures"));
+    if (!phase.equals("flush")) {
+      verify(em, never()).remove(audit);
+      verify(em, never()).flush();
+    }
+    if (phase.equals("settings")) {
+      verifyNoInteractions(selection, statistics);
+    }
   }
 
   @Test
   void interruptionBetweenTransactionsPreventsAnotherClaim() {
+    var transactions = new AtomicInteger();
     worker(
             work -> {
+              transactions.incrementAndGet();
               work.accept(em);
               Thread.currentThread().interrupt();
             },
             Map.of())
         .run();
+    assertEquals(1, transactions.get());
     verify(em, times(1)).flush();
     assertEquals(1, counter("failures"));
   }
@@ -280,17 +290,18 @@ class AuditCleanupTest {
     }
   }
 
-  @Test
-  void inspectionUsesBoundedReadOnlyKeysetPagesAndOnlyMetadata() {
+  @ParameterizedTest
+  @ValueSource(ints = {1, 500})
+  void inspectionUsesBoundedReadOnlyKeysetPagesAndOnlyMetadata(int limit) {
     when(selection.getResultList()).thenReturn(List.of(audit));
-    var metadata = AuditRepository.inspect(em, 999, "previous", 1).getFirst();
+    var metadata = AuditRepository.inspect(em, 999, "previous", limit).getFirst();
     assertEquals("old", metadata.id());
     assertEquals(1000, metadata.discardedAt());
     assertEquals(DiscardReason.EXPIRED, metadata.reason());
     verify(selection).setHint(HibernateHints.HINT_READ_ONLY, true);
     verify(selection).setParameter("afterTime", 999L);
     verify(selection).setParameter("afterId", "previous");
-    verify(selection).setMaxResults(1);
+    verify(selection).setMaxResults(limit);
     verify(em, never()).flush();
   }
 
