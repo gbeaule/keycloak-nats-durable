@@ -10,7 +10,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.jboss.logging.Logger;
 import org.keycloak.Config;
-import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.events.EventListenerProvider;
 import org.keycloak.events.EventListenerProviderFactory;
 import org.keycloak.models.KeycloakSession;
@@ -65,13 +64,10 @@ public final class DurableEventListenerFactory implements EventListenerProviderF
     filter.start(config.filterReloadInterval().toMillis());
     auditCleanup =
         new AuditCleanup(
-            work ->
-                KeycloakModelUtils.runJobInTransactionWithTimeout(
-                    factory,
-                    session ->
-                        work.accept(
-                            session.getProvider(JpaConnectionProvider.class).getEntityManager()),
-                    config.auditCleanup().timeoutSeconds()),
+            new KeycloakTransactions(
+                task ->
+                    KeycloakModelUtils.runJobInTransactionWithTimeout(
+                        factory, task, config.auditCleanup().timeoutSeconds())),
             config.auditCleanup(),
             Metrics.globalRegistry);
     auditCleanup.start();
@@ -91,12 +87,8 @@ public final class DurableEventListenerFactory implements EventListenerProviderF
       RelayWakeup wakeup = new RelayWakeup();
       OutboxRelay relay =
           new OutboxRelay(
-              work ->
-                  KeycloakModelUtils.runJobInTransaction(
-                      factory,
-                      session ->
-                          work.accept(
-                              session.getProvider(JpaConnectionProvider.class).getEntityManager())),
+              new KeycloakTransactions(
+                  task -> KeycloakModelUtils.runJobInTransaction(factory, task)),
               publisher,
               config,
               metrics);

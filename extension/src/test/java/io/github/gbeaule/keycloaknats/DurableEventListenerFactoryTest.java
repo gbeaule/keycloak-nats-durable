@@ -114,7 +114,7 @@ class DurableEventListenerFactoryTest {
           .thenAnswer(
               invocation -> {
                 KeycloakSessionTask task = invocation.getArgument(1);
-                task.run(session);
+                runCommitted(task, session);
                 return null;
               });
       var received = new java.util.concurrent.atomic.AtomicReference<EntityManager>();
@@ -153,13 +153,23 @@ class DurableEventListenerFactoryTest {
           .thenAnswer(
               call -> {
                 KeycloakSessionTask task = call.getArgument(1);
-                task.run(session);
+                runCommitted(task, session);
                 return null;
               });
       fixture.cleanupTransactions.getFirst().run(actual -> assertSame(em, actual));
       fixture.factory.close();
       verify(fixture.cleanups.constructed().getFirst()).close();
     }
+  }
+
+  private static void runCommitted(KeycloakSessionTask task, KeycloakSession session) {
+    var transaction = mock(KeycloakTransactionManager.class);
+    when(session.getTransactionManager()).thenReturn(transaction);
+    task.run(session);
+    var completion = ArgumentCaptor.forClass(KeycloakTransaction.class);
+    verify(transaction).enlistAfterCompletion(completion.capture());
+    completion.getValue().begin();
+    completion.getValue().commit();
   }
 
   @ParameterizedTest
