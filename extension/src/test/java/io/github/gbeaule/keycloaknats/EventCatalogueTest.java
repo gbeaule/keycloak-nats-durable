@@ -25,6 +25,7 @@ class EventCatalogueTest {
     var source = EventEnvelopeTest.login();
     source.setRealmId("demo");
     source.setType(type);
+    source.setSessionId("user-session");
     if (type.name().endsWith("_ERROR")) {
       source.setError("example_error");
     }
@@ -35,6 +36,7 @@ class EventCatalogueTest {
         "keycloak.events.ZGVtbw.user." + type.name().toLowerCase(Locale.ROOT), message.subject());
     assertEquals(type.name(), event.at("/data/eventType").asText());
     assertEquals("user", event.at("/data/kind").asText());
+    assertEquals("user-session", event.at("/data/sessionId").asText());
     assertFalse(event.get("data").has("operationType"));
   }
 

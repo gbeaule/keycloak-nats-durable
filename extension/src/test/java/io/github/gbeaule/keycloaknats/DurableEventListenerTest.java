@@ -106,6 +106,7 @@ class DurableEventListenerTest {
   @Test
   void insertsAndFlushesBeforeEnlistingNotificationWithoutCommittingTheRequest() throws Exception {
     var event = EventEnvelopeTest.login();
+    event.setSessionId("login-session");
     listener.onEvent(event);
     var captured = ArgumentCaptor.forClass(OutboxEvent.class);
     var order = inOrder(tx, em);
@@ -118,6 +119,7 @@ class DurableEventListenerTest {
     var json = new ObjectMapper().readTree(captured.getValue().payload());
     assertEquals(event.getId(), json.at("/data/keycloakEventId").textValue());
     assertEquals(event.getUserId(), json.at("/data/userId").textValue());
+    assertEquals("login-session", json.at("/data/sessionId").textValue());
     assertEquals(captured.getValue().id(), json.get("id").textValue());
   }
 

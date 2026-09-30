@@ -45,6 +45,31 @@ as internal. These integration points are an accepted architectural dependency w
 stability guarantee. Each candidate server version needs runtime and upgrade validation as described
 in [development](development.md#compatibility).
 
+### Can custom JPA registration be removed?
+
+Yes, but it is a persistence redesign. `JpaEntityProvider` registers the outbox, capture counter and
+discard audit entities and runs their Liquibase migrations. Removing registration alone breaks both
+storage initialization and entity access. Keycloak explicitly marks this extension mechanism
+[unsupported](https://www.keycloak.org/docs/26.7.4/server_development/#_extensions_jpa).
+
+Two feasible alternatives have different tradeoffs:
+
+| Approach | Transaction boundary and cost |
+| --- | --- |
+| SQL on Keycloak's managed connection | Replace entity persistence, queries and mapping lookups with SQL; manage migrations separately. Reusing the exact connection preserves atomic capture without a second datasource. This still depends on `JpaConnectionProvider`, Hibernate connection access and the event listener lifecycle; it is not a claim of full upstream support. |
+| Separate JPA persistence unit and named datasource | Register entities through `META-INF/persistence.xml`, using Keycloak's [documented datasource support](https://www.keycloak.org/server/db#configure-multiple-datasources). Own the migrations and configure JTA/XA coordination and durable recovery for the participating database resources. This changes deployment and failure recovery. |
+
+A second connection to the same PostgreSQL database does not share the original local transaction.
+An independent commit or after-commit enqueue would introduce a loss window. For the separate
+datasource design, validate crash recovery as well as rollback; Keycloak's
+[XA guidance](https://www.keycloak.org/server/db#using-database-vendors-with-xa-transaction-support)
+requires stable recovery-log storage in containers.
+
+SQL on the existing connection is the preferred route if preserving today's deployment and single
+database transaction is the priority. A named datasource is the route to documented entity
+registration. These are feasibility options, not implemented replacements; either needs the runtime,
+custom-schema, rollback, ordering and upgrade checks before adoption.
+
 ## Relay and failure boundaries
 
 Each Keycloak node runs a bounded relay pool against the shared outbox. Only a user's earliest

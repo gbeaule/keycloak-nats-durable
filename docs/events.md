@@ -29,6 +29,11 @@ The envelope `id` is the persisted delivery identity, reused as `Nats-Msg-Id` on
 with this ID, not the optional Keycloak source-event ID. Timestamps do not establish processing order.
 Check `outcome` and the affected identity before applying a business effect.
 
+User events include `data.sessionId` when Keycloak supplies a user session ID. Use it to correlate
+login, token refresh and logout for the same session. A login can reuse an existing SSO session;
+it does not necessarily create one. Events without a session ID omit the field. Admin events do not
+expose this field; a targeted session deletion identifies the session in `data.resourcePath`.
+
 Consumer subject filters select stored messages. Capture filters determine which events enter the
 pipeline at all. A consumer filter does not remove unselected messages from the stream.
 

@@ -79,6 +79,25 @@ class EventSchemaTest {
     assertFalse(validate(event).isEmpty());
   }
 
+  @Test
+  void sessionIdIsAnOptionalStringOnUserEventsOnly() throws IOException {
+    var event = objectMapper.readTree(getClass().getResourceAsStream("/examples/user-login.json"));
+    var data = (ObjectNode) event.get("data");
+    data.putNull("sessionId");
+    assertFalse(validate(event).isEmpty());
+    data.put("sessionId", 123);
+    assertFalse(validate(event).isEmpty());
+    data.remove("sessionId");
+    assertValid(event);
+    data.put("sessionId", "s".repeat(255));
+    assertValid(event);
+    data.put("sessionId", "s".repeat(256));
+    assertFalse(validate(event).isEmpty());
+    event = objectMapper.readTree(getClass().getResourceAsStream("/examples/admin-delete.json"));
+    ((ObjectNode) event.get("data")).put("sessionId", "actor-session");
+    assertFalse(validate(event).isEmpty());
+  }
+
   @ParameterizedTest
   @ValueSource(
       strings = {

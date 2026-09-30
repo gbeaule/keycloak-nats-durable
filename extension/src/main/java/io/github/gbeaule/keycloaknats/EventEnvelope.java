@@ -53,6 +53,7 @@ public final class EventEnvelope {
     Map<String, Object> data = common("user", event.getId(), event.getRealmId(), event.getError());
     data.put("userId", AffectedUser.resolve(event));
     data.put("clientId", event.getClientId());
+    data.put("sessionId", event.getSessionId());
     String type = event.getType().name();
     data.put("eventType", type);
     String suffix = "user." + type.toLowerCase(Locale.ROOT);

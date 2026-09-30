@@ -23,6 +23,7 @@ import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.keycloak.events.Event;
@@ -180,6 +181,24 @@ class EventEnvelopeTest {
     assertEquals("LOGIN_ERROR", json.at("/data/eventType").textValue());
     assertEquals("io.keycloak.user.login_error", json.get("type").textValue());
     assertTrue(row.subject().endsWith(".user.login_error"));
+  }
+
+  @ParameterizedTest
+  @EnumSource(
+      value = EventType.class,
+      names = {"LOGIN", "LOGOUT", "REFRESH_TOKEN", "REGISTER", "LOGIN_ERROR", "LOGOUT_ERROR"})
+  void missingSessionIdIsOmittedEvenWhenDetailsContainOne(EventType type) throws Exception {
+    var source = login();
+    source.setType(type);
+    source.setDetails(Map.of("session_id", "untrusted-session", "authSessionId", "auth-session"));
+    if (type.name().endsWith("_ERROR")) {
+      source.setError("example_error");
+    }
+    var json = new ObjectMapper().readTree(CaptureFixtures.user(encoder, source).payload());
+    assertFalse(json.get("data").has("sessionId"));
+    assertFalse(json.toString().contains("untrusted-session"));
+    assertFalse(json.toString().contains("auth-session"));
+    EventSchemaTest.assertValid(json);
   }
 
   @Test

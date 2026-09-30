@@ -14,8 +14,14 @@ import io.nats.client.Message;
 import io.nats.client.PullSubscribeOptions;
 import io.nats.client.api.DiscardPolicy;
 import io.nats.client.api.StreamConfiguration;
+import java.net.URI;
+import java.net.URLEncoder;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -80,14 +86,45 @@ class DurabilityIT extends IntegrationSupport {
 
   @Test
   @Order(1)
-  void loginAndFailedLoginAreDurableWithoutKeycloaksOwnEventStore() throws Exception {
-    assertEquals(
-        200,
+  void loginRefreshAndLogoutIdentifyTheSessionWithoutKeycloaksOwnEventStore() throws Exception {
+    var login =
         login(
-                "durable-test",
-                "grant_type=password&client_id=test-client"
-                    + "&username=alice&password=alice-password")
-            .statusCode());
+            "durable-test",
+            "grant_type=password&client_id=test-client"
+                + "&username=alice&password=alice-password");
+    assertEquals(200, login.statusCode());
+    var tokens = objectMapper.readTree(login.body());
+    var claims =
+        objectMapper.readTree(
+            Base64.getUrlDecoder().decode(tokens.get("access_token").asText().split("\\.")[1]));
+    String sessionId = claims.path("sid").asText();
+    assertFalse(sessionId.isBlank());
+    var refresh =
+        login(
+            "durable-test",
+            "grant_type=refresh_token&client_id=test-client&refresh_token="
+                + URLEncoder.encode(tokens.get("refresh_token").asText(), StandardCharsets.UTF_8));
+    assertEquals(200, refresh.statusCode());
+    var refreshed = objectMapper.readTree(refresh.body());
+    var logout =
+        httpClient.send(
+            HttpRequest.newBuilder(
+                    URI.create(
+                        "http://"
+                            + keycloak.getHost()
+                            + ":"
+                            + currentPort(keycloak, 8080)
+                            + "/realms/durable-test/protocol/openid-connect/logout"))
+                .timeout(Duration.ofSeconds(10))
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .POST(
+                    HttpRequest.BodyPublishers.ofString(
+                        "client_id=test-client&refresh_token="
+                            + URLEncoder.encode(
+                                refreshed.get("refresh_token").asText(), StandardCharsets.UTF_8)))
+                .build(),
+            HttpResponse.BodyHandlers.ofString());
+    assertEquals(204, logout.statusCode());
     assertEquals(
         400,
         login(
@@ -95,19 +132,25 @@ class DurabilityIT extends IntegrationSupport {
                 "grant_type=password&client_id=test-client&username=alice&password=incorrect")
             .statusCode());
     drained();
-    var messages = fetch(2);
-    assertEquals(2, messages.size());
+    var messages = fetch(4);
+    assertEquals(4, messages.size());
     var types = new HashSet<String>();
     for (var message : messages) {
       var json = event(message);
-      types.add(json.at("/data/eventType").asText());
+      String type = json.at("/data/eventType").asText();
+      types.add(type);
+      if (type.equals("LOGIN_ERROR")) {
+        assertFalse(json.get("data").has("sessionId"));
+      } else {
+        assertEquals(sessionId, json.at("/data/sessionId").asText(), type);
+      }
       assertEquals(json.get("id").asText(), message.getHeaders().getFirst("Nats-Msg-Id"));
       assertFalse(
           new String(message.getData(), java.nio.charset.StandardCharsets.UTF_8)
               .contains("alice-password"));
       message.ackSync(Duration.ofSeconds(2));
     }
-    assertEquals(java.util.Set.of("LOGIN", "LOGIN_ERROR"), types);
+    assertEquals(java.util.Set.of("LOGIN", "REFRESH_TOKEN", "LOGOUT", "LOGIN_ERROR"), types);
   }
 
   @Test

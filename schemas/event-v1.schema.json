@@ -17,6 +17,7 @@
       "properties": {
         "kind": {"enum": ["user", "admin"]}, "realmId": {"type": "string", "maxLength": 255},
         "keycloakEventId": {"type": "string"}, "userId": {"type": "string", "maxLength": 255}, "clientId": {"type": "string"},
+        "sessionId": {"type": "string", "maxLength": 255, "description": "User session identified by Keycloak's source event, when available. Not an authentication-session ID or a guarantee of a newly created session."},
         "outcome": {"enum": ["success", "error"]}, "error": {"type": "string"},
         "eventType": {"type": "string"}, "operationType": {"enum": ["CREATE", "UPDATE", "DELETE", "ACTION"]}, "resourceType": {"type": "string"},
         "resourcePath": {"type": "string"}, "actorUserId": {"type": "string"}, "actorRealmId": {"type": "string"},
@@ -51,7 +52,7 @@
             "required": ["eventType"],
             "not": {"anyOf": [{"required": ["operationType"]}, {"required": ["resourceType"]}, {"required": ["resourcePath"]}, {"required": ["userEnabled"]}, {"required": ["actorUserId"]}, {"required": ["actorRealmId"]}]}
           },
-          "else": {"required": ["operationType"], "not": {"required": ["eventType"]}}
+          "else": {"required": ["operationType"], "not": {"anyOf": [{"required": ["eventType"]}, {"required": ["sessionId"]}]}}
         },
         {
           "if": {"properties": {"outcome": {"const": "error"}}},

@@ -13,6 +13,7 @@
     "eventType": "LOGIN",
     "userId": "user-123",
     "clientId": "web-app",
+    "sessionId": "session-456",
     "keycloakEventId": "source-event-123",
     "ordering": {
       "key": "u.ZGVtbw.dXNlci0xMjM",
