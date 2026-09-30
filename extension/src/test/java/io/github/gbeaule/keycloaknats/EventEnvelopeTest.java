@@ -242,12 +242,14 @@ class EventEnvelopeTest {
 
   @Test
   void subjectStorageLimitIsInclusive() {
+    var encoder = new EventEnvelope(BridgeConfig.from(Map.of("subject-prefix", "p".repeat(128))));
     var event = admin(OperationType.UPDATE);
-    event.setRealmId("r".repeat(358));
+    event.setRealmId("12345678-1234-1234-1234-123456789012");
+    event.setResourceTypeAsString("x".repeat(235));
     assertEquals(512, encoder.adminSubject(event).length());
-    assertEquals(
-        512, encoder.describe(event, AffectedUser.resolve(event), false).subject().length());
-    event.setRealmId("r".repeat(359));
+    assertEquals(512, CaptureFixtures.admin(encoder, event, false).subject().length());
+    event.setResourceTypeAsString("x".repeat(236));
+    assertEquals(513, encoder.adminSubject(event).length());
     var failure =
         assertThrows(
             IllegalArgumentException.class, () -> CaptureFixtures.admin(encoder, event, false));

@@ -123,7 +123,10 @@ class OutboxRelayTest {
   void interruptedPublishRetainsRowAndInterruptFlag() throws Exception {
     doThrow(new InterruptedException()).when(publisher).publish(row);
     try {
-      assertEquals(0, relay.runBatch().published());
+      assertEquals(
+          new OutboxRelay.BatchResult(1, 0, 0, 0, 0, OutboxRelay.Outcome.STOPPED),
+          relay.runBatch());
+      assertEquals(0, registry.get("knd.publication.transaction.failures").counter().count());
       assertTrue(Thread.currentThread().isInterrupted());
       verify(em, never()).remove(any());
       assertEquals(0, row.attempts());
@@ -243,7 +246,9 @@ class OutboxRelayTest {
   @Test
   void anEmptyQueueDoesNotPublishOrDeleteAnything() {
     when(query.getResultList()).thenReturn(List.of());
-    assertEquals(0, relay.runBatch().published());
+    assertEquals(
+        new OutboxRelay.BatchResult(0, 0, 0, 0, 0, OutboxRelay.Outcome.NO_WORK), relay.runBatch());
+    assertEquals(0, registry.get("knd.publication.transaction.failures").counter().count());
     verifyNoInteractions(publisher);
     verify(em, never()).remove(any());
     verify(query).getResultList();

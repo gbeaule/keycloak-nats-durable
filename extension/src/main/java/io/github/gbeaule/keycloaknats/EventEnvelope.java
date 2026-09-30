@@ -100,13 +100,18 @@ public final class EventEnvelope {
 
   private Description description(
       String realm, String typeSuffix, String subjectSuffix, long time, Map<String, Object> data) {
+    String subject = subject(realm, subjectSuffix);
+    // Storage constraints apply only after the filter selects an event for capture.
+    if (subject.length() > 512) {
+      throw new IllegalArgumentException("Event subject exceeds storage limit");
+    }
     // Optional fields are omitted from the wire format, rather than encoded as JSON null.
     data.values().removeIf(Objects::isNull);
     return new Description(
         realm,
         (String) data.get("userId"),
         "io.keycloak." + typeSuffix,
-        subject(realm, subjectSuffix),
+        subject,
         time,
         Map.copyOf(data));
   }
@@ -163,11 +168,7 @@ public final class EventEnvelope {
   }
 
   private String subject(String realm, String suffix) {
-    String result = config.subjectPrefix() + "." + realmToken(realm) + "." + suffix;
-    if (result.length() > 512) {
-      throw new IllegalArgumentException("Event subject exceeds storage limit");
-    }
-    return result;
+    return config.subjectPrefix() + "." + realmToken(realm) + "." + suffix;
   }
 
   private static String realmToken(String realm) {

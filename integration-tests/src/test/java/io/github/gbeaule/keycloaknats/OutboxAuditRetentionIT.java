@@ -121,6 +121,30 @@ class OutboxAuditRetentionIT extends RelayIntegrationSupport {
   }
 
   @Test
+  void statisticsCountAllRetainedRowsButAgeOnlyEligibleDiscards() {
+    transaction(
+        em -> {
+          long now = CaptureRepository.databaseTime(em);
+          final var retention = Duration.ofDays(7);
+          audit(em, "recent", now - Duration.ofDays(1).toMillis());
+          audit(em, "future", now + Duration.ofDays(1).toMillis());
+          em.flush();
+          var statistics = AuditRepository.statistics(em, retention);
+          assertEquals(2, statistics.retainedRows());
+          assertEquals(0, statistics.oldestEligibleAgeSeconds());
+
+          long oldest = now - Duration.ofDays(9).toMillis();
+          audit(em, "expired", now - Duration.ofDays(8).toMillis());
+          audit(em, "oldest", oldest);
+          em.flush();
+          statistics = AuditRepository.statistics(em, retention);
+          assertEquals(4, statistics.retainedRows());
+          assertEquals(
+              (statistics.databaseTime() - oldest) / 1000.0, statistics.oldestEligibleAgeSeconds());
+        });
+  }
+
+  @Test
   void retentionChangesApplyToExistingHistoryAndZeroLeavesUncommittedAuditsAlone() {
     transaction(
         em -> {

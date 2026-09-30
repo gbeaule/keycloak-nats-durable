@@ -85,6 +85,45 @@ class DurableEventListenerTest {
   @ParameterizedTest
   @ValueSource(
       strings = {
+        "{\"userEvents\":[],\"adminEvents\":[]}",
+        """
+        {"subjects":["other.>"],"userEvents":["*"],"adminEvents":[
+          {"resourceType":"*","operations":["*"]}]}
+        """
+      })
+  void excludedOversizeSubjectDoesNotTouchDatabaseOrMarkRollback(String json) throws Exception {
+    var policy = EventFilterTest.parse(json);
+    var config = BridgeConfig.from(Map.of("subject-prefix", "p".repeat(128)));
+    listener = new DurableEventListener(session, config, wakeRelay, () -> policy);
+    var event = EventEnvelopeTest.admin(OperationType.CREATE);
+    event.setRealmId("12345678-1234-1234-1234-123456789012");
+    event.setResourceTypeAsString("x".repeat(255));
+    event.setResourcePath("widgets/example");
+    listener.onEvent(event, false);
+    capture.verifyNoInteractions();
+    verifyNoInteractions(session, em, tx, wakeRelay);
+  }
+
+  @Test
+  void selectedOversizeSubjectMarksRollbackWithoutPersisting() {
+    var config = BridgeConfig.from(Map.of("subject-prefix", "p".repeat(128)));
+    listener = new DurableEventListener(session, config, wakeRelay);
+    var event = EventEnvelopeTest.admin(OperationType.CREATE);
+    event.setRealmId("12345678-1234-1234-1234-123456789012");
+    event.setResourceTypeAsString("x".repeat(255));
+    event.setResourcePath("widgets/example");
+    var failure =
+        assertThrows(IllegalArgumentException.class, () -> listener.onEvent(event, false));
+    assertEquals("Event subject exceeds storage limit", failure.getMessage());
+    verify(tx).setRollbackOnly();
+    verify(tx, never()).enlistAfterCompletion(any());
+    capture.verifyNoInteractions();
+    verifyNoInteractions(em, wakeRelay);
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
         "\"realmIds\":[\"other-realm\"]",
         "\"subjects\":[\"other.>\"]",
         "\"clientIds\":[\"other-client\"]"

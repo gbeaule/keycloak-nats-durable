@@ -95,6 +95,7 @@ class AuditCleanupTest {
             Map.of())
         .run();
     verify(selection).setParameter("cutoff", 295200000L);
+    verify(statistics).setParameter("cutoff", 295200000L);
     verify(selection).setMaxResults(500);
     verify(selection).setLockMode(LockModeType.PESSIMISTIC_WRITE);
     verify(selection).setHint(SpecHints.HINT_SPEC_LOCK_TIMEOUT, Timeouts.SKIP_LOCKED_MILLI);
@@ -126,6 +127,7 @@ class AuditCleanupTest {
         .run();
     assertEquals(3, commits.get()); // Two deletes and one metadata observation.
     verify(selection, times(2)).setParameter("cutoff", 900000000L);
+    verify(statistics).setParameter("cutoff", 900000000L);
     assertEquals(2, counter("deleted"));
   }
 

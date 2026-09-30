@@ -244,7 +244,17 @@ class FilteringIT extends IntegrationSupport {
               .formatHex(
                   MessageDigest.getInstance("SHA-256")
                       .digest(json.getBytes(StandardCharsets.UTF_8)));
-      await().atMost(Duration.ofSeconds(10)).until(() -> keycloak.getLogs().contains(digest));
+      await()
+          .atMost(Duration.ofSeconds(10))
+          .until(
+              () ->
+                  keycloak
+                      .getLogs()
+                      .lines()
+                      .filter(line -> line.contains("Event filter applied; sha256="))
+                      .reduce((previous, current) -> current)
+                      .map(line -> line.contains("sha256=" + digest))
+                      .orElse(false));
     }
   }
 }
