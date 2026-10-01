@@ -36,6 +36,7 @@
     <jnats.version>2.26.3</jnats.version>
     <hikaricp.version>7.1.0</hikaricp.version>
     <bouncycastle.version>2.73.13</bouncycastle.version>
+    <jackson.version>2.21.7</jackson.version>
     <junit.version>6.1.3</junit.version>
     <testcontainers.version>2.0.5</testcontainers.version>
     <jacoco.version>0.8.15</jacoco.version>
@@ -63,6 +64,14 @@
         <groupId>org.testcontainers</groupId>
         <artifactId>testcontainers-bom</artifactId>
         <version>${testcontainers.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <!-- Align Jackson modules on a patched release before importing Keycloak's defaults. -->
+        <groupId>com.fasterxml.jackson</groupId>
+        <artifactId>jackson-bom</artifactId>
+        <version>${jackson.version}</version>
         <type>pom</type>
         <scope>import</scope>
       </dependency>
