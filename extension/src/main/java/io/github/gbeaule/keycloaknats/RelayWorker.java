@@ -17,14 +17,25 @@ final class RelayWorker implements Runnable {
   @Override
   public void run() {
     long delay = config.pollInterval().toMillis();
+    long failures = 0;
     try {
       while (wakeup.isOpen() && !Thread.currentThread().isInterrupted()) {
         var result = relay.runBatch();
         if (result.outcome() == OutboxRelay.Outcome.STOPPED) {
           return;
         }
-        if (result.processed() == config.batchSize()
-            && result.outcome() != OutboxRelay.Outcome.TRANSACTION_FAILED) {
+        if (result.outcome() == OutboxRelay.Outcome.TRANSACTION_FAILED) {
+          long cooldown =
+              Math.max(config.pollInterval().toMillis(), RetryBackoff.delay(config, failures));
+          failures = Math.min(Long.SIZE - 1, failures + 1);
+          delay = config.pollInterval().toMillis();
+          if (!wakeup.awaitCooldown(cooldown)) {
+            return;
+          }
+          continue;
+        }
+        failures = 0;
+        if (result.processed() == config.batchSize()) {
           delay = 0;
         } else if (result.processed() > 0) {
           delay = config.pollInterval().toMillis();

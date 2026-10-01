@@ -1,5 +1,6 @@
 package io.github.gbeaule.keycloaknats;
 
+import io.github.gbeaule.keycloaknats.jetstream.StreamPolicy;
 import io.nats.client.Connection;
 import io.nats.client.ConnectionListener;
 import io.nats.client.Consumer;
@@ -72,7 +73,7 @@ final class NatsDiagnostics implements ErrorListener, ConnectionListener {
         detail.append(" causedBy=");
       }
       detail.append(cause.getClass().getSimpleName());
-      if (cause instanceof UnsafeStreamException) {
+      if (cause instanceof StreamPolicy.Violation) {
         detail.append(": ").append(cause.getMessage());
       } else if (cause instanceof JetStreamApiException api) {
         detail.append(" status=").append(api.getErrorCode());

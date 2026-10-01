@@ -14,6 +14,7 @@ POSTGRES_MAJORS = ("14", "15", "16", "17")
 POSTGRES_TESTS = (
     "ConsumerHardeningIT,CustomSchemaIT,UpgradeIT,"
     "PerUserCaptureIT,PerUserRelayIT,OutboxDiscardIT,OutboxAuditRetentionIT,"
+    "NestedEventCaptureIT,OutboxHeadIT,OutboxSchemaIT,"
     "PerUserPublicationIT,PerUserSystemIT,FilteringIT,DurabilityIT#"
     "uncommittedAndRolledBackRowsAreNeverPublished+"
     "outboxWritesKeepSynchronousCommitForAuthenticationOnlyTransactions+"

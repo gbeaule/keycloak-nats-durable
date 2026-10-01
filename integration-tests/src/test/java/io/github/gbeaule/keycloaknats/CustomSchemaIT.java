@@ -11,7 +11,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-/** Verifies schema-qualified installation, migration reuse and delivery outside public. */
+/** Verifies schema-qualified installation, restart and delivery outside public. */
 @SuppressWarnings("checkstyle:AbbreviationAsWordInName") // Maven Failsafe discovers the IT suffix.
 class CustomSchemaIT extends IntegrationSupport {
   private static final String TABLE = "\"bridge-data\".kc_nats_outbox";

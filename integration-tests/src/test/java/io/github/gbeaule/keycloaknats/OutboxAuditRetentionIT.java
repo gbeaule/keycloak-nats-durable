@@ -52,6 +52,7 @@ class OutboxAuditRetentionIT extends RelayIntegrationSupport {
             em.persist(row);
             originals.add(row);
           }
+          OutboxHeads.refresh(em, originals.getFirst().orderingKey());
         });
     try (var publisher = new JetStreamPublisher(config);
         var metrics = new TestRegistry();
@@ -87,6 +88,7 @@ class OutboxAuditRetentionIT extends RelayIntegrationSupport {
                     CaptureRepository.databaseTime(em),
                     new ResolvedPublicationPolicy(
                         PublicationPolicy.RETRY, EventFilter.all().sha256(), null)));
+            OutboxHeads.refresh(em, ordering.key());
           });
       assertEquals(1, relay.runBatch().published());
       assertEquals(OutboxRelay.Outcome.NO_WORK, relay.runBatch().outcome());

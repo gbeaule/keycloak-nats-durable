@@ -174,9 +174,59 @@ class RelayWorkerTest {
     when(relay.runBatch())
         .thenReturn(
             new OutboxRelay.BatchResult(1, 0, 0, 0, 0, OutboxRelay.Outcome.TRANSACTION_FAILED));
-    when(wakeup.awaitSignal(100)).thenReturn(false);
+    when(wakeup.awaitCooldown(org.mockito.ArgumentMatchers.anyLong())).thenReturn(false);
     new RelayWorker(relay, wakeup, config).run();
-    verify(wakeup).awaitSignal(100);
+    var delay = org.mockito.ArgumentCaptor.forClass(Long.class);
+    verify(wakeup).awaitCooldown(delay.capture());
+    assertTrue(delay.getValue() >= 500 && delay.getValue() <= 1000);
     verify(relay).runBatch();
+  }
+
+  @Test
+  void repeatedFailuresIncreaseCooldownAndSuccessfulWorkResetsIt() throws Exception {
+    var relay = mock(OutboxRelay.class);
+    var wakeup = mock(RelayWakeup.class);
+    var failed = new OutboxRelay.BatchResult(1, 0, 0, 0, 0, OutboxRelay.Outcome.TRANSACTION_FAILED);
+    when(wakeup.isOpen()).thenReturn(true);
+    when(relay.runBatch()).thenReturn(failed, failed, failed, batch(1), failed);
+    when(wakeup.awaitCooldown(org.mockito.ArgumentMatchers.anyLong()))
+        .thenReturn(true, true, true, false);
+    when(wakeup.awaitSignal(org.mockito.ArgumentMatchers.anyLong())).thenReturn(true);
+    var config =
+        BridgeConfig.from(
+            Map.of("poll-ms", "100", "retry-initial-ms", "1000", "retry-max-ms", "4000"));
+    new RelayWorker(relay, wakeup, config).run();
+    var delay = org.mockito.ArgumentCaptor.forClass(Long.class);
+    verify(wakeup, times(4)).awaitCooldown(delay.capture());
+    long[] ceilings = {1000, 2000, 4000, 1000};
+    for (int i = 0; i < ceilings.length; i++) {
+      assertTrue(delay.getAllValues().get(i) >= ceilings[i] / 2);
+      assertTrue(delay.getAllValues().get(i) <= ceilings[i]);
+    }
+  }
+
+  @Test
+  void capturesDuringFailingScansCannotBypassTheMinimumCooldown() {
+    var wakeup = new RelayWakeup();
+    var scans = new java.util.concurrent.atomic.AtomicInteger();
+    var config =
+        BridgeConfig.from(Map.of("poll-ms", "30", "retry-initial-ms", "1", "retry-max-ms", "1"));
+    var relay =
+        new OutboxRelay(
+            work -> {
+              if (scans.incrementAndGet() == 3) {
+                wakeup.close();
+              } else {
+                wakeup.signal();
+              }
+              throw new IllegalStateException("injected database failure");
+            },
+            null,
+            config);
+    long started = System.nanoTime();
+    org.junit.jupiter.api.Assertions.assertTimeoutPreemptively(
+        java.time.Duration.ofSeconds(3), () -> new RelayWorker(relay, wakeup, config).run());
+    assertTrue(
+        System.nanoTime() - started >= java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(60));
   }
 }

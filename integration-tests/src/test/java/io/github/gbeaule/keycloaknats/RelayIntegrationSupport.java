@@ -71,6 +71,10 @@ abstract class RelayIntegrationSupport extends IntegrationSupport {
         em -> {
           em.createQuery("delete from NatsOutboxEvent").executeUpdate();
           em.createQuery("delete from NatsDiscardAudit").executeUpdate();
+          em.createQuery(
+                  "update NatsCaptureCounter set headEventId=null,"
+                      + " headNextAttemptAt=null, headCreatedAt=null")
+              .executeUpdate();
         });
     nats.jetStreamManagement().deleteStream(STREAM);
     provisionStream();
@@ -96,7 +100,7 @@ abstract class RelayIntegrationSupport extends IntegrationSupport {
     var policy =
         new ResolvedPublicationPolicy(
             PublicationPolicy.RETRY, EventFilter.digest(new byte[0]), null);
-    em.persist(
+    var row =
         new OutboxEvent(
             id,
             "keycloak.events.relay." + id,
@@ -105,7 +109,18 @@ abstract class RelayIntegrationSupport extends IntegrationSupport {
             realm,
             "io.keycloak.user.login",
             CaptureRepository.next(em, realm, user),
-            policy));
+            policy);
+    em.persist(row);
+    OutboxHeads.refresh(em, row.orderingKey());
+  }
+
+  static void change(String id, Consumer<OutboxEvent> work) {
+    transaction(
+        em -> {
+          var row = em.find(OutboxEvent.class, id);
+          work.accept(row);
+          OutboxHeads.refresh(em, row.orderingKey());
+        });
   }
 
   static OutboxEvent row(String id) {

@@ -37,6 +37,7 @@ import org.junit.jupiter.api.Test;
 class OutboxRelayTest {
   private EntityManager em;
   private TypedQuery<OutboxEvent> query;
+  private TypedQuery<OutboxEvent> heads;
   private TypedQuery<OutboxEvent> prepared;
   private TypedQuery<OutboxEvent> expired;
   private TypedQuery<OutboxEvent> unchanged;
@@ -46,13 +47,16 @@ class OutboxRelayTest {
   private OutboxRelay relay;
   private SimpleMeterRegistry registry;
   private RelayMetrics metrics;
+  private org.mockito.MockedStatic<OutboxHeads> headUpdates;
 
   @BeforeEach
   @SuppressWarnings("unchecked")
   void setup() {
     em = mock(EntityManager.class);
+    headUpdates = org.mockito.Mockito.mockStatic(OutboxHeads.class);
     publisher = mock(EventPublisher.class);
     query = mock(TypedQuery.class, RETURNS_SELF);
+    heads = mock(TypedQuery.class, RETURNS_SELF);
     prepared = mock(TypedQuery.class, RETURNS_SELF);
     expired = mock(TypedQuery.class, RETURNS_SELF);
     unchanged = mock(TypedQuery.class, RETURNS_SELF);
@@ -63,6 +67,9 @@ class OutboxRelayTest {
         .thenAnswer(
             call -> {
               String hql = call.getArgument(0);
+              if (hql.contains("NatsCaptureCounter")) {
+                return heads;
+              }
               return hql.contains(":version")
                   ? (hql.contains("event.nextAttemptAt") ? prepared : unchanged)
                   : hql.contains("event.nextExpiryAttemptAt") ? expired : query;
@@ -82,6 +89,7 @@ class OutboxRelayTest {
     metrics.close();
     assertTrue(registry.getMeters().isEmpty());
     registry.close();
+    headUpdates.close();
   }
 
   @Test

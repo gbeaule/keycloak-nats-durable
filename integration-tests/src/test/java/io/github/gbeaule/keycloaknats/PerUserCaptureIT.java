@@ -11,9 +11,10 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.node.BooleanNode;
+import jakarta.transaction.Status;
+import jakarta.transaction.Synchronization;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
-import java.sql.SQLException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -38,6 +39,7 @@ import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.events.Event;
 import org.keycloak.events.EventType;
 import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.KeycloakTransaction;
 import org.keycloak.models.KeycloakTransactionManager;
 
 /**
@@ -132,7 +134,7 @@ class PerUserCaptureIT extends IntegrationSupport {
         first.getTransaction().commit();
         first.beginTransaction();
       }
-      listener(first, EventFilter::all).onEvent(event("capture", user));
+      captureNow(first, event("capture", user));
       var pid = new CompletableFuture<Long>();
       var second =
           executor.submit(
@@ -237,8 +239,10 @@ class PerUserCaptureIT extends IntegrationSupport {
     try (var executor = Executors.newVirtualThreadPerTaskExecutor();
         var holder = sessions.openSession()) {
       holder.beginTransaction();
-      listener(holder, EventFilter::all).onEvent(event("capture", user));
+      captureNow(holder, event("capture", user));
       var pid = new CompletableFuture<Long>();
+      var staged = new CountDownLatch(1);
+      var reloaded = new CountDownLatch(1);
       var pending =
           executor.submit(
               () -> {
@@ -252,20 +256,22 @@ class PerUserCaptureIT extends IntegrationSupport {
                           .longValue());
                   var capture = listener(session, current::get);
                   capture.onEvent(event("capture", user));
+                  staged.countDown();
+                  assertTrue(reloaded.await(10, TimeUnit.SECONDS));
                   capture.onEvent(
                       event("capture", user)); // The replacement excludes this callback.
-                  assertFalse(
-                      session
-                          .createQuery(
-                              "from NatsOutboxEvent where orderingKey=:key", OutboxEvent.class)
-                          .setParameter("key", new EventOrdering("capture", user, 1).key())
-                          .getSingleResult()
-                          .publicationMayHaveOccurred());
                   session.getTransaction().commit();
                 }
+                return null;
               });
       long backend = pid.get(10, TimeUnit.SECONDS);
       try {
+        assertTrue(staged.await(10, TimeUnit.SECONDS));
+        current.set(
+            EventFilter.parse(
+                "{\"userEvents\":[],\"adminEvents\":[]}"
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        reloaded.countDown();
         await()
             .atMost(Duration.ofSeconds(10))
             .until(
@@ -280,6 +286,7 @@ class PerUserCaptureIT extends IntegrationSupport {
                 "{\"userEvents\":[],\"adminEvents\":[]}"
                     .getBytes(java.nio.charset.StandardCharsets.UTF_8)));
       } finally {
+        reloaded.countDown();
         holder.getTransaction().rollback();
       }
       pending.get(10, TimeUnit.SECONDS);
@@ -311,7 +318,7 @@ class PerUserCaptureIT extends IntegrationSupport {
     try (var session = sessions.openSession()) {
       session.beginTransaction();
       var capture = listener(session, EventFilter::all);
-      capture.onEvent(event("capture", user));
+      captureNow(session, event("capture", user));
       session
           .createNativeMutationQuery(
               "UPDATE kc_nats_capture_counter SET last_sequence="
@@ -319,9 +326,8 @@ class PerUserCaptureIT extends IntegrationSupport {
                   + " WHERE user_id=:user")
           .setParameter("user", user)
           .executeUpdate();
-      assertThrows(IllegalStateException.class, () -> capture.onEvent(event("capture", user)));
-      assertTrue(session.getTransaction().getRollbackOnly());
-      session.getTransaction().rollback();
+      capture.onEvent(event("capture", user));
+      assertThrows(RuntimeException.class, () -> session.getTransaction().commit());
     }
     commitEvent(event("capture", user));
     assertEquals(List.of(1L), sequences(user));
@@ -329,19 +335,18 @@ class PerUserCaptureIT extends IntegrationSupport {
 
   @Test
   void lockTimeoutRollsBackEarlierCallbacksForOtherUsers() {
-    String locked = UUID.randomUUID().toString();
-    String earlier = UUID.randomUUID().toString();
+    String locked = "z-" + UUID.randomUUID();
+    String earlier = "a-" + UUID.randomUUID();
     try (var holder = sessions.openSession();
         var victim = sessions.openSession()) {
       holder.beginTransaction();
-      listener(holder, EventFilter::all).onEvent(event("capture", locked));
+      captureNow(holder, event("capture", locked));
       victim.beginTransaction();
       var capture = listener(victim, EventFilter::all);
       capture.onEvent(event("capture", earlier));
       victim.createNativeMutationQuery("SET LOCAL lock_timeout='250ms'").executeUpdate();
-      assertThrows(RuntimeException.class, () -> capture.onEvent(event("capture", locked)));
-      assertTrue(victim.getTransaction().getRollbackOnly());
-      victim.getTransaction().rollback();
+      capture.onEvent(event("capture", locked));
+      assertThrows(RuntimeException.class, () -> victim.getTransaction().commit());
       holder.getTransaction().rollback();
       assertEquals(0, count(earlier));
     }
@@ -350,13 +355,12 @@ class PerUserCaptureIT extends IntegrationSupport {
   }
 
   @Test
-  void deadlockVictimRollsBackEveryCaptureAndCounter() throws Exception {
-    String realm = "deadlock-" + UUID.randomUUID();
+  void opposingCallbackOrdersPrepareInOneLockOrderWithoutDeadlock() throws Exception {
+    String realm = "ordered-locks-" + UUID.randomUUID();
     var users = List.of(UUID.randomUUID().toString(), UUID.randomUUID().toString());
-    var earlier = List.of(UUID.randomUUID().toString(), UUID.randomUUID().toString());
-    var locked = new CountDownLatch(2);
-    var outcomes = new ArrayList<Future<Boolean>>();
+    var staged = new CountDownLatch(2);
     try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+      var outcomes = new ArrayList<Future<?>>();
       for (int index = 0; index < 2; index++) {
         int side = index;
         outcomes.add(
@@ -365,48 +369,24 @@ class PerUserCaptureIT extends IntegrationSupport {
                   try (var session = sessions.openSession()) {
                     session.beginTransaction();
                     session
-                        .createNativeMutationQuery("SET LOCAL lock_timeout='10s'")
+                        .createNativeMutationQuery("SET LOCAL lock_timeout='5s'")
                         .executeUpdate();
                     var capture = listener(session, EventFilter::all);
-                    capture.onEvent(event(realm, earlier.get(side)));
                     capture.onEvent(event(realm, users.get(side)));
-                    locked.countDown();
-                    assertTrue(locked.await(10, TimeUnit.SECONDS));
-                    try {
-                      capture.onEvent(event(realm, users.get(1 - side)));
-                      session.getTransaction().commit();
-                      return true;
-                    } catch (RuntimeException failure) {
-                      Throwable cause = failure;
-                      while (cause != null && !(cause instanceof SQLException)) {
-                        cause = cause.getCause();
-                      }
-                      assertTrue(cause instanceof SQLException, failure::toString);
-                      assertEquals(
-                          "40P01",
-                          ((SQLException) cause).getSQLState(),
-                          "Only a PostgreSQL deadlock proves this scenario");
-                      assertTrue(session.getTransaction().getRollbackOnly());
-                      session.getTransaction().rollback();
-                      return false;
-                    }
+                    capture.onEvent(event(realm, users.get(1 - side)));
+                    staged.countDown();
+                    assertTrue(staged.await(10, TimeUnit.SECONDS));
+                    session.getTransaction().commit();
                   }
+                  return null;
                 }));
       }
-      boolean first = outcomes.get(0).get(20, TimeUnit.SECONDS);
-      boolean second = outcomes.get(1).get(20, TimeUnit.SECONDS);
-      assertNotEquals(first, second, "Exactly one transaction must survive the deadlock");
-      assertEquals(List.of(1L), sequences(users.get(0)));
-      assertEquals(List.of(1L), sequences(users.get(1)));
-      assertEquals(List.of(1L), sequences(earlier.get(first ? 0 : 1)));
-      String rolledBackUser = earlier.get(first ? 1 : 0);
-      assertEquals(List.of(), sequences(rolledBackUser));
-      commitEvent(event(realm, rolledBackUser));
-      assertEquals(
-          List.of(1L),
-          sequences(rolledBackUser),
-          "The victim's earlier counter increment must also roll back");
+      for (var outcome : outcomes) {
+        outcome.get(15, TimeUnit.SECONDS);
+      }
     }
+    assertEquals(List.of(1L, 2L), sequences(users.get(0)));
+    assertEquals(List.of(1L, 2L), sequences(users.get(1)));
   }
 
   @ParameterizedTest
@@ -620,12 +600,67 @@ class PerUserCaptureIT extends IntegrationSupport {
     when(tx.isActive()).thenAnswer(call -> em.getTransaction().isActive());
     doAnswer(
             call -> {
+              KeycloakTransaction preparation = call.getArgument(0);
+              preparation.begin();
+              em.getTransaction()
+                  .registerSynchronization(
+                      new Synchronization() {
+                        @Override
+                        public void beforeCompletion() {
+                          preparation.commit();
+                        }
+
+                        @Override
+                        public void afterCompletion(int status) {}
+                      });
+              return null;
+            })
+        .when(tx)
+        .enlistPrepare(org.mockito.ArgumentMatchers.any());
+    doAnswer(
+            call -> {
+              KeycloakTransaction completion = call.getArgument(0);
+              completion.begin();
+              em.getTransaction()
+                  .registerSynchronization(
+                      new Synchronization() {
+                        @Override
+                        public void beforeCompletion() {}
+
+                        @Override
+                        public void afterCompletion(int status) {
+                          if (status == Status.STATUS_COMMITTED) {
+                            completion.commit();
+                          } else {
+                            completion.rollback();
+                          }
+                        }
+                      });
+              return null;
+            })
+        .when(tx)
+        .enlistAfterCompletion(org.mockito.ArgumentMatchers.any());
+    doAnswer(
+            call -> {
               em.getTransaction().markRollbackOnly();
               return null;
             })
         .when(tx)
         .setRollbackOnly();
     return new DurableEventListener(session, BridgeConfig.from(Map.of()), () -> {}, filter);
+  }
+
+  private static void captureNow(Session em, Event event) {
+    var envelope = new EventEnvelope(BridgeConfig.from(Map.of()));
+    var row =
+        envelope.serialize(
+            envelope.describe(event),
+            CaptureRepository.next(em, event.getRealmId(), event.getUserId()),
+            CaptureRepository.databaseTime(em),
+            new ResolvedPublicationPolicy(
+                PublicationPolicy.RETRY, EventFilter.all().sha256(), null));
+    em.persist(row);
+    OutboxHeads.refresh(em, row.orderingKey());
   }
 
   private static List<Long> sequences(String user) {

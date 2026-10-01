@@ -62,7 +62,9 @@ class UpgradeIT extends IntegrationSupport {
     assertEquals(
         404, request("GET", "/admin/realms/durable-test/users/" + user, null).statusCode());
     assertEquals(
-        pending, pendingEvents(), "Migration must preserve persisted IDs, subjects and bytes");
+        pending,
+        pendingEvents(),
+        "Server replacement must preserve persisted IDs, subjects and bytes");
     assertEquals(
         metadata, captureMetadata(), "The same provider preserves capture state across runtimes");
 

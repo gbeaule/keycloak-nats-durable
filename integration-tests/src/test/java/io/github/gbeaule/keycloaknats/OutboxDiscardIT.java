@@ -53,7 +53,7 @@ class OutboxDiscardIT extends RelayIntegrationSupport {
       assertTrue(row("expired").nextExpiryAttemptAt() > row("expired").expiresAt());
 
       // Another failed retry must also leave room for newly captured users.
-      transaction(em -> em.find(OutboxEvent.class, "expired").deferDiscard(0));
+      change("expired", row -> row.deferResolution(0));
       capture("another", "another-healthy");
       assertEquals(OutboxRelay.Outcome.TRANSACTION_FAILED, firstWorker.runBatch().outcome());
       assertEquals(1, secondWorker.runBatch().published());
@@ -63,7 +63,7 @@ class OutboxDiscardIT extends RelayIntegrationSupport {
     } finally {
       allowDiscard(failure);
     }
-    transaction(em -> em.find(OutboxEvent.class, "expired").deferDiscard(0));
+    change("expired", row -> row.deferResolution(0));
     try (var actual = new JetStreamPublisher(config)) {
       var result = new OutboxRelay(OutboxDiscardIT::transaction, actual, config).runBatch();
       assertEquals(1, result.expired());
@@ -125,7 +125,8 @@ class OutboxDiscardIT extends RelayIntegrationSupport {
                       if (call == 1) {
                         transaction(
                             em ->
-                                em.find(OutboxEvent.class, "expired").deferDiscard(Long.MAX_VALUE));
+                                em.find(OutboxEvent.class, "expired")
+                                    .deferResolution(Long.MAX_VALUE));
                       }
                       throw failure;
                     }
@@ -199,7 +200,7 @@ class OutboxDiscardIT extends RelayIntegrationSupport {
       assertEquals(0, audits());
       assertEquals(List.of("abandoned", "other"), storedIds(2));
       allowDiscard("audit");
-      transaction(em -> em.find(OutboxEvent.class, "abandoned").deferDiscard(0));
+      change("abandoned", row -> row.deferResolution(0));
       var result = relay.runBatch();
       assertEquals(1, result.exhausted());
       assertEquals(1, result.published());
@@ -274,6 +275,7 @@ class OutboxDiscardIT extends RelayIntegrationSupport {
             head.failed(Long.MAX_VALUE, "IOException");
           }
           em.find(OutboxEvent.class, "expired").failed(Long.MAX_VALUE, "IOException");
+          OutboxHeads.refresh(em, head.orderingKey());
         });
     try (var publisher = new JetStreamPublisher(config)) {
       var relay = new OutboxRelay(OutboxDiscardIT::transaction, publisher, config);
@@ -286,7 +288,7 @@ class OutboxDiscardIT extends RelayIntegrationSupport {
       assertEquals(List.of("other"), storedIds(1));
       long headSequence = row("protected").userSequence();
       assertEquals(headSequence + 2, row("successor").userSequence());
-      transaction(em -> em.find(OutboxEvent.class, "protected").failed(0, "due"));
+      change("protected", row -> row.failed(0, "due"));
       assertEquals(2, relay.runBatch().published());
     }
     assertEquals(List.of("other", "protected", "successor"), storedIds(3));
@@ -323,7 +325,7 @@ class OutboxDiscardIT extends RelayIntegrationSupport {
     } finally {
       allowDiscard(failure);
     }
-    transaction(em -> em.find(OutboxEvent.class, "expired").deferDiscard(0));
+    change("expired", row -> row.deferResolution(0));
     try (var publisher = new JetStreamPublisher(config)) {
       var result = new OutboxRelay(OutboxDiscardIT::transaction, publisher, config).runBatch();
       assertEquals(1, result.discarded());
@@ -443,6 +445,7 @@ class OutboxDiscardIT extends RelayIntegrationSupport {
     assertTrue(row("abandoned").publicationMayHaveOccurred());
     assertEquals(0, row("abandoned").attempts());
     awaitExpiry(original);
+    change("abandoned", row -> row.deferResolution(0));
     assertEquals(
         1,
         new OutboxRelay(OutboxDiscardIT::transaction, neverPublish(), config)
@@ -582,18 +585,21 @@ class OutboxDiscardIT extends RelayIntegrationSupport {
 
   private static void capture(String id, String user, PublicationPolicy policy, long ageMillis) {
     transaction(
-        em ->
-            em.persist(
-                new OutboxEvent(
-                    id,
-                    "keycloak.events.relay." + id,
-                    "{\"id\":\"" + id + "\",\"private\":\"payload\"}",
-                    CaptureRepository.databaseTime(em) - ageMillis,
-                    "relay",
-                    "io.keycloak.user.login",
-                    CaptureRepository.next(em, "relay", user),
-                    new ResolvedPublicationPolicy(
-                        policy, EventFilter.digest(new byte[0]), "discard-rule"))));
+        em -> {
+          var row =
+              new OutboxEvent(
+                  id,
+                  "keycloak.events.relay." + id,
+                  "{\"id\":\"" + id + "\",\"private\":\"payload\"}",
+                  CaptureRepository.databaseTime(em) - ageMillis,
+                  "relay",
+                  "io.keycloak.user.login",
+                  CaptureRepository.next(em, "relay", user),
+                  new ResolvedPublicationPolicy(
+                      policy, EventFilter.digest(new byte[0]), "discard-rule"));
+          em.persist(row);
+          OutboxHeads.refresh(em, row.orderingKey());
+        });
   }
 
   private static void awaitExpiry(OutboxEvent row) {

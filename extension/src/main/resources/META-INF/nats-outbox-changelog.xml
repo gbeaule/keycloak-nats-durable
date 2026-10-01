@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.6.xsd">
-  <changeSet id="nats-outbox-1" author="keycloak-nats-durable">
+  <changeSet id="nats-outbox-1" author="keycloak-nats-durable" dbms="postgresql">
     <createTable tableName="KC_NATS_OUTBOX">
       <column name="ID" type="VARCHAR(36)">
         <constraints nullable="false" primaryKey="true"/>
@@ -101,6 +101,9 @@
       <column name="LAST_SEQUENCE" type="BIGINT">
         <constraints nullable="false"/>
       </column>
+      <column name="HEAD_EVENT_ID" type="VARCHAR(36)"/>
+      <column name="HEAD_NEXT_ATTEMPT_AT" type="BIGINT"/>
+      <column name="HEAD_CREATED_AT" type="BIGINT"/>
     </createTable>
     <addUniqueConstraint tableName="KC_NATS_CAPTURE_COUNTER" columnNames="REALM_ID,USER_ID" constraintName="UQ_KC_NATS_COUNTER_USER"/>
     <addUniqueConstraint tableName="KC_NATS_OUTBOX" columnNames="ORDERING_KEY,USER_SEQUENCE" constraintName="UQ_KC_NATS_OUTBOX_POSITION"/>
@@ -117,11 +120,6 @@
       <column name="DISCARDED_AT"/>
       <column name="ID"/>
     </createIndex>
-  </changeSet>
-  <changeSet id="nats-outbox-2-constraints" author="keycloak-nats-durable" dbms="postgresql">
-    <customChange class="io.github.gbeaule.keycloaknats.CaptureConstraintsMigration"/>
-  </changeSet>
-  <changeSet id="nats-outbox-3-vacuum" author="keycloak-nats-durable" dbms="postgresql">
-    <customChange class="io.github.gbeaule.keycloaknats.OutboxVacuumMigration"/>
+    <customChange class="io.github.gbeaule.keycloaknats.OutboxSchema"/>
   </changeSet>
 </databaseChangeLog>

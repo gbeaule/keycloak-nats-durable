@@ -13,8 +13,9 @@ the intended Keycloak and database versions; demo image versions are not install
    Adapt replication and capacity to the deployment. Receiving applications provision their own
    subscriptions; independent applications may require Limits retention and separate durables.
 3. Configure the provider's NATS destination and credentials, then restart Keycloak. Its
-   [Liquibase migration](../extension/src/main/resources/META-INF/nats-outbox-changelog.xml) owns the
-   outbox schema; allow the required DDL through your deployment's migration process.
+   [Liquibase changelog](../extension/src/main/resources/META-INF/nats-outbox-changelog.xml) creates the
+   initial outbox schema; allow the required DDL during initial setup. Per-user publication ordering
+   is always enabled for attributable events.
 4. Add `nats-durable` to each required realm's event listeners, preserving other listeners.
    [The demo realm](../deploy/realm.json) shows the configuration. Saving Keycloak events and including
    admin representations are not prerequisites.
@@ -61,6 +62,14 @@ policy directory and point it to the chosen file. Start from the optional [all-e
 user lifecycle events and makes only short-lived login events discardable.
 Replace placeholder realm IDs; these files are not packaged or loaded automatically.
 
+Capture selection runs before delivery rules. The first matching delivery rule sets the event's
+publication policy; unmatched events retry indefinitely. Use `action: retry` to protect an event, or
+`action: discard` with `maxAgeSeconds`, `maxFailures`, or both to permit local discard when either
+limit is reached. Age starts at database capture; failures count unsuccessful publication calls whose
+results commit. Database failures and cancelled calls do not consume that allowance. Discard policies
+do not make capture optional: failure to persist any selected event rolls back its Keycloak transaction.
+The [filter schema](../schemas/event-filter.schema.json) defines accepted fields and limits.
+
 Replace policy files atomically within the mounted directory. Invalid initial policies fail startup;
 invalid reloads retain the last valid policy. Deleting a configured file does not restore capture-all.
 Policy reloads affect future capture and are eventually consistent across nodes. Other settings
@@ -71,6 +80,10 @@ and expiry scans; expiry remains eligible during retry backoff. Audit retention,
 batch limits and transaction timeout are independent maintenance settings. These use the same
 provider-over-environment precedence. Event publication policy belongs only in the filter file;
 receiver deadlines and application processing settings do not belong there.
+
+The server's `max_payload` and the stream's message-size limit must accommodate the configured
+payload limit plus headers. The publisher checks both before sending; increasing the provider's
+payload limit may also require increasing the broker limits.
 
 ## Storage and access
 
@@ -159,16 +172,7 @@ pending until the broker deduplication window passes. Keep pending recovery copi
 stream recreation or namespace changes need a recovery plan. Command syntax lives in
 [ConsumerMain](../consumer-example/src/main/java/io/github/gbeaule/keycloaknats/consumer/ConsumerMain.java).
 
-## Upgrades and coordinated restore
-
-This ordering feature is unreleased and updates initial schemas directly. There is no old-data
-migration or mixed-version rollout. Use fresh, separately named development storage for these
-schemas; existing developer volumes are never deleted automatically.
-
-Test provider and schema upgrades on a restored database with pending events. PostgreSQL major
-upgrades require a rehearsed database migration into appropriate storage; changing an image tag does
-not upgrade an existing data volume. Rehearse broker upgrades against existing stream and consumer
-state as well. Fresh-container tests do not establish a production upgrade path.
+## Backups and coordinated restore
 
 Back up and recover Keycloak/outbox, JetStream, consumer inbox and business effects at a coordinated
 boundary. Restoring only the consumer database can erase an effect after WorkQueue retention has

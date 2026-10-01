@@ -3,7 +3,9 @@ package io.github.gbeaule.keycloaknats;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
 import jakarta.persistence.TypedQuery;
+import java.util.Comparator;
 import java.util.Optional;
+import java.util.stream.Stream;
 import org.hibernate.Timeouts;
 import org.hibernate.jpa.SpecHints;
 
@@ -36,17 +38,43 @@ final class OutboxRepository {
   static void discard(
       EntityManager entityManager, OutboxEvent row, DiscardReason reason, long now) {
     entityManager.persist(new DiscardAudit(row, reason, now));
+    remove(entityManager, row);
+  }
+
+  static void remove(EntityManager entityManager, OutboxEvent row) {
     entityManager.remove(row);
+    OutboxHeads.refresh(entityManager, row.orderingKey());
   }
 
   static Optional<OutboxEvent> lockNextDue(EntityManager entityManager, long now) {
-    // The predecessor scan includes locked and delayed rows; only eligible heads skip locks.
-    return lock(
-        entityManager
-            .createQuery(
-                DUE_HEAD + " order by event.nextAttemptAt, event.createdAt, event.id",
-                OutboxEvent.class)
-            .setParameter("now", now));
+    // Each indexed scan claims at most one row. Both locks end with the short preparation
+    // transaction; only the chosen event is reacquired for the subsequent broker request.
+    var ordered =
+        lock(
+            entityManager
+                .createQuery(
+                    "select event from NatsCaptureCounter counter"
+                        + " join NatsOutboxEvent event on event.id = counter.headEventId"
+                        + " where counter.headEventId is not null"
+                        + " and counter.headNextAttemptAt <= :now"
+                        + " order by counter.headNextAttemptAt,"
+                        + " counter.headCreatedAt, counter.headEventId",
+                    OutboxEvent.class)
+                .setParameter("now", now));
+    var independent =
+        lock(
+            entityManager
+                .createQuery(
+                    "select event from NatsOutboxEvent event"
+                        + " where event.orderingKey is null and event.nextAttemptAt <= :now"
+                        + " order by event.nextAttemptAt, event.createdAt, event.id",
+                    OutboxEvent.class)
+                .setParameter("now", now));
+    return Stream.concat(ordered.stream(), independent.stream())
+        .min(
+            Comparator.comparingLong(OutboxEvent::nextAttemptAt)
+                .thenComparingLong(OutboxEvent::createdAt)
+                .thenComparing(OutboxEvent::id));
   }
 
   static Optional<OutboxEvent> lockPrepared(

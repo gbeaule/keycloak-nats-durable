@@ -8,6 +8,8 @@ import java.util.List;
 
 /** Shared publication and operator-replay checks against silent eviction or rerouting. */
 public final class StreamPolicy {
+  private static final long HEADER_ALLOWANCE = 512;
+
   private StreamPolicy() {}
 
   /** A fixed diagnostic, safe to report without printing remote server text. */
@@ -48,8 +50,16 @@ public final class StreamPolicy {
         "Stream must accept untransformed local publications");
     require(!stream.getDuplicateWindow().isZero(), "A deduplication window is required");
     require(
-        stream.getMaximumMessageSize() < 0 || stream.getMaximumMessageSize() >= payloadBytes + 512L,
+        stream.getMaximumMessageSize() < 0
+            || stream.getMaximumMessageSize() >= payloadBytes + HEADER_ALLOWANCE,
         "Stream message size must leave room for the payload and headers");
+  }
+
+  /** The server's negotiated message limit includes JetStream and application headers. */
+  public static void validateServerPayload(long serverMaxPayload, int payloadBytes) {
+    require(
+        serverMaxPayload >= payloadBytes + HEADER_ALLOWANCE,
+        "Server max_payload must leave room for the configured payload and headers");
   }
 
   private static void require(boolean valid, String message) {

@@ -207,7 +207,7 @@ class PerUserOrderingBenchmark extends RelayIntegrationSupport {
     assertEquals(concurrency, cold);
     assertEquals(
         0, scalar("SELECT count(*) FROM " + OUTBOX + " WHERE publication_may_have_occurred"));
-    transaction(em -> em.find(OutboxEvent.class, hot.getFirst()).failed(0, "recovery"));
+    change(hot.getFirst(), row -> row.failed(0, "recovery"));
     start = System.nanoTime();
     try (var executor = Executors.newSingleThreadExecutor()) {
       var captures = executor.submit(() -> captureLoad(count, concurrency, false));
@@ -418,6 +418,7 @@ class PerUserOrderingBenchmark extends RelayIntegrationSupport {
             CaptureRepository.databaseTime(em) - ageMillis,
             new ResolvedPublicationPolicy(policy, EventFilter.all().sha256(), null));
     em.persist(row);
+    OutboxHeads.refresh(em, row.orderingKey());
     return row;
   }
 

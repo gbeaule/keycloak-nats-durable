@@ -55,7 +55,8 @@ matrix. Before adding it to that matrix:
 
 1. Review changes to listener transactions, entity registration, migrations, durable commits,
    row locking and event enums.
-2. Run the full existing matrix, including [persisted-outbox upgrade tests](../integration-tests/src/test/java/io/github/gbeaule/keycloaknats/UpgradeIT.java).
+2. Run the full existing matrix, including [Keycloak replacement tests](../integration-tests/src/test/java/io/github/gbeaule/keycloaknats/UpgradeIT.java).
+   These reuse the same provider and schema across server versions.
    If the compile baseline changes, validate every existing runtime against it.
 3. Review the event schema, catalogue and examples together. Keep their
    [enum/schema checks](../extension/src/test/java/io/github/gbeaule/keycloaknats/EventSchemaTest.java)
@@ -65,11 +66,11 @@ Apply the selected server's own support and upgrade requirements. Test the deplo
 source/target versions on a restored database; default test images do not require existing
 installations to change their database major version.
 
-The per-user publication feature is unreleased: its initial schemas and event contract are updated
-directly, without old-data migration, dual formats or mixed-version rollout. Use a separately named
-fresh development deployment when testing it against older local schemas. Do not automatically
-delete developer volumes. Once released, schema evolution must preserve applied migration identities
-and pending event contracts.
+The [Liquibase changelog](../extension/src/main/resources/META-INF/nats-outbox-changelog.xml) installs
+the complete initial schema, including per-user ordering. Before the first release, update that
+schema directly and test with fresh, separately named development storage; preserve existing volumes.
+Once released, append migrations for schema changes and keep applied changesets and their custom
+SQL implementations unchanged. No upgrade path for earlier development schemas is maintained.
 
 The standalone publisher acceptance run requires no receiving application:
 

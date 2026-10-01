@@ -8,7 +8,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -109,7 +108,7 @@ class KeycloakTransactionsTest {
 
   @ParameterizedTest
   @ValueSource(strings = {"intent", "publication", "discard"})
-  void silentRollbackLeavesRelayResolutionUncountedAndBacksOffFailedDiscard(String phase)
+  void silentRollbackLeavesResolutionUncountedAndBacksOffTheUnchangedRow(String phase)
       throws Exception {
     var fixture = new Lifecycle();
     fixture.rollbackSession = phase.equals("publication") ? 2 : 1;
@@ -159,20 +158,21 @@ class KeycloakTransactionsTest {
       assertEquals(1, fixture.rollbacks.get());
       if (phase.equals("publication")) {
         verify(publisher).publish(row);
-        verify(fixture.em).remove(row);
+        repository.verify(() -> OutboxRepository.remove(fixture.em, row));
       } else {
         verifyNoInteractions(publisher);
       }
       if (discard) {
         repository.verify(
             () -> OutboxRepository.discard(fixture.em, row, DiscardReason.EXPIRED, 0));
-        repository.verify(() -> OutboxRepository.lockUnchanged(fixture.em, row.id(), 0));
-        assertTrue(row.nextAttemptAt() > 0);
         assertTrue(row.nextExpiryAttemptAt() > 0);
-        assertEquals(1, fixture.commits.get(), "Backoff must commit in a fresh transaction");
-      } else {
-        repository.verify(() -> OutboxRepository.lockUnchanged(fixture.em, row.id(), 0), never());
       }
+      repository.verify(() -> OutboxRepository.lockUnchanged(fixture.em, row.id(), 0));
+      assertTrue(row.nextAttemptAt() > 0);
+      assertEquals(
+          phase.equals("publication") ? 2 : 1,
+          fixture.commits.get(),
+          "Backoff must commit in a fresh transaction");
     } finally {
       registry.close();
     }

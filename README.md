@@ -45,7 +45,7 @@ defines its users and clients. Named volumes preserve state across restarts. The
 Keycloak mode, plaintext networking and a single broker. See [operations](docs/operations.md) for
 deployment requirements.
 
-The original [consumer demonstration](compose.yaml) remains optional. The standalone deployment
+The [consumer demonstration](compose.yaml) is optional. The standalone deployment
 creates only a stream, with no subscription or consumer database. An empty outbox means publication
 obligations are resolved, including authorized discards; it does not establish downstream completion.
 
@@ -68,9 +68,9 @@ coverage. After `verify`, open `coverage/target/site/jacoco-unit/index.html` for
 including shared code exercised by other modules' tests. Per-module reports use the same path under
 each module's `target`. CI uploads these reports as `unit-coverage`; no production classes are excluded.
 
-The module POMs enforce initial coverage floors against each module's own tests. Raise them as
-meaningful tests close gaps, aiming for 100% of core logic and failure paths. Coverage measures
-execution, not assertion quality. To enforce the full 100% unit target locally (currently failing):
+Module POMs define coverage gates against each module's own tests. The provider and shared transport
+require full line and branch coverage; the consumer example has a lower floor. Coverage measures
+execution, not assertion quality. To apply the full target to every module locally:
 
 ```sh
 mvn -B -ntp -Dcoverage.line.minimum=1.0 -Dcoverage.branch.minimum=1.0 verify

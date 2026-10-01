@@ -54,13 +54,13 @@ class PerUserRelayIT extends RelayIntegrationSupport {
     capture("a1", "a");
     capture("a2", "a");
     capture("b1", "b");
-    transaction(em -> em.find(OutboxEvent.class, "a1").failed(Long.MAX_VALUE, "delayed"));
+    change("a1", row -> row.failed(Long.MAX_VALUE, "delayed"));
     try (var actual = new JetStreamPublisher(config)) {
       var relay = new OutboxRelay(PerUserRelayIT::transaction, actual, config);
       assertEquals(1, relay.runBatch().published());
       assertEquals(OutboxRelay.Outcome.NO_WORK, relay.runBatch().outcome());
       assertFalse(row("a2").publicationMayHaveOccurred());
-      transaction(em -> em.find(OutboxEvent.class, "a1").failed(0, "due"));
+      change("a1", row -> row.failed(0, "due"));
       capture("b2", "b");
       var failures = new AtomicInteger();
       var failing =
@@ -178,6 +178,11 @@ class PerUserRelayIT extends RelayIntegrationSupport {
       assertEquals(original.subject(), retained.subject());
       assertFalse(row("a2").publicationMayHaveOccurred());
       assertEquals(1, messages());
+      assertTrue(retained.nextAttemptAt() > System.currentTimeMillis());
+      assertEquals(
+          OutboxRelay.Outcome.NO_WORK,
+          new OutboxRelay(PerUserRelayIT::transaction, actual, config).runBatch().outcome());
+      change("a1", row -> row.deferResolution(0));
       assertEquals(
           2, new OutboxRelay(PerUserRelayIT::transaction, actual, config).runBatch().published());
       assertEquals(2, messages(), "Retries use the original NATS message ID for deduplication");
@@ -199,7 +204,7 @@ class PerUserRelayIT extends RelayIntegrationSupport {
               work -> {
                 transaction(work);
                 if (transactions.incrementAndGet() == 1) {
-                  transaction(em -> em.find(OutboxEvent.class, "a1").failed(0, "new owner"));
+                  change("a1", row -> row.failed(0, "new owner"));
                 }
               },
               actual,
@@ -254,7 +259,7 @@ class PerUserRelayIT extends RelayIntegrationSupport {
                     em.createNativeQuery("select pg_terminate_backend(:pid)", Boolean.class)
                         .setParameter("pid", Math.toIntExact(backend.get()))
                         .getSingleResult()));
-        transaction(em -> em.find(OutboxEvent.class, "a1").failed(Long.MAX_VALUE, "new owner"));
+        change("a1", row -> row.failed(Long.MAX_VALUE, "new owner"));
       } finally {
         release.countDown();
       }
@@ -270,7 +275,7 @@ class PerUserRelayIT extends RelayIntegrationSupport {
   @Test
   void headLookupIndexesExistInTheCustomSchema() throws Exception {
     assertEquals(
-        2,
+        3,
         scalar(
             """
             SELECT count(*) FROM pg_indexes WHERE schemaname='relay-data'
@@ -278,6 +283,11 @@ class PerUserRelayIT extends RelayIntegrationSupport {
                 indexdef LIKE '%(ordering_key, user_sequence)%' OR
                 indexdef LIKE '%(next_attempt_at, created_at, id)%')
             """));
+    assertEquals(
+        1,
+        scalar(
+            "SELECT count(*) FROM pg_indexes WHERE schemaname='relay-data'"
+                + " AND indexname='idx_kc_nats_head_due'"));
     assertEquals(
         0,
         scalar(

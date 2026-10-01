@@ -19,11 +19,21 @@ final class RelayWakeup {
   }
 
   synchronized boolean awaitSignal(long timeoutMillis) throws InterruptedException {
+    return await(timeoutMillis, true);
+  }
+
+  synchronized boolean awaitCooldown(long timeoutMillis) throws InterruptedException {
+    return await(timeoutMillis, false);
+  }
+
+  private boolean await(long timeoutMillis, boolean acceptSignals) throws InterruptedException {
     long timeoutNanos = TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
     long started = System.nanoTime();
     long remaining;
     // Subtract readings to handle nanoTime's signed wrap; no lifetime counter is needed.
-    while (!closed && !pending && (remaining = timeoutNanos - (System.nanoTime() - started)) > 0) {
+    while (!closed
+        && !(acceptSignals && pending)
+        && (remaining = timeoutNanos - (System.nanoTime() - started)) > 0) {
       TimeUnit.NANOSECONDS.timedWait(this, remaining);
     }
     // Only the waiting worker consumes a signal, so a commit during its scan cannot be lost.

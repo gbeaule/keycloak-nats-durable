@@ -3,11 +3,13 @@ package io.github.gbeaule.keycloaknats;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import io.github.gbeaule.keycloaknats.jetstream.StreamPolicy;
 import io.nats.client.Connection;
 import io.nats.client.ConnectionListener;
 import io.nats.client.Consumer;
@@ -35,10 +37,13 @@ class NatsDiagnosticsTest {
   }
 
   @Test
-  void reportsWhichStreamRuleFailed() {
-    assertTrue(
-        NatsDiagnostics.describe(new UnsafeStreamException("DiscardNew is required"))
-            .contains("DiscardNew is required"));
+  void reportsFixedPolicyDiagnosticsDirectly() {
+    var failure =
+        assertThrows(
+            StreamPolicy.Violation.class, () -> StreamPolicy.validateServerPayload(1024, 1024));
+    assertEquals(
+        "Violation: Server max_payload must leave room for the configured payload and headers",
+        NatsDiagnostics.describe(failure));
   }
 
   @Test

@@ -26,6 +26,17 @@ class StreamPolicyTest {
   private static final String MODES = "Rollup, TTL, scheduling and counter modes must be disabled";
   private static final String LOCAL = "Stream must accept untransformed local publications";
 
+  @Test
+  void serverPayloadBudgetIncludesHeadersWithoutIntegerOverflow() {
+    assertDoesNotThrow(() -> StreamPolicy.validateServerPayload(1536, 1024));
+    assertThrows(
+        StreamPolicy.Violation.class, () -> StreamPolicy.validateServerPayload(1535, 1024));
+    assertThrows(StreamPolicy.Violation.class, () -> StreamPolicy.validateServerPayload(0, 1024));
+    assertThrows(
+        StreamPolicy.Violation.class,
+        () -> StreamPolicy.validateServerPayload(Integer.MAX_VALUE, Integer.MAX_VALUE));
+  }
+
   @ParameterizedTest
   @EnumSource(
       value = RetentionPolicy.class,

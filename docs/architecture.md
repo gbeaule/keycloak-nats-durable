@@ -22,12 +22,18 @@ The listener stores selected events in an outbox using Keycloak's existing persi
 failure marks the transaction for rollback. NATS availability is outside the request transaction, so
 a broker outage allows account operations to continue while the database has capacity.
 
-Each accepted event freezes its publication policy and database capture time. Attributable users
-receive a sequence from a durable counter in the same transaction. Capture locks the user's counter
-before inserting the outbox row; multiple callbacks acquire counters in callback order. Locks last
-until commit or rollback, and a deadlock or lock timeout rolls back the entire Keycloak transaction.
-Counters survive user deletion and outbox draining. Publication workers must never lock these
-counters during broker requests.
+Callbacks freeze selected event data and publication policies without taking counter locks. The
+transaction's prepare phase allocates sequences and persists the batch before the database commits.
+Nested error-event transactions can therefore finish before their caller prepares. Counters are
+acquired in a consistent order across users; each user's callback order within a transaction is
+preserved. Separate transactions receive positions in preparation/commit order. Database capture
+time is recorded during persistence, and failed preparation rolls back the owning transaction.
+
+Counters survive user deletion and outbox draining. They also point to each user's earliest pending
+event. Capture and resolution update this indexed head atomically with outbox changes, so claims
+skip blocked histories. Counter locks cover short database work and are never held during broker
+requests. Event identity, payload and captured policy stay immutable; sequence allocation and queue
+progress are durable state written explicitly by the repositories.
 
 For supported admin requests, affected-user identity comes from Keycloak's routed `user-id`
 parameter after matching the request to the event's realm and resource. Capture resolves this ID
@@ -40,35 +46,11 @@ External mutations are not made transactional by this bridge. Events are not bac
 installation or a period with the listener disabled. Keycloak error events can have a separate
 transaction from the operation that failed.
 
-Keycloak's custom JPA registration is unsupported upstream, and its event-listener SPI is classified
-as internal. These integration points are an accepted architectural dependency with no upstream
-stability guarantee. Each candidate server version needs runtime and upgrade validation as described
-in [development](development.md#compatibility).
-
-### Can custom JPA registration be removed?
-
-Yes, but it is a persistence redesign. `JpaEntityProvider` registers the outbox, capture counter and
-discard audit entities and runs their Liquibase migrations. Removing registration alone breaks both
-storage initialization and entity access. Keycloak explicitly marks this extension mechanism
-[unsupported](https://www.keycloak.org/docs/26.7.4/server_development/#_extensions_jpa).
-
-Two feasible alternatives have different tradeoffs:
-
-| Approach | Transaction boundary and cost |
-| --- | --- |
-| SQL on Keycloak's managed connection | Replace entity persistence, queries and mapping lookups with SQL; manage migrations separately. Reusing the exact connection preserves atomic capture without a second datasource. This still depends on `JpaConnectionProvider`, Hibernate connection access and the event listener lifecycle; it is not a claim of full upstream support. |
-| Separate JPA persistence unit and named datasource | Register entities through `META-INF/persistence.xml`, using Keycloak's [documented datasource support](https://www.keycloak.org/server/db#configure-multiple-datasources). Own the migrations and configure JTA/XA coordination and durable recovery for the participating database resources. This changes deployment and failure recovery. |
-
-A second connection to the same PostgreSQL database does not share the original local transaction.
-An independent commit or after-commit enqueue would introduce a loss window. For the separate
-datasource design, validate crash recovery as well as rollback; Keycloak's
-[XA guidance](https://www.keycloak.org/server/db#using-database-vendors-with-xa-transaction-support)
-requires stable recovery-log storage in containers.
-
-SQL on the existing connection is the preferred route if preserving today's deployment and single
-database transaction is the priority. A named datasource is the route to documented entity
-registration. These are feasibility options, not implemented replacements; either needs the runtime,
-custom-schema, rollback, ordering and upgrade checks before adoption.
+`JpaEntityProvider` registers the entities and initializes the schema through Liquibase. Keycloak
+marks this mechanism [unsupported](https://www.keycloak.org/docs/26.7.4/server_development/#_extensions_jpa)
+and classifies the event-listener SPI as internal. These dependencies require runtime and restart
+validation for each candidate server version; see [development](development.md#compatibility).
+Replacing JPA registration would require preserving capture in Keycloak's database transaction.
 
 ## Relay and failure boundaries
 
@@ -103,9 +85,10 @@ original atomically. A committed discard releases that sequence position without
 replacement, tombstone or control message. If publication intent was recorded, the audit conservatively
 reports an unknown outcome: discard cannot retract an accepted or in-flight original.
 
-A failed discard backs off through a separate database transaction. Both relay scans respect this
-cooldown, allowing other users to progress while the original continues to block its own successors.
-Database failures do not consume the event's publication-failure allowance.
+A failed row resolution backs off through a separate transaction that checks the original version.
+Both relay scans respect this cooldown, allowing other users to progress while the original continues
+to block its own successors. Database failures do not consume the publication-failure allowance.
+Workers also apply a separate exponential failure cooldown that capture notifications cannot bypass.
 
 An independent worker removes diagnostic history after seven days by default. Cleanup uses bounded
 transactions and works during broker outages; retention zero makes history eligible on the next
@@ -147,7 +130,7 @@ a later disablement or deletion. Receiving applications remain responsible for t
 | Area | Responsibility and source |
 | --- | --- |
 | Capture | [Listener](../extension/src/main/java/io/github/gbeaule/keycloaknats/DurableEventListener.java), [policy](../extension/src/main/java/io/github/gbeaule/keycloaknats/EventFilter.java) and [envelope](../extension/src/main/java/io/github/gbeaule/keycloaknats/EventEnvelope.java) |
-| Outbox | [Schema migrations](../extension/src/main/resources/META-INF/nats-outbox-changelog.xml), [row claims](../extension/src/main/java/io/github/gbeaule/keycloaknats/OutboxRepository.java) and [relay](../extension/src/main/java/io/github/gbeaule/keycloaknats/OutboxRelay.java) |
+| Outbox | [Initial schema](../extension/src/main/resources/META-INF/nats-outbox-changelog.xml), [row claims](../extension/src/main/java/io/github/gbeaule/keycloaknats/OutboxRepository.java) and [relay](../extension/src/main/java/io/github/gbeaule/keycloaknats/OutboxRelay.java) |
 | Transport | [Publisher](../extension/src/main/java/io/github/gbeaule/keycloaknats/JetStreamPublisher.java) and shared [NATS transport module](../nats-transport/src/main/java/io/github/gbeaule/keycloaknats) |
 | Operations | [Lifecycle](../extension/src/main/java/io/github/gbeaule/keycloaknats/DurableEventListenerFactory.java), [publication metrics](../extension/src/main/java/io/github/gbeaule/keycloaknats/RelayMetrics.java), [audit cleanup](../extension/src/main/java/io/github/gbeaule/keycloaknats/AuditCleanup.java) and [read-only reports](../consumer-example/src/main/java/io/github/gbeaule/keycloaknats/consumer/OutboxReport.java) |
 | Example receiver | [Inbox processing](../consumer-example/src/main/java/io/github/gbeaule/keycloaknats/consumer/InboxProcessor.java) and [worker](../consumer-example/src/main/java/io/github/gbeaule/keycloaknats/consumer/ConsumerWorker.java) |

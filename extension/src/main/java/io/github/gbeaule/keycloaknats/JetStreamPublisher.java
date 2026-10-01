@@ -1,5 +1,6 @@
 package io.github.gbeaule.keycloaknats;
 
+import io.github.gbeaule.keycloaknats.jetstream.StreamPolicy;
 import io.nats.client.Connection;
 import io.nats.client.JetStreamOptions;
 import io.nats.client.Nats;
@@ -45,14 +46,19 @@ public final class JetStreamPublisher implements EventPublisher {
       if (activeConnection.getStatus() != Connection.Status.CONNECTED) {
         throw new IOException("NATS is unavailable");
       }
+      StreamPolicy.validateServerPayload(
+          activeConnection.getMaxPayload(), config.maxPayloadBytes());
       JetStreamOptions options =
           JetStreamOptions.builder().requestTimeout(config.timeout()).build();
-      StreamSafety.validate(
+      StreamPolicy.validate(
           activeConnection
               .jetStreamManagement(options)
               .getStreamInfo(config.stream())
               .getConfiguration(),
-          config);
+          config.stream(),
+          config.subjectPrefix(),
+          config.minReplicas(),
+          config.maxPayloadBytes());
       Headers headers = new Headers().add("Content-Type", "application/cloudevents+json");
       PublishOptions publishOptions =
           PublishOptions.builder().expectedStream(config.stream()).messageId(event.id()).build();

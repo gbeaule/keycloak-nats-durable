@@ -10,10 +10,22 @@ import liquibase.statement.core.RawSqlStatement;
 import liquibase.structure.core.Table;
 
 /**
- * PostgreSQL checks shared by pending events and metadata-only discard diagnostics. Keycloak
+ * PostgreSQL constraints, partial indexes and maintenance settings for the initial schema. Keycloak
  * installs extension schemas through Liquibase, not Hibernate schema generation.
  */
-public final class CaptureConstraintsMigration implements CustomSqlChange {
+public final class OutboxSchema implements CustomSqlChange {
+  private static final String VACUUM_SETTINGS =
+      """
+      SET (
+        autovacuum_vacuum_scale_factor = 0.02,
+        autovacuum_vacuum_threshold = 50,
+        autovacuum_analyze_scale_factor = 0.05,
+        autovacuum_analyze_threshold = 50,
+        toast.autovacuum_vacuum_scale_factor = 0.02,
+        toast.autovacuum_vacuum_threshold = 50
+      )
+      """;
+
   private static final String EVENT_CHECKS =
       """
       ADD CONSTRAINT CK_%s_ORDERING CHECK (
@@ -44,7 +56,25 @@ public final class CaptureConstraintsMigration implements CustomSqlChange {
         new RawSqlStatement(
             "ALTER TABLE "
                 + table(database, "KC_NATS_CAPTURE_COUNTER")
-                + " ADD CONSTRAINT CK_KC_NATS_COUNTER_SEQUENCE CHECK (LAST_SEQUENCE > 0)"));
+                + " ADD CONSTRAINT CK_KC_NATS_COUNTER_SEQUENCE CHECK (LAST_SEQUENCE > 0),"
+                + " ADD CONSTRAINT CK_KC_NATS_COUNTER_HEAD CHECK ("
+                + "(HEAD_EVENT_ID IS NULL AND HEAD_NEXT_ATTEMPT_AT IS NULL"
+                + " AND HEAD_CREATED_AT IS NULL)"
+                + " OR (HEAD_EVENT_ID IS NOT NULL AND HEAD_NEXT_ATTEMPT_AT IS NOT NULL"
+                + " AND HEAD_CREATED_AT IS NOT NULL))"));
+    statements.add(
+        new RawSqlStatement(
+            "CREATE INDEX IDX_KC_NATS_HEAD_DUE ON "
+                + table(database, "KC_NATS_CAPTURE_COUNTER")
+                + " (HEAD_NEXT_ATTEMPT_AT, HEAD_CREATED_AT, HEAD_EVENT_ID)"
+                + " WHERE HEAD_EVENT_ID IS NOT NULL"));
+    statements.add(
+        new RawSqlStatement(
+            "CREATE INDEX IDX_KC_NATS_INDEPENDENT_DUE ON "
+                + table(database, "KC_NATS_OUTBOX")
+                + " (NEXT_ATTEMPT_AT, CREATED_AT, ID) WHERE ORDERING_KEY IS NULL"));
+    statements.add(
+        new RawSqlStatement("ALTER TABLE " + table(database, "KC_NATS_OUTBOX") + VACUUM_SETTINGS));
     return statements.toArray(SqlStatement[]::new);
   }
 
@@ -58,7 +88,7 @@ public final class CaptureConstraintsMigration implements CustomSqlChange {
 
   @Override
   public String getConfirmationMessage() {
-    return "Installed capture and discard constraints";
+    return "Configured outbox constraints, indexes and autovacuum";
   }
 
   @Override

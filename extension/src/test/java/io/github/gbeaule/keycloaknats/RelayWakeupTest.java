@@ -99,6 +99,37 @@ class RelayWakeupTest {
     }
   }
 
+  @Test
+  void cooldownIgnoresPendingAndNewSignalsButClosesPromptly() throws Exception {
+    var wakeup = new RelayWakeup();
+    wakeup.signal();
+    var worker = new AtomicReference<Thread>();
+    try (var executor = Executors.newSingleThreadExecutor()) {
+      var waiting =
+          executor.submit(
+              () -> {
+                worker.set(Thread.currentThread());
+                return wakeup.awaitCooldown(60000);
+              });
+      try {
+        awaitWaiting(worker);
+        wakeup.signal();
+        awaitWaiting(worker);
+        assertFalse(waiting.isDone());
+      } finally {
+        wakeup.close();
+      }
+      assertFalse(waiting.get(1, TimeUnit.SECONDS));
+    }
+  }
+
+  @Test
+  void cooldownExpiresDespiteQueuedSignals() {
+    var wakeup = new RelayWakeup();
+    wakeup.signal();
+    assertTimeoutPreemptively(Duration.ofSeconds(1), () -> assertTrue(wakeup.awaitCooldown(10)));
+  }
+
   private static void awaitWaiting(AtomicReference<Thread> worker) {
     assertTimeoutPreemptively(
         Duration.ofSeconds(2),

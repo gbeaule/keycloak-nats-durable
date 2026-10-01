@@ -21,6 +21,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import io.github.gbeaule.keycloaknats.jetstream.StreamPolicy;
 import io.nats.client.Connection;
 import io.nats.client.JetStream;
 import io.nats.client.JetStreamManagement;
@@ -29,8 +30,11 @@ import io.nats.client.NKey;
 import io.nats.client.Nats;
 import io.nats.client.Options;
 import io.nats.client.PublishOptions;
+import io.nats.client.api.DiscardPolicy;
 import io.nats.client.api.PublishAck;
+import io.nats.client.api.RetentionPolicy;
 import io.nats.client.api.StorageType;
+import io.nats.client.api.StreamConfiguration;
 import io.nats.client.api.StreamInfo;
 import io.nats.client.impl.Headers;
 import java.io.IOException;
@@ -38,6 +42,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.SecureRandom;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -64,6 +69,17 @@ class JetStreamPublisherTest {
   private PublishAck ack;
   @TempDir Path directory;
 
+  private static StreamConfiguration.Builder safeStream() {
+    return StreamConfiguration.builder()
+        .name("KEYCLOAK_EVENTS")
+        .subjects("keycloak.events.>")
+        .storageType(StorageType.File)
+        .replicas(3)
+        .retentionPolicy(RetentionPolicy.WorkQueue)
+        .discardPolicy(DiscardPolicy.New)
+        .duplicateWindow(Duration.ofMinutes(2));
+  }
+
   @Test
   void defaultPublisherConnectsLazilyAndRejectsPublicationAfterClose() throws Exception {
     try (var nats = mockStatic(Nats.class)) {
@@ -84,10 +100,11 @@ class JetStreamPublisherTest {
     jetStream = mock(JetStream.class);
     when(connector.connect(any())).thenReturn(connection);
     when(connection.getStatus()).thenReturn(Connection.Status.CONNECTED);
+    when(connection.getMaxPayload()).thenReturn(1048576L);
     when(connection.jetStreamManagement(any(JetStreamOptions.class))).thenReturn(management);
     when(connection.jetStream(any(JetStreamOptions.class))).thenReturn(jetStream);
     var stream = mock(StreamInfo.class);
-    when(stream.getConfiguration()).thenReturn(StreamSafetyTest.safe().build());
+    when(stream.getConfiguration()).thenReturn(safeStream().build());
     when(management.getStreamInfo(config.stream())).thenReturn(stream);
     ack = mock(PublishAck.class);
     when(ack.getStream()).thenReturn(config.stream());
@@ -132,12 +149,26 @@ class JetStreamPublisherTest {
     publisher.publish(event);
     var changed = mock(StreamInfo.class);
     when(changed.getConfiguration())
-        .thenReturn(StreamSafetyTest.safe().storageType(StorageType.Memory).build());
+        .thenReturn(safeStream().storageType(StorageType.Memory).build());
     when(management.getStreamInfo(config.stream())).thenReturn(changed);
-    assertThrows(UnsafeStreamException.class, () -> publisher.publish(event));
+    assertThrows(StreamPolicy.Violation.class, () -> publisher.publish(event));
     verify(management, times(2)).getStreamInfo(config.stream());
     verify(jetStream)
         .publish(anyString(), any(Headers.class), any(byte[].class), any(PublishOptions.class));
+  }
+
+  @Test
+  void negotiatedServerLimitIncludesHeadersAndIsRecheckedAfterReconnect() throws Exception {
+    when(connection.getMaxPayload()).thenReturn(config.maxPayloadBytes() + 512L);
+    publisher.publish(event);
+    when(connection.getMaxPayload()).thenReturn(config.maxPayloadBytes() + 511L);
+    var failure = assertThrows(StreamPolicy.Violation.class, () -> publisher.publish(event));
+    assertEquals(
+        "Server max_payload must leave room for the configured payload and headers",
+        failure.getMessage());
+    verify(jetStream)
+        .publish(anyString(), any(Headers.class), any(byte[].class), any(PublishOptions.class));
+    verify(management).getStreamInfo(config.stream());
   }
 
   @ParameterizedTest
@@ -177,6 +208,7 @@ class JetStreamPublisherTest {
     when(connection.getStatus()).thenReturn(Connection.Status.CLOSED);
     var replacement = mock(Connection.class);
     when(replacement.getStatus()).thenReturn(Connection.Status.CONNECTED);
+    when(replacement.getMaxPayload()).thenReturn(1048576L);
     when(replacement.jetStreamManagement(any())).thenReturn(management);
     when(replacement.jetStream(any())).thenReturn(jetStream);
     when(connector.connect(any())).thenReturn(replacement);

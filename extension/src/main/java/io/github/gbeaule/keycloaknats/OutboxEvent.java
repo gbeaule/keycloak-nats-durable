@@ -153,7 +153,7 @@ public class OutboxEvent {
     return nextExpiryAttemptAt;
   }
 
-  void deferDiscard(long next) {
+  void deferResolution(long next) {
     // Move behind other ready work even if the cooldown elapses before the next worker scan.
     nextAttemptAt = next;
     nextExpiryAttemptAt = expiresAt == null ? null : Math.max(expiresAt, next);

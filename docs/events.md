@@ -42,7 +42,7 @@ An attributable user's envelope includes `data.ordering.key` and a positive deci
 The relay attempts a successor only after earlier positions resolve by publication or authorized
 local discard. Sequence gaps are valid, including with filtered subscriptions. Unattributable events
 omit ordering metadata and publish independently; no receiver library or full-feed subscription is
-required. Subjects are unchanged.
+required.
 
 Publication policy and database capture time are internal snapshots. They are not subscriber
 processing deadlines. Local discard emits no message and cannot retract a previously accepted or

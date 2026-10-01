@@ -18,6 +18,7 @@ import static org.mockito.Mockito.when;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.BooleanNode;
 import jakarta.persistence.EntityManager;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
@@ -44,10 +45,12 @@ class DurableEventListenerTest {
   DurableEventListener listener;
   Runnable wakeRelay;
   org.mockito.MockedStatic<CaptureRepository> capture;
+  org.mockito.MockedStatic<OutboxHeads> heads;
 
   @BeforeEach
   void setup() {
     capture = org.mockito.Mockito.mockStatic(CaptureRepository.class);
+    heads = org.mockito.Mockito.mockStatic(OutboxHeads.class);
     capture
         .when(() -> CaptureRepository.next(any(), any(), any()))
         .thenAnswer(
@@ -71,6 +74,7 @@ class DurableEventListenerTest {
   @AfterEach
   void closeCapture() {
     capture.close();
+    heads.close();
   }
 
   @Test
@@ -144,16 +148,21 @@ class DurableEventListenerTest {
   }
 
   @Test
-  void insertsAndFlushesBeforeEnlistingNotificationWithoutCommittingTheRequest() throws Exception {
+  void snapshotsImmediatelyAndPersistsInPrepareBeforeTheRequestCommits() throws Exception {
     var event = EventEnvelopeTest.login();
     event.setSessionId("login-session");
     listener.onEvent(event);
+    verifyNoInteractions(em);
+    capture.verifyNoInteractions();
+    event.setSessionId("changed-after-callback");
+    prepare();
     var captured = ArgumentCaptor.forClass(OutboxEvent.class);
     var order = inOrder(tx, em);
     order.verify(tx).isActive();
+    order.verify(tx).enlistPrepare(any());
+    order.verify(tx).enlistAfterCompletion(any());
     order.verify(em).persist(captured.capture());
     order.verify(em).flush();
-    order.verify(tx).enlistAfterCompletion(any());
     verifyNoMoreInteractions(tx, em);
     verifyNoInteractions(wakeRelay);
     var json = new ObjectMapper().readTree(captured.getValue().payload());
@@ -167,13 +176,10 @@ class DurableEventListenerTest {
   void persistenceFailureExplicitlyMarksRollbackOnly() {
     var failure = new IllegalStateException("disk-full");
     doThrow(failure).when(em).persist(any());
-    assertSame(
-        failure,
-        assertThrows(
-            IllegalStateException.class, () -> listener.onEvent(EventEnvelopeTest.login())));
+    listener.onEvent(EventEnvelopeTest.login());
+    assertSame(failure, assertThrows(IllegalStateException.class, this::prepare));
     verify(tx).setRollbackOnly();
     verify(em, never()).flush();
-    verify(tx, never()).enlistAfterCompletion(any());
     verifyNoInteractions(wakeRelay);
   }
 
@@ -188,11 +194,11 @@ class DurableEventListenerTest {
   }
 
   @Test
-  void flushFailureIsCaughtBeforeLeavingTheListener() {
+  void flushFailureInPreparePreventsCommit() {
     doThrow(new IllegalStateException("constraint failure")).when(em).flush();
-    assertThrows(IllegalStateException.class, () -> listener.onEvent(EventEnvelopeTest.login()));
+    listener.onEvent(EventEnvelopeTest.login());
+    assertThrows(IllegalStateException.class, this::prepare);
     verify(tx).setRollbackOnly();
-    verify(tx, never()).enlistAfterCompletion(any());
     verifyNoInteractions(wakeRelay);
   }
 
@@ -209,6 +215,7 @@ class DurableEventListenerTest {
   @Test
   void deletingDoesNotReadDeletedUser() {
     listener.onEvent(EventEnvelopeTest.admin(OperationType.DELETE), false);
+    prepare();
     verify(session, never()).users();
     verify(em).persist(any());
   }
@@ -216,6 +223,7 @@ class DurableEventListenerTest {
   @Test
   void actionDoesNotClaimAnEnablementObservation() {
     listener.onEvent(EventEnvelopeTest.admin(OperationType.ACTION), false);
+    prepare();
     verify(session, never()).users();
     var captured = ArgumentCaptor.forClass(OutboxEvent.class);
     verify(em).persist(captured.capture());
@@ -227,6 +235,9 @@ class DurableEventListenerTest {
     listener.onEvent(EventEnvelopeTest.login());
     listener.onEvent(EventEnvelopeTest.login());
     verifyNoInteractions(wakeRelay);
+    prepare();
+    verify(em, times(2)).persist(any(OutboxEvent.class));
+    verify(em).flush();
     var callback = ArgumentCaptor.forClass(KeycloakTransaction.class);
     verify(tx).enlistAfterCompletion(callback.capture());
     callback.getValue().begin();
@@ -242,17 +253,17 @@ class DurableEventListenerTest {
     callback.getValue().begin();
     callback.getValue().rollback();
     verifyNoInteractions(wakeRelay);
+    verifyNoInteractions(em);
+    capture.verifyNoInteractions();
   }
 
   @Test
   void fatalCaptureFailuresAlsoMarkRollbackAndNeverNotify() {
     var failure = new AssertionError("fatal persistence failure");
     doThrow(failure).when(em).persist(any());
-    assertSame(
-        failure,
-        assertThrows(AssertionError.class, () -> listener.onEvent(EventEnvelopeTest.login())));
+    listener.onEvent(EventEnvelopeTest.login());
+    assertSame(failure, assertThrows(IllegalStateException.class, this::prepare).getCause());
     verify(tx).setRollbackOnly();
-    verify(tx, never()).enlistAfterCompletion(any());
     verify(em, never()).flush();
     verifyNoInteractions(wakeRelay);
   }
@@ -313,6 +324,7 @@ class DurableEventListenerTest {
     listener = new DurableEventListener(session, BridgeConfig.from(Map.of()), wakeRelay, source);
     listener.onEvent(EventEnvelopeTest.admin(OperationType.UPDATE), false);
     verify(source).get();
+    prepare();
     var captured = ArgumentCaptor.forClass(OutboxEvent.class);
     verify(em).persist(captured.capture());
     assertEquals(
@@ -331,8 +343,7 @@ class DurableEventListenerTest {
         failure,
         assertThrows(
             IllegalStateException.class, () -> listener.onEvent(EventEnvelopeTest.login())));
-    verify(em).persist(any(OutboxEvent.class));
-    verify(em).flush();
+    verifyNoInteractions(em);
     verify(tx).setRollbackOnly();
     verifyNoInteractions(wakeRelay);
   }
@@ -351,6 +362,7 @@ class DurableEventListenerTest {
     when(user.isEnabled()).thenReturn(enabled);
     var event = EventEnvelopeTest.admin(OperationType.UPDATE);
     listener.onEvent(event, true);
+    prepare();
     var captured = ArgumentCaptor.forClass(OutboxEvent.class);
     verify(em).persist(captured.capture());
     var data = new ObjectMapper().readTree(captured.getValue().payload()).get("data");
@@ -398,6 +410,7 @@ class DurableEventListenerTest {
     listener =
         new DurableEventListener(session, BridgeConfig.from(Map.of()), wakeRelay, () -> filter);
     listener.onEvent(event, false);
+    prepare();
     var captured = ArgumentCaptor.forClass(OutboxEvent.class);
     verify(em).persist(captured.capture());
     var row = captured.getValue();
@@ -422,6 +435,7 @@ class DurableEventListenerTest {
     var context = request.getContext();
     when(session.getContext()).thenReturn(context);
     listener.onEvent(event, false);
+    prepare();
     var captured = ArgumentCaptor.forClass(OutboxEvent.class);
     verify(em).persist(captured.capture());
     var data = new ObjectMapper().readTree(captured.getValue().payload()).path("data");
@@ -442,6 +456,7 @@ class DurableEventListenerTest {
       when(session.users()).thenReturn(users);
     }
     listener.onEvent(EventEnvelopeTest.admin(OperationType.CREATE), false);
+    prepare();
     var captured = ArgumentCaptor.forClass(OutboxEvent.class);
     verify(em).persist(captured.capture());
     var data = new ObjectMapper().readTree(captured.getValue().payload()).get("data");
@@ -461,6 +476,7 @@ class DurableEventListenerTest {
     var nested = EventEnvelopeTest.admin(OperationType.UPDATE);
     nested.setResourcePath("users/target/role-mappings");
     listener.onEvent(nested, false);
+    prepare();
     verify(session, never()).realms();
     verify(session, never()).users();
     var captured = ArgumentCaptor.forClass(OutboxEvent.class);
@@ -488,5 +504,77 @@ class DurableEventListenerTest {
     listener.close();
     verify(tx, never()).commit();
     verify(em, never()).close();
+  }
+
+  private void prepare() {
+    var callback = ArgumentCaptor.forClass(KeycloakTransaction.class);
+    verify(tx).enlistPrepare(callback.capture());
+    callback.getValue().begin();
+    callback.getValue().commit();
+  }
+
+  @Test
+  void orderedLocksPreserveEachUsersCallbackSnapshots() throws Exception {
+    var event = EventEnvelopeTest.login();
+    event.setUserId("z");
+    event.setSessionId("z-first");
+    listener.onEvent(event);
+    event.setUserId("a");
+    event.setSessionId("a-first");
+    listener.onEvent(event);
+    event.setUserId("z");
+    event.setSessionId("z-second");
+    listener.onEvent(event);
+    verifyNoInteractions(em);
+    prepare();
+    var rows = ArgumentCaptor.forClass(OutboxEvent.class);
+    verify(em, times(3)).persist(rows.capture());
+    var mapper = new ObjectMapper();
+    var snapshots = new java.util.ArrayList<String>();
+    for (var row : rows.getAllValues()) {
+      snapshots.add(mapper.readTree(row.payload()).at("/data/sessionId").asText());
+    }
+    assertEquals(List.of("a-first", "z-first", "z-second"), snapshots);
+    String a = new EventOrdering(event.getRealmId(), "a", 1).key();
+    String z = new EventOrdering(event.getRealmId(), "z", 1).key();
+    heads.verify(() -> OutboxHeads.refresh(em, a));
+    heads.verify(() -> OutboxHeads.refresh(em, z));
+  }
+
+  @Test
+  void userlessEventsNeverUpdateHeads() {
+    var event = EventEnvelopeTest.login();
+    event.setUserId(null);
+    listener.onEvent(event);
+    prepare();
+    verify(em).persist(any());
+    heads.verifyNoInteractions();
+  }
+
+  @Test
+  void callbacksAfterPrepareFailClosed() {
+    listener.onEvent(EventEnvelopeTest.login());
+    prepare();
+    assertThrows(IllegalStateException.class, () -> listener.onEvent(EventEnvelopeTest.login()));
+    verify(tx).setRollbackOnly();
+    verify(em).persist(any());
+  }
+
+  @Test
+  void prepareEnlistmentFailureMarksRollbackBeforeAnyPersistence() {
+    doThrow(new IllegalStateException("cannot enlist")).when(tx).enlistPrepare(any());
+    assertThrows(IllegalStateException.class, () -> listener.onEvent(EventEnvelopeTest.login()));
+    verify(tx).setRollbackOnly();
+    verifyNoInteractions(em, wakeRelay);
+  }
+
+  @Test
+  void rollingBackPreparationDiscardsItsBuffer() {
+    listener.onEvent(EventEnvelopeTest.login());
+    var callback = ArgumentCaptor.forClass(KeycloakTransaction.class);
+    verify(tx).enlistPrepare(callback.capture());
+    callback.getValue().begin();
+    callback.getValue().rollback();
+    verifyNoInteractions(em, wakeRelay);
   }
 }

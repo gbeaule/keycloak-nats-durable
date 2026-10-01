@@ -55,6 +55,7 @@ class ValidationRunnerTest(unittest.TestCase):
         expected = {
             "ConsumerHardeningIT", "CustomSchemaIT", "UpgradeIT", "PerUserCaptureIT",
             "PerUserRelayIT", "OutboxDiscardIT", "OutboxAuditRetentionIT",
+            "NestedEventCaptureIT", "OutboxHeadIT", "OutboxSchemaIT",
             "PerUserPublicationIT", "PerUserSystemIT", "FilteringIT",
             "DurabilityIT#uncommittedAndRolledBackRowsAreNeverPublished+"
             "outboxWritesKeepSynchronousCommitForAuthenticationOnlyTransactions+"

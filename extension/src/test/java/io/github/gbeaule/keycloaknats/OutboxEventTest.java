@@ -118,10 +118,10 @@ class OutboxEventTest {
     var row = new OutboxEvent("id", "subject", "{}", 1000, "realm", "type", null, policy);
     assertEquals(row.expiresAt(), row.nextExpiryAttemptAt());
     row.failed(1500, "IOException");
-    row.deferDiscard(2000);
+    row.deferResolution(2000);
     assertEquals(2000, row.nextAttemptAt());
     assertEquals(61000L, row.nextExpiryAttemptAt());
-    row.deferDiscard(70000);
+    row.deferResolution(70000);
     assertEquals(70000, row.nextAttemptAt());
     assertEquals(70000L, row.nextExpiryAttemptAt());
     assertEquals(61000L, row.expiresAt());
@@ -130,7 +130,7 @@ class OutboxEventTest {
     assertEquals("IOException", row.lastError());
     assertFalse(row.publicationMayHaveOccurred());
     var unexpiring = CaptureFixtures.row("other", "subject", "{}", 0);
-    unexpiring.deferDiscard(2000);
+    unexpiring.deferResolution(2000);
     assertEquals(2000, unexpiring.nextAttemptAt());
     assertNull(unexpiring.nextExpiryAttemptAt());
   }
