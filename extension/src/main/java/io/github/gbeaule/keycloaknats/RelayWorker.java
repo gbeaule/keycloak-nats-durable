@@ -26,7 +26,8 @@ final class RelayWorker implements Runnable {
         }
         if (result.outcome() == OutboxRelay.Outcome.TRANSACTION_FAILED) {
           long cooldown =
-              Math.max(config.pollInterval().toMillis(), RetryBackoff.delay(config, failures));
+              Math.max(
+                  config.pollInterval().toMillis(), RetryBackoff.sampleDelay(config, failures));
           failures = Math.min(Long.SIZE - 1, failures + 1);
           delay = config.pollInterval().toMillis();
           if (!wakeup.awaitCooldown(cooldown)) {

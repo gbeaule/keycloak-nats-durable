@@ -19,6 +19,26 @@ import org.keycloak.events.admin.AuthDetails;
 import org.keycloak.events.admin.OperationType;
 
 class EventFilterTest {
+  @Test
+  void scopeOwnsItsCollectionsSoCallerMutationCannotChangeCaptureSelection() {
+    var realms = new java.util.HashSet<>(java.util.Set.of("realm"));
+    var clients = new java.util.HashSet<>(java.util.Set.of("app"));
+    var outcomes = new java.util.HashSet<>(java.util.Set.of("success"));
+    var subjects =
+        new java.util.ArrayList<>(
+            java.util.List.of(
+                new io.github.gbeaule.keycloaknats.routing.SubjectPattern("events.>")));
+    final var scope = new CaptureScope(realms, clients, outcomes, subjects);
+    realms.clear();
+    clients.clear();
+    outcomes.clear();
+    subjects.clear();
+    assertTrue(scope.accepts("realm", "app", null, "events.login"));
+    assertFalse(scope.accepts("other", "app", null, "events.login"));
+    assertThrows(UnsupportedOperationException.class, () -> scope.realmIds().add("*"));
+    assertThrows(UnsupportedOperationException.class, () -> scope.subjects().clear());
+  }
+
   @ParameterizedTest
   @ValueSource(strings = {"", "null", "[]", "42", "true", "\"policy\""})
   void nonObjectPoliciesFailAtTheRootWithSafeSchemaErrors(String json) {

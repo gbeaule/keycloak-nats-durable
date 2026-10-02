@@ -1,7 +1,6 @@
 package io.github.gbeaule.keycloaknats;
 
 import io.micrometer.core.instrument.Metrics;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
@@ -25,10 +24,15 @@ public final class DurableEventListenerFactory implements EventListenerProviderF
   private ExecutorService executor;
   private AuditCleanup auditCleanup;
   private RelayMetrics metrics;
-  private final List<RelayWakeup> wakeups = new CopyOnWriteArrayList<>();
-  private final List<OutboxRelay> relays = new ArrayList<>();
-  private final List<EventPublisher> publishers = new ArrayList<>();
+  private final List<WorkerResources> workers = new CopyOnWriteArrayList<>();
   private boolean closed;
+
+  private record WorkerResources(OutboxRelay relay, RelayWakeup wakeup, EventPublisher publisher) {
+    void stop() {
+      relay.stop();
+      wakeup.close();
+    }
+  }
 
   @Override
   public void init(Config.Scope scope) {
@@ -44,7 +48,10 @@ public final class DurableEventListenerFactory implements EventListenerProviderF
   @Override
   public EventListenerProvider create(KeycloakSession session) {
     return new DurableEventListener(
-        session, config, () -> wakeups.forEach(RelayWakeup::signal), filter::current);
+        session,
+        config,
+        () -> workers.forEach(worker -> worker.wakeup().signal()),
+        filter::current);
   }
 
   @Override
@@ -92,9 +99,7 @@ public final class DurableEventListenerFactory implements EventListenerProviderF
               publisher,
               config,
               metrics);
-      publishers.add(publisher);
-      wakeups.add(wakeup);
-      relays.add(relay);
+      workers.add(new WorkerResources(relay, wakeup, publisher));
       executor.execute(new RelayWorker(relay, wakeup, config));
     }
     logger.infof(
@@ -106,14 +111,13 @@ public final class DurableEventListenerFactory implements EventListenerProviderF
   public void close() {
     ExecutorService stoppingExecutor;
     AuditCleanup stoppingCleanup;
-    List<EventPublisher> stoppingPublishers;
+    List<WorkerResources> stoppingWorkers;
     synchronized (this) {
       if (closed) {
         return;
       }
       closed = true;
-      relays.forEach(OutboxRelay::stop);
-      wakeups.forEach(RelayWakeup::close);
+      workers.forEach(WorkerResources::stop);
       if (filter != null) {
         filter.close();
       }
@@ -122,7 +126,7 @@ public final class DurableEventListenerFactory implements EventListenerProviderF
       if (stoppingCleanup != null) {
         stoppingCleanup.stop();
       }
-      stoppingPublishers = List.copyOf(publishers);
+      stoppingWorkers = List.copyOf(workers);
     }
     // Do not hold the lifecycle monitor while closing sockets or waiting for the worker.
     if (stoppingExecutor != null) {
@@ -137,7 +141,7 @@ public final class DurableEventListenerFactory implements EventListenerProviderF
         Thread.currentThread().interrupt();
       }
     }
-    stoppingPublishers.forEach(EventPublisher::close);
+    stoppingWorkers.forEach(worker -> worker.publisher().close());
     if (stoppingCleanup != null) {
       stoppingCleanup.close();
     }

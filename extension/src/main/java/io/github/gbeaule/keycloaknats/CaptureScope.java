@@ -12,6 +12,13 @@ record CaptureScope(
     Set<String> clientIds,
     Set<String> outcomes,
     List<SubjectPattern> subjects) {
+  CaptureScope {
+    realmIds = Set.copyOf(realmIds);
+    clientIds = Set.copyOf(clientIds);
+    outcomes = Set.copyOf(outcomes);
+    subjects = List.copyOf(subjects);
+  }
+
   static CaptureScope all() {
     return new CaptureScope(
         Set.of("*"), Set.of("*"), Set.of("*"), List.of(new SubjectPattern(">")));

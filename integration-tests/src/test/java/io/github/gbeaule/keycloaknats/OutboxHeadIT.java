@@ -106,7 +106,7 @@ class OutboxHeadIT extends RelayIntegrationSupport {
   @Test
   void claimingUnrelatedWorkDoesNotScanOneHundredThousandBlockedSuccessors() throws Exception {
     capture("head", "hot");
-    change("head", row -> row.failed(Long.MAX_VALUE, "delayed"));
+    change("head", row -> row.recordPublicationFailure(Long.MAX_VALUE, "delayed"));
     execute(
         """
         INSERT INTO "relay-data".kc_nats_outbox

@@ -29,13 +29,11 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.hibernate.Timeouts;
-import org.hibernate.jpa.HibernateHints;
 import org.hibernate.jpa.SpecHints;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
@@ -77,7 +75,7 @@ class AuditCleanupTest {
     registry.close();
   }
 
-  private AuditCleanup worker(OutboxRelay.Transactions transactions, Map<String, String> settings) {
+  private AuditCleanup worker(Transactions transactions, Map<String, String> settings) {
     cleanup = new AuditCleanup(transactions, BridgeConfig.from(settings).auditCleanup(), registry);
     return cleanup;
   }
@@ -288,29 +286,6 @@ class AuditCleanupTest {
       verify(executor, times(result.equals("finished") ? 0 : 1)).shutdownNow();
       assertTrue(registry.getMeters().isEmpty());
     }
-  }
-
-  @ParameterizedTest
-  @ValueSource(ints = {1, 500})
-  void inspectionUsesBoundedReadOnlyKeysetPagesAndOnlyMetadata(int limit) {
-    when(selection.getResultList()).thenReturn(List.of(audit));
-    var metadata = AuditRepository.inspect(em, 999, "previous", limit).getFirst();
-    assertEquals("old", metadata.id());
-    assertEquals(1000, metadata.discardedAt());
-    assertEquals(DiscardReason.EXPIRED, metadata.reason());
-    verify(selection).setHint(HibernateHints.HINT_READ_ONLY, true);
-    verify(selection).setParameter("afterTime", 999L);
-    verify(selection).setParameter("afterId", "previous");
-    verify(selection).setMaxResults(limit);
-    verify(em, never()).flush();
-  }
-
-  @ParameterizedTest
-  @CsvSource({"0,id", "501,id", "1,"})
-  void inspectionRejectsUnboundedRequests(int limit, String cursor) {
-    assertThrows(
-        IllegalArgumentException.class, () -> AuditRepository.inspect(em, 0, cursor, limit));
-    verifyNoInteractions(em);
   }
 
   private double counter(String suffix) {

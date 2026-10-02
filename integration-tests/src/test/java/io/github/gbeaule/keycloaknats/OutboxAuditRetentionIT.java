@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.github.gbeaule.keycloaknats.consumer.OutboxReport;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
@@ -22,6 +23,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.keycloak.events.Event;
 import org.keycloak.events.EventType;
+import org.postgresql.ds.PGSimpleDataSource;
 
 /** Real PostgreSQL retention, concurrent claims, rollback and source-state isolation. */
 @SuppressWarnings("checkstyle:AbbreviationAsWordInName")
@@ -40,13 +42,15 @@ class OutboxAuditRetentionIT extends RelayIntegrationSupport {
     var originals = new ArrayList<OutboxEvent>();
     transaction(
         em -> {
-          long now = CaptureRepository.databaseTime(em);
+          long now = CaptureRepository.readDatabaseTime(em);
           for (int sequence = 1; sequence <= 12; sequence++) {
             var policy = sequence == 11 ? new PublicationPolicy(1, null) : PublicationPolicy.RETRY;
             var row =
                 envelope.serialize(
+                    UUID.randomUUID().toString(),
                     envelope.describe(event),
-                    CaptureRepository.next(em, event.getRealmId(), event.getUserId()),
+                    CaptureRepository.allocateNextSequence(
+                        em, event.getRealmId(), event.getUserId()),
                     sequence == 11 ? now - 2000 : now,
                     new ResolvedPublicationPolicy(policy, EventFilter.all().sha256(), null));
             em.persist(row);
@@ -76,16 +80,19 @@ class OutboxAuditRetentionIT extends RelayIntegrationSupport {
           storedIds(11));
       assertEquals(List.of(originals.get(10).id()), ids());
       cleanup.run();
+      assertTrue(
+          OutboxReport.inspect(database, "relay-data", 10, Long.MIN_VALUE, "", 10).isEmpty());
       transaction(
           em -> {
-            assertTrue(AuditRepository.inspect(em, Long.MIN_VALUE, "", 10).isEmpty());
-            var ordering = CaptureRepository.next(em, event.getRealmId(), event.getUserId());
+            var ordering =
+                CaptureRepository.allocateNextSequence(em, event.getRealmId(), event.getUserId());
             assertEquals(13, ordering.sequence());
             em.persist(
                 envelope.serialize(
+                    UUID.randomUUID().toString(),
                     envelope.describe(event),
                     ordering,
-                    CaptureRepository.databaseTime(em),
+                    CaptureRepository.readDatabaseTime(em),
                     new ResolvedPublicationPolicy(
                         PublicationPolicy.RETRY, EventFilter.all().sha256(), null)));
             OutboxHeads.refresh(em, ordering.key());
@@ -102,7 +109,7 @@ class OutboxAuditRetentionIT extends RelayIntegrationSupport {
   void exactCutoffIncludesEqualityAndUsesTheDiscardTimeIndex() throws Exception {
     transaction(
         em -> {
-          long now = CaptureRepository.databaseTime(em);
+          long now = CaptureRepository.readDatabaseTime(em);
           long cutoff = now - Duration.ofDays(7).toMillis();
           audit(em, "before", cutoff - 1);
           audit(em, "equal", cutoff);
@@ -110,7 +117,10 @@ class OutboxAuditRetentionIT extends RelayIntegrationSupport {
           em.flush();
           var claimed = AuditRepository.lockExpired(em, cutoff, 500);
           assertEquals(
-              List.of("before", "equal"), claimed.stream().map(a -> a.metadata().id()).toList());
+              List.of("before", "equal"),
+              claimed.stream()
+                  .map(a -> em.getEntityManagerFactory().getPersistenceUnitUtil().getIdentifier(a))
+                  .toList());
           claimed.forEach(em::remove);
         });
     assertEquals(List.of("after"), ids());
@@ -126,7 +136,7 @@ class OutboxAuditRetentionIT extends RelayIntegrationSupport {
   void statisticsCountAllRetainedRowsButAgeOnlyEligibleDiscards() {
     transaction(
         em -> {
-          long now = CaptureRepository.databaseTime(em);
+          long now = CaptureRepository.readDatabaseTime(em);
           final var retention = Duration.ofDays(7);
           audit(em, "recent", now - Duration.ofDays(1).toMillis());
           audit(em, "future", now + Duration.ofDays(1).toMillis());
@@ -150,7 +160,7 @@ class OutboxAuditRetentionIT extends RelayIntegrationSupport {
   void retentionChangesApplyToExistingHistoryAndZeroLeavesUncommittedAuditsAlone() {
     transaction(
         em -> {
-          long now = CaptureRepository.databaseTime(em);
+          long now = CaptureRepository.readDatabaseTime(em);
           audit(em, "old", now - Duration.ofDays(8).toMillis());
           audit(em, "recent", now - Duration.ofDays(1).toMillis());
         });
@@ -164,7 +174,7 @@ class OutboxAuditRetentionIT extends RelayIntegrationSupport {
         var metrics = new TestRegistry();
         var cleanup = cleanup(Map.of("audit-retention-seconds", "0"), metrics)) {
       owner.beginTransaction();
-      audit(owner, "uncommitted", CaptureRepository.databaseTime(owner));
+      audit(owner, "uncommitted", CaptureRepository.readDatabaseTime(owner));
       owner.flush();
       cleanup.run();
       assertEquals(List.of(), ids());
@@ -329,6 +339,10 @@ class OutboxAuditRetentionIT extends RelayIntegrationSupport {
     execute("CREATE ROLE audit_runtime LOGIN PASSWORD 'integration-only'");
     execute("GRANT USAGE ON SCHEMA \"relay-data\" TO audit_runtime");
     execute("GRANT SELECT, UPDATE, DELETE ON " + TABLE + " TO audit_runtime");
+    var auditDatabase = new PGSimpleDataSource();
+    auditDatabase.setUrl(postgres.getJdbcUrl());
+    auditDatabase.setUser("audit_runtime");
+    auditDatabase.setPassword("integration-only");
     try (var restricted =
             new Configuration()
                 .addAnnotatedClass(DiscardAudit.class)
@@ -342,13 +356,22 @@ class OutboxAuditRetentionIT extends RelayIntegrationSupport {
         var cleanup =
             new AuditCleanup(
                 work -> restricted.inTransaction(work::accept), config.auditCleanup(), metrics)) {
+      var page = OutboxReport.inspect(auditDatabase, "relay-data", 10, Long.MIN_VALUE, "", 2);
+      assertEquals(2, page.size());
+      var last = page.getLast();
+      assertEquals(
+          1,
+          OutboxReport.inspect(
+                  auditDatabase,
+                  "relay-data",
+                  10,
+                  ((Number) last.get("discarded_at")).longValue(),
+                  (String) last.get("id"),
+                  2)
+              .size());
       restricted.inTransaction(
           em -> {
             em.createNativeQuery("SET TRANSACTION READ ONLY").executeUpdate();
-            var page = AuditRepository.inspect(em, Long.MIN_VALUE, "", 2);
-            assertEquals(2, page.size());
-            var last = page.getLast();
-            assertEquals(1, AuditRepository.inspect(em, last.discardedAt(), last.id(), 2).size());
             assertEquals(3, AuditRepository.statistics(em, Duration.ofDays(7)).retainedRows());
           });
       cleanup.run();

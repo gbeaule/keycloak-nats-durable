@@ -12,10 +12,6 @@ record PublicationPolicy(Integer maxAgeSeconds, Integer maxFailures) {
   }
 
   /** Times are database epoch milliseconds; failures count completed, failed original publishes. */
-  boolean shouldDiscard(long capturedAt, long databaseNow, long failures) {
-    return discardReason(capturedAt, databaseNow, failures) != null;
-  }
-
   DiscardReason discardReason(long capturedAt, long databaseNow, long failures) {
     if (maxAgeSeconds != null
         && databaseNow >= Math.addExact(capturedAt, maxAgeSeconds.longValue() * 1000)) {

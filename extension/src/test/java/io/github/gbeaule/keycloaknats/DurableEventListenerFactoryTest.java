@@ -246,13 +246,13 @@ class DurableEventListenerFactoryTest {
   private static final class Lifecycle implements AutoCloseable {
     private final ExecutorService executor = mock(ExecutorService.class);
     private final KeycloakSessionFactory sessions = mock(KeycloakSessionFactory.class);
-    private final List<OutboxRelay.Transactions> transactions = new ArrayList<>();
-    private final List<OutboxRelay.Transactions> cleanupTransactions = new ArrayList<>();
+    private final List<Transactions> transactions = new ArrayList<>();
+    private final List<Transactions> cleanupTransactions = new ArrayList<>();
     private final MockedConstruction<AuditCleanup> cleanups =
         mockConstruction(
             AuditCleanup.class,
             (cleanup, context) ->
-                cleanupTransactions.add((OutboxRelay.Transactions) context.arguments().getFirst()));
+                cleanupTransactions.add((Transactions) context.arguments().getFirst()));
     private final MockedStatic<Executors> executors = mockStatic(Executors.class);
     private final MockedConstruction<JetStreamPublisher> publishers =
         mockConstruction(JetStreamPublisher.class);
@@ -260,8 +260,7 @@ class DurableEventListenerFactoryTest {
     private final MockedConstruction<OutboxRelay> relays =
         mockConstruction(
             OutboxRelay.class,
-            (relay, context) ->
-                transactions.add((OutboxRelay.Transactions) context.arguments().getFirst()));
+            (relay, context) -> transactions.add((Transactions) context.arguments().getFirst()));
     private final DurableEventListenerFactory factory = new DurableEventListenerFactory();
     private final ProviderEventListener events;
 

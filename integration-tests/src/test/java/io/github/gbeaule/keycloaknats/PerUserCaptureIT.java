@@ -307,7 +307,7 @@ class PerUserCaptureIT extends IntegrationSupport {
       assertFalse(row.payload().contains("maxAgeSeconds"));
       assertEquals(
           "1", objectMapper.readTree(row.payload()).at("/data/ordering/sequence").asText());
-      long now = CaptureRepository.databaseTime(session);
+      long now = CaptureRepository.readDatabaseTime(session);
       assertTrue(row.createdAt() <= now && row.createdAt() > now - 60_000);
     }
   }
@@ -654,9 +654,10 @@ class PerUserCaptureIT extends IntegrationSupport {
     var envelope = new EventEnvelope(BridgeConfig.from(Map.of()));
     var row =
         envelope.serialize(
+            UUID.randomUUID().toString(),
             envelope.describe(event),
-            CaptureRepository.next(em, event.getRealmId(), event.getUserId()),
-            CaptureRepository.databaseTime(em),
+            CaptureRepository.allocateNextSequence(em, event.getRealmId(), event.getUserId()),
+            CaptureRepository.readDatabaseTime(em),
             new ResolvedPublicationPolicy(
                 PublicationPolicy.RETRY, EventFilter.all().sha256(), null));
     em.persist(row);

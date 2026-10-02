@@ -65,9 +65,10 @@ class CaptureRepositoryTest {
     if (successAt == 0) {
       assertThrows(
           IllegalStateException.class,
-          () -> CaptureRepository.next(em, identity.realmId(), identity.userId()));
+          () -> CaptureRepository.allocateNextSequence(em, identity.realmId(), identity.userId()));
     } else {
-      var ordering = CaptureRepository.next(em, identity.realmId(), identity.userId());
+      var ordering =
+          CaptureRepository.allocateNextSequence(em, identity.realmId(), identity.userId());
       assertEquals(sequence, ordering.sequence());
       assertEquals(identity.key(), ordering.key());
     }
@@ -97,11 +98,11 @@ class CaptureRepositoryTest {
   @Test
   void independentCaptureReadsDatabaseTimeWithoutAccessingCounters() {
     var em = mock(EntityManager.class);
-    assertNull(CaptureRepository.next(em, "realm", null));
+    assertNull(CaptureRepository.allocateNextSequence(em, "realm", null));
     verifyNoInteractions(em);
     var query = mock(Query.class);
     when(em.createNativeQuery(anyString(), eq(Long.class))).thenReturn(query);
     when(query.getSingleResult()).thenReturn(123L);
-    assertEquals(123, CaptureRepository.databaseTime(em));
+    assertEquals(123, CaptureRepository.readDatabaseTime(em));
   }
 }

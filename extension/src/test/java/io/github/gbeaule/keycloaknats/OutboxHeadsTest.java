@@ -24,7 +24,7 @@ class OutboxHeadsTest {
     var em = mock(EntityManager.class);
     var counter = new CaptureCounter();
     var head = CaptureFixtures.row("next", "subject", "{}", 23);
-    head.failed(101, "retry");
+    head.recordPublicationFailure(101, "retry");
     var query = (TypedQuery<OutboxEvent>) mock(TypedQuery.class, RETURNS_SELF);
     var update = mock(Query.class, RETURNS_SELF);
     when(em.find(CaptureCounter.class, "key", LockModeType.PESSIMISTIC_WRITE)).thenReturn(counter);

@@ -12,6 +12,7 @@ import io.nats.client.api.StreamConfiguration;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Map;
+import java.util.UUID;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.keycloak.events.Event;
@@ -60,12 +61,14 @@ class NatsPayloadIT {
                 PublicationPolicy.RETRY, EventFilter.all().sha256(), null);
         int base =
             envelopes
-                .serialize(envelopes.describe(event), null, 1, policy)
+                .serialize(UUID.randomUUID().toString(), envelopes.describe(event), null, 1, policy)
                 .payload()
                 .getBytes(StandardCharsets.UTF_8)
                 .length;
         event.setError("x".repeat(config.maxPayloadBytes() - base));
-        var row = envelopes.serialize(envelopes.describe(event), null, 1, policy);
+        var row =
+            envelopes.serialize(
+                UUID.randomUUID().toString(), envelopes.describe(event), null, 1, policy);
         assertEquals(1048576, row.payload().getBytes(StandardCharsets.UTF_8).length);
         try (var publisher = new JetStreamPublisher(config)) {
           if (serverLimit == 1048576) {

@@ -3,6 +3,10 @@ package io.github.gbeaule.keycloaknats;
 import jakarta.persistence.EntityManager;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.List;
+import java.util.TreeMap;
+import java.util.UUID;
+import java.util.stream.Collectors;
 import org.hibernate.Session;
 import org.hibernate.engine.spi.SessionFactoryImplementor;
 import org.hibernate.persister.entity.AbstractEntityPersister;
@@ -13,11 +17,42 @@ import org.hibernate.persister.entity.AbstractEntityPersister;
 final class CaptureRepository {
   private CaptureRepository() {}
 
-  static EventOrdering next(EntityManager em, String realmId, String userId) {
+  record Capture(EventEnvelope.Description description, ResolvedPublicationPolicy policy) {
+    String orderingKey() {
+      return description.userId() == null
+          ? ""
+          : EventOrdering.keyFor(description.realmId(), description.userId());
+    }
+  }
+
+  static void persistBatch(EntityManager em, EventEnvelope envelopes, List<Capture> pending) {
+    // Compute grouping keys once; ordered groups preserve callback order within each user and give
+    // multi-user transactions one counter-lock order. This runs only during transaction prepare.
+    var groups =
+        pending.stream()
+            .collect(
+                Collectors.groupingBy(Capture::orderingKey, TreeMap::new, Collectors.toList()));
+    for (var captures : groups.values()) {
+      for (Capture capture : captures) {
+        var description = capture.description();
+        var ordering = allocateNextSequence(em, description.realmId(), description.userId());
+        long capturedAt = readDatabaseTime(em);
+        em.persist(
+            envelopes.serialize(
+                UUID.randomUUID().toString(), description, ordering, capturedAt, capture.policy()));
+      }
+    }
+    em.flush();
+    groups.keySet().stream()
+        .filter(key -> !key.isEmpty())
+        .forEach(key -> OutboxHeads.refresh(em, key));
+  }
+
+  static EventOrdering allocateNextSequence(EntityManager em, String realmId, String userId) {
     if (userId == null) {
       return null;
     }
-    var identity = new EventOrdering(realmId, userId, 1);
+    String key = EventOrdering.keyFor(realmId, userId);
     var session = em.unwrap(Session.class);
     var factory = session.getSessionFactory().unwrap(SessionFactoryImplementor.class);
     var mapping =
@@ -40,13 +75,13 @@ final class CaptureRepository {
     long sequence =
         session.doReturningWork(
             connection -> {
-              Long next = execute(connection, update, identity);
+              Long next = execute(connection, update, key, realmId, userId);
               if (next == null) {
                 // Concurrent first captures can conflict on either unique index. Handle both,
                 // then use a fresh statement snapshot to see the winner's committed counter.
-                next = execute(connection, insert, identity);
+                next = execute(connection, insert, key, realmId, userId);
                 if (next == null) {
-                  next = execute(connection, update, identity);
+                  next = execute(connection, update, key, realmId, userId);
                 }
               }
               if (next == null) {
@@ -57,19 +92,20 @@ final class CaptureRepository {
     return new EventOrdering(realmId, userId, sequence);
   }
 
-  private static Long execute(Connection connection, String sql, EventOrdering identity)
+  private static Long execute(
+      Connection connection, String sql, String key, String realmId, String userId)
       throws SQLException {
     try (var statement = connection.prepareStatement(sql)) {
-      statement.setString(1, identity.key());
-      statement.setString(2, identity.realmId());
-      statement.setString(3, identity.userId());
+      statement.setString(1, key);
+      statement.setString(2, realmId);
+      statement.setString(3, userId);
       try (var result = statement.executeQuery()) {
         return result.next() ? result.getLong(1) : null;
       }
     }
   }
 
-  static long databaseTime(EntityManager em) {
+  static long readDatabaseTime(EntityManager em) {
     return ((Number)
             em.createNativeQuery(
                     "SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)", Long.class)

@@ -10,7 +10,6 @@ import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
-import java.util.UUID;
 import org.keycloak.events.Event;
 import org.keycloak.events.admin.AdminEvent;
 import org.keycloak.events.admin.ResourceType;
@@ -85,7 +84,11 @@ public final class EventEnvelope {
       String type,
       String subject,
       long time,
-      Map<String, Object> data) {}
+      Map<String, Object> data) {
+    Description {
+      data = Map.copyOf(data);
+    }
+  }
 
   private static void putOrdering(Map<String, Object> data, EventOrdering ordering) {
     if (ordering == null) {
@@ -108,22 +111,17 @@ public final class EventEnvelope {
     // Optional fields are omitted from the wire format, rather than encoded as JSON null.
     data.values().removeIf(Objects::isNull);
     return new Description(
-        realm,
-        (String) data.get("userId"),
-        "io.keycloak." + typeSuffix,
-        subject,
-        time,
-        Map.copyOf(data));
+        realm, (String) data.get("userId"), "io.keycloak." + typeSuffix, subject, time, data);
   }
 
   OutboxEvent serialize(
+      String id,
       Description description,
       EventOrdering ordering,
       long capturedAt,
       ResolvedPublicationPolicy policy) {
     Map<String, Object> data = new LinkedHashMap<>(description.data());
     putOrdering(data, ordering);
-    String id = UUID.randomUUID().toString();
     Map<String, Object> envelope = new LinkedHashMap<>();
     envelope.put("specversion", "1.0");
     envelope.put("id", id);

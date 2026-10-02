@@ -105,10 +105,10 @@ abstract class RelayIntegrationSupport extends IntegrationSupport {
             id,
             "keycloak.events.relay." + id,
             "{\"id\":\"" + id + "\",\"value\":\"é\"}",
-            CaptureRepository.databaseTime(em),
+            CaptureRepository.readDatabaseTime(em),
             realm,
             "io.keycloak.user.login",
-            CaptureRepository.next(em, realm, user),
+            CaptureRepository.allocateNextSequence(em, realm, user),
             policy);
     em.persist(row);
     OutboxHeads.refresh(em, row.orderingKey());

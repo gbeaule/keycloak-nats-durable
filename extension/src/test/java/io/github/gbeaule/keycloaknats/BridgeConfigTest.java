@@ -293,7 +293,7 @@ class BridgeConfigTest {
       long attempts, long minimum, long maximum) {
     var config = BridgeConfig.from(Map.of());
     for (int i = 0; i < 50; i++) {
-      long delay = RetryBackoff.delay(config, attempts);
+      long delay = RetryBackoff.sampleDelay(config, attempts);
       assertTrue(delay >= minimum && delay <= maximum, "Unexpected retry delay: " + delay);
     }
   }
@@ -301,7 +301,7 @@ class BridgeConfigTest {
   @Test
   void minimalRetryIntervalRemainsPositiveWithoutRequiringRandomVariation() {
     var config = BridgeConfig.from(Map.of("retry-initial-ms", "1", "retry-max-ms", "1"));
-    assertEquals(1, RetryBackoff.delay(config, 0));
-    assertEquals(1, RetryBackoff.delay(config, Long.MAX_VALUE));
+    assertEquals(1, RetryBackoff.sampleDelay(config, 0));
+    assertEquals(1, RetryBackoff.sampleDelay(config, Long.MAX_VALUE));
   }
 }

@@ -1,8 +1,8 @@
 package io.github.gbeaule.keycloaknats;
 
+import io.github.gbeaule.keycloaknats.CaptureRepository.Capture;
 import jakarta.persistence.EntityManager;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.events.Event;
@@ -61,7 +61,7 @@ public final class DurableEventListener implements EventListenerProvider {
             return null;
           }
           String userId = AffectedUser.resolve(event, session);
-          Boolean enabled = enabledState(event, userId);
+          Boolean enabled = loadObservedEnabledState(event, userId);
           return policy
               .resolve(event, userId, enabled, subject)
               .map(resolved -> new Capture(envelopes.describe(event, userId, enabled), resolved))
@@ -69,7 +69,7 @@ public final class DurableEventListener implements EventListenerProvider {
         });
   }
 
-  private Boolean enabledState(AdminEvent event, String userId) {
+  private Boolean loadObservedEnabledState(AdminEvent event, String userId) {
     OperationType operation = event.getOperationType();
     boolean observesUserState =
         operation == OperationType.CREATE || operation == OperationType.UPDATE;
@@ -84,14 +84,6 @@ public final class DurableEventListener implements EventListenerProvider {
     }
     UserModel user = session.users().getUserById(realm, userId);
     return user == null ? null : user.isEnabled();
-  }
-
-  private record Capture(EventEnvelope.Description description, ResolvedPublicationPolicy policy) {
-    String orderingKey() {
-      return description.userId() == null
-          ? ""
-          : new EventOrdering(description.realmId(), description.userId(), 1).key();
-    }
   }
 
   private void stage(java.util.function.Supplier<Capture> event) {
@@ -157,25 +149,7 @@ public final class DurableEventListener implements EventListenerProvider {
   private void persistPending(EntityManager em) {
     prepared = true;
     try {
-      // Stable sorting retains each user's callback order and gives multi-user transactions
-      // one lock order. Nested error transactions finish before the caller acquires these locks.
-      for (Capture capture :
-          pending.stream().sorted(Comparator.comparing(Capture::orderingKey)).toList()) {
-        var description = capture.description();
-        var ordering = CaptureRepository.next(em, description.realmId(), description.userId());
-        long capturedAt = CaptureRepository.databaseTime(em);
-        em.persist(envelopes.serialize(description, ordering, capturedAt, capture.policy()));
-      }
-      em.flush();
-      for (String key :
-          pending.stream()
-              .map(Capture::orderingKey)
-              .filter(key -> !key.isEmpty())
-              .distinct()
-              .sorted()
-              .toList()) {
-        OutboxHeads.refresh(em, key);
-      }
+      CaptureRepository.persistBatch(em, envelopes, pending);
     } catch (RuntimeException failure) {
       session.getTransactionManager().setRollbackOnly();
       throw failure;

@@ -36,12 +36,15 @@ class KeycloakTransactionsTest {
   @Test
   void returnsOnlyAfterCommitAndUsesFreshSessionsForEachCall() {
     var fixture = new Lifecycle();
-    fixture.transactions.run(
-        em -> {
-          assertSame(fixture.em, em);
-          assertEquals(0, fixture.commits.get());
-        });
+    var result =
+        fixture.transactions.commit(
+            em -> {
+              assertSame(fixture.em, em);
+              assertEquals(0, fixture.commits.get());
+              return "committed result";
+            });
     assertEquals(1, fixture.commits.get());
+    assertEquals("committed result", result);
     fixture.transactions.run(em -> assertEquals(1, fixture.commits.get()));
     assertEquals(2, fixture.commits.get());
     assertEquals(2, fixture.sessions.get());
@@ -54,7 +57,8 @@ class KeycloakTransactionsTest {
     fixture.transactions.run(em -> {});
     fixture.rollbackSession = 2;
     var failure =
-        assertThrows(IllegalStateException.class, () -> fixture.transactions.run(em -> {}));
+        assertThrows(
+            IllegalStateException.class, () -> fixture.transactions.commit(em -> "uncommitted"));
     assertEquals("Keycloak transaction commit was not confirmed", failure.getMessage());
     assertEquals(1, fixture.commits.get());
     assertEquals(1, fixture.rollbacks.get());
@@ -92,11 +96,12 @@ class KeycloakTransactionsTest {
         assertThrows(
             IllegalStateException.class,
             () ->
-                fixture.transactions.run(
+                fixture.transactions.commit(
                     em -> {
                       if (phase.equals("work")) {
                         throw failure;
                       }
+                      return "uncommitted result";
                     })));
   }
 
@@ -131,6 +136,13 @@ class KeycloakTransactionsTest {
     try (var repository = mockStatic(OutboxRepository.class);
         var clock = mockStatic(CaptureRepository.class);
         var metrics = new RelayMetrics(registry)) {
+      repository
+          .when(
+              () -> OutboxRepository.discardIfEligible(any(), any(), org.mockito.Mockito.anyLong()))
+          .thenCallRealMethod();
+      repository
+          .when(() -> OutboxRepository.deferResolution(any(), any(), org.mockito.Mockito.anyLong()))
+          .thenCallRealMethod();
       repository
           .when(() -> OutboxRepository.lockNextDue(fixture.em, 0))
           .thenReturn(Optional.of(row));

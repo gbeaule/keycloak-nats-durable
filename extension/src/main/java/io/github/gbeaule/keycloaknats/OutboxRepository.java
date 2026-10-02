@@ -24,6 +24,30 @@ final class OutboxRepository {
 
   private OutboxRepository() {}
 
+  static DiscardReason recordFailureAndScheduleRetry(
+      EntityManager em, OutboxEvent row, long now, long retryAt, String category) {
+    row.recordPublicationFailure(retryAt, category);
+    DiscardReason reason = discardIfEligible(em, row, now);
+    if (reason == null) {
+      OutboxHeads.refresh(em, row.orderingKey());
+    }
+    return reason;
+  }
+
+  static void deferResolution(EntityManager em, OutboxEvent row, long retryAt) {
+    row.deferResolution(retryAt);
+    OutboxHeads.refresh(em, row.orderingKey());
+  }
+
+  static DiscardReason discardIfEligible(EntityManager em, OutboxEvent row, long now) {
+    var reason =
+        row.publicationPolicy().policy().discardReason(row.createdAt(), now, row.attempts());
+    if (reason != null) {
+      discard(em, row, reason, now);
+    }
+    return reason;
+  }
+
   static Optional<OutboxEvent> lockNextExpired(EntityManager entityManager, long now) {
     // Expiry applies to queued successors and delayed retries, but never races a locked send.
     return lock(

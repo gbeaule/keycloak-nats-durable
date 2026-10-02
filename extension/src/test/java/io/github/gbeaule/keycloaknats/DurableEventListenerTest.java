@@ -50,15 +50,16 @@ class DurableEventListenerTest {
   @BeforeEach
   void setup() {
     capture = org.mockito.Mockito.mockStatic(CaptureRepository.class);
+    capture.when(() -> CaptureRepository.persistBatch(any(), any(), any())).thenCallRealMethod();
     heads = org.mockito.Mockito.mockStatic(OutboxHeads.class);
     capture
-        .when(() -> CaptureRepository.next(any(), any(), any()))
+        .when(() -> CaptureRepository.allocateNextSequence(any(), any(), any()))
         .thenAnswer(
             call ->
                 call.getArgument(2) == null
                     ? null
                     : new EventOrdering(call.getArgument(1), call.getArgument(2), 1));
-    capture.when(() -> CaptureRepository.databaseTime(any())).thenReturn(1234L);
+    capture.when(() -> CaptureRepository.readDatabaseTime(any())).thenReturn(1234L);
     session = mock(KeycloakSession.class);
     em = mock(EntityManager.class);
     tx = mock(KeycloakTransactionManager.class);

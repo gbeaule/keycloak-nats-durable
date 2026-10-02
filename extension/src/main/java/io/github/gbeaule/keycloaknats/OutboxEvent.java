@@ -195,7 +195,7 @@ public class OutboxEvent {
   }
 
   /** Schedules another retry even after the attempt counter reaches its storage limit. */
-  public void failed(long next, String category) {
+  public void recordPublicationFailure(long next, String category) {
     if (attempts < Long.MAX_VALUE) {
       attempts++;
     }

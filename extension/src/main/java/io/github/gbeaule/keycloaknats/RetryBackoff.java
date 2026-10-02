@@ -10,7 +10,12 @@ public final class RetryBackoff {
    * Equal jitter avoids synchronized retry storms; arithmetic is bounded even after years of
    * failure.
    */
-  public static long delay(BridgeConfig config, long previousAttempts) {
+  public static long sampleDelay(BridgeConfig config, long previousAttempts) {
+    long ceiling = ceiling(config, previousAttempts);
+    return ThreadLocalRandom.current().nextLong(Math.max(1, ceiling / 2), ceiling + 1);
+  }
+
+  static long ceiling(BridgeConfig config, long previousAttempts) {
     long ceiling = config.retryInitial().toMillis();
     for (int i = 0;
         i < Math.min(Long.SIZE - 1, Math.max(0, previousAttempts))
@@ -18,7 +23,6 @@ public final class RetryBackoff {
         i++) {
       ceiling = Math.min(config.retryMax().toMillis(), ceiling * 2);
     }
-    long floor = Math.max(1, ceiling / 2);
-    return ThreadLocalRandom.current().nextLong(floor, ceiling + 1);
+    return ceiling;
   }
 }
