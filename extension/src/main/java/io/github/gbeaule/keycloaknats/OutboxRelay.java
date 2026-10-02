@@ -2,23 +2,13 @@ package io.github.gbeaule.keycloaknats;
 
 import jakarta.persistence.EntityManager;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Consumer;
-import java.util.function.Function;
 import org.jboss.logging.Logger;
 
 /** Resolves locked rows through confirmed publication or policy-authorized local discard. */
 public final class OutboxRelay implements Runnable {
   private static final Logger logger = Logger.getLogger(OutboxRelay.class);
 
-  /** Opens a fresh Keycloak session and commits or rolls back the supplied database work. */
-  @FunctionalInterface
-  public interface Transactions {
-    /** Returns only after commit; each call owns a fresh persistence context. */
-    void run(Consumer<EntityManager> work);
-  }
-
   enum Outcome {
-    PREPARED,
     PUBLISHED,
     RETRY_SCHEDULED,
     DISCARDED_EXPIRED,
@@ -37,15 +27,23 @@ public final class OutboxRelay implements Runnable {
     }
   }
 
-  private record Claim(String id, long version) {}
+  private sealed interface Preparation permits Claim, Resolution {}
 
-  record Resolution(Outcome outcome, boolean uncertainDiscard) {
+  private record Claim(String id, long version) implements Preparation {}
+
+  record Resolution(Outcome outcome, boolean uncertainDiscard) implements Preparation {
     Resolution(Outcome outcome) {
       this(outcome, false);
     }
-  }
 
-  private record Preparation(Claim claim, Resolution resolution) {}
+    static Resolution discarded(OutboxEvent row, DiscardReason reason) {
+      return new Resolution(
+          reason == DiscardReason.EXPIRED
+              ? Outcome.DISCARDED_EXPIRED
+              : Outcome.DISCARDED_MAX_FAILURES,
+          row.publicationMayHaveOccurred());
+    }
+  }
 
   private final Transactions transactions;
   private final EventPublisher publisher;
@@ -87,22 +85,23 @@ public final class OutboxRelay implements Runnable {
     try {
       while (processed < config.batchSize() && !isStopped()) {
         unresolved.set(null);
-        Preparation prepared = transact(em -> prepareNext(em, unresolved));
+        Preparation prepared = transactions.commit(em -> prepareNext(em, unresolved));
         unresolved.set(null);
-        if (prepared.claim() != null && isStopped()) {
+        if (prepared instanceof Claim && isStopped()) {
           outcome = Outcome.STOPPED;
           break;
         }
-        if (prepared.resolution().outcome() == Outcome.NO_WORK
-            || prepared.resolution().outcome() == Outcome.STOPPED) {
-          outcome = prepared.resolution().outcome();
+        if (prepared instanceof Resolution result
+            && (result.outcome() == Outcome.NO_WORK || result.outcome() == Outcome.STOPPED)) {
+          outcome = result.outcome();
           break;
         }
         processed++;
         Resolution resolution =
-            prepared.claim() == null
-                ? prepared.resolution()
-                : transact(em -> publishPrepared(em, prepared.claim(), unresolved));
+            switch (prepared) {
+              case Claim claim -> transactions.commit(em -> publishPrepared(em, claim, unresolved));
+              case Resolution result -> result;
+            };
         if (metrics != null) {
           metrics.committed(resolution);
         }
@@ -136,7 +135,7 @@ public final class OutboxRelay implements Runnable {
   }
 
   private Preparation prepareNext(EntityManager em, AtomicReference<Claim> unresolved) {
-    long now = CaptureRepository.databaseTime(em);
+    long now = CaptureRepository.readDatabaseTime(em);
     // Share the batch allowance fairly, including when batch-size is one.
     boolean expiryFirst = preferExpiry;
     preferExpiry = !preferExpiry;
@@ -151,28 +150,28 @@ public final class OutboxRelay implements Runnable {
               : OutboxRepository.lockNextExpired(em, now);
     }
     if (isStopped()) {
-      return new Preparation(null, new Resolution(Outcome.STOPPED));
+      return new Resolution(Outcome.STOPPED);
     }
     if (next.isEmpty()) {
-      return new Preparation(null, new Resolution(Outcome.NO_WORK));
+      return new Resolution(Outcome.NO_WORK);
     }
     OutboxEvent row = next.get();
     unresolved.set(new Claim(row.id(), row.version()));
-    Resolution discarded = discardIfEligible(em, row, now);
-    if (discarded != null) {
-      return new Preparation(null, discarded);
+    var reason = OutboxRepository.discardIfEligible(em, row, now);
+    if (reason != null) {
+      return Resolution.discarded(row, reason);
     }
     // Commit intent before any network operation. Rollback after a send cannot erase ambiguity.
     row.markPublicationIntent();
     em.flush();
-    return new Preparation(new Claim(row.id(), row.version()), new Resolution(Outcome.PREPARED));
+    return new Claim(row.id(), row.version());
   }
 
   private Resolution publishPrepared(
       EntityManager em, Claim claim, AtomicReference<Claim> unresolved) {
     var next =
         OutboxRepository.lockPrepared(
-            em, claim.id(), claim.version(), CaptureRepository.databaseTime(em));
+            em, claim.id(), claim.version(), CaptureRepository.readDatabaseTime(em));
     // Reacquire the same unchanged head in a fresh transaction, retaining ownership through send.
     if (isStopped()) {
       return new Resolution(Outcome.STOPPED);
@@ -182,9 +181,10 @@ public final class OutboxRelay implements Runnable {
     }
     OutboxEvent row = next.get();
     unresolved.set(new Claim(row.id(), row.version()));
-    Resolution discarded = discardIfEligible(em, row, CaptureRepository.databaseTime(em));
-    if (discarded != null) {
-      return discarded;
+    var reason =
+        OutboxRepository.discardIfEligible(em, row, CaptureRepository.readDatabaseTime(em));
+    if (reason != null) {
+      return Resolution.discarded(row, reason);
     }
     try {
       publisher.publish(row);
@@ -198,36 +198,26 @@ public final class OutboxRelay implements Runnable {
       if (metrics != null) {
         metrics.publicationFailed();
       }
-      long now = CaptureRepository.databaseTime(em);
-      row.failed(now + RetryBackoff.delay(config, row.attempts()), e.getClass().getSimpleName());
-      discarded = discardIfEligible(em, row, now);
-      if (discarded != null) {
-        return discarded;
+      long now = CaptureRepository.readDatabaseTime(em);
+      reason =
+          OutboxRepository.recordFailureAndScheduleRetry(
+              em,
+              row,
+              now,
+              now + RetryBackoff.sampleDelay(config, row.attempts()),
+              e.getClass().getSimpleName());
+      if (reason != null) {
+        return Resolution.discarded(row, reason);
       }
       if (row.attempts() == 1 || (row.attempts() & (row.attempts() - 1)) == 0) {
         logger.warnf(
             "NATS outbox publish pending; id=%s attempts=%d retryAt=%d reason=%s",
             row.id(), row.attempts(), row.nextAttemptAt(), NatsDiagnostics.describe(e));
       }
-      OutboxHeads.refresh(em, row.orderingKey());
       return new Resolution(Outcome.RETRY_SCHEDULED);
     }
     OutboxRepository.remove(em, row);
     return new Resolution(Outcome.PUBLISHED);
-  }
-
-  private Resolution discardIfEligible(EntityManager em, OutboxEvent row, long now) {
-    var reason =
-        row.publicationPolicy().policy().discardReason(row.createdAt(), now, row.attempts());
-    if (reason == null) {
-      return null;
-    }
-    OutboxRepository.discard(em, row, reason, now);
-    return new Resolution(
-        reason == DiscardReason.EXPIRED
-            ? Outcome.DISCARDED_EXPIRED
-            : Outcome.DISCARDED_MAX_FAILURES,
-        row.publicationMayHaveOccurred());
   }
 
   private void deferFailedResolution(Claim claim) {
@@ -237,21 +227,16 @@ public final class OutboxRelay implements Runnable {
           em ->
               OutboxRepository.lockUnchanged(em, claim.id(), claim.version())
                   .ifPresent(
-                      row -> {
-                        row.deferResolution(
-                            CaptureRepository.databaseTime(em) + RetryBackoff.delay(config, 0));
-                        OutboxHeads.refresh(em, row.orderingKey());
-                      }));
+                      row ->
+                          OutboxRepository.deferResolution(
+                              em,
+                              row,
+                              CaptureRepository.readDatabaseTime(em)
+                                  + RetryBackoff.sampleDelay(config, 0))));
     } catch (RuntimeException e) {
       // A database-wide failure may also prevent backoff; leave the original unresolved.
       logger.errorf("NATS outbox resolution backoff failed; %s", NatsDiagnostics.describe(e));
     }
-  }
-
-  private <T> T transact(Function<EntityManager, T> work) {
-    var result = new AtomicReference<T>();
-    transactions.run(em -> result.set(work.apply(em)));
-    return result.get();
   }
 
   private boolean isStopped() {

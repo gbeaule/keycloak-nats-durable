@@ -125,6 +125,7 @@ class OutboxRelayTest {
     assertTrue(row.nextAttemptAt() >= before + 500);
     assertTrue(row.nextAttemptAt() <= after + 1000);
     assertEquals("IOException", row.lastError());
+    headUpdates.verify(() -> OutboxHeads.refresh(em, row.orderingKey()));
   }
 
   @Test
@@ -433,7 +434,7 @@ class OutboxRelayTest {
   @Test
   void failureLimitIsCheckedBeforeIntent() {
     usePolicy(new PublicationPolicy(null, 1));
-    row.failed(0, "IOException");
+    row.recordPublicationFailure(0, "IOException");
     var result = relay.runBatch();
     assertEquals(1, result.exhausted());
     assertEquals(1, result.discarded());
@@ -455,8 +456,10 @@ class OutboxRelayTest {
     assertEquals(1, registry.get("knd.publication.failures").counter().count());
     assertEquals(1, row.attempts());
     assertTrue(row.publicationMayHaveOccurred());
-    verify(em).persist(any(DiscardAudit.class));
-    verify(em).remove(row);
+    var order = inOrder(em);
+    order.verify(em).persist(any(DiscardAudit.class));
+    order.verify(em).remove(row);
+    headUpdates.verify(() -> OutboxHeads.refresh(em, row.orderingKey()));
   }
 
   @Test
@@ -550,6 +553,7 @@ class OutboxRelayTest {
     assertEquals(1, registry.get("knd.publication.transaction.failures").counter().count());
     assertEquals(0, registry.get("knd.publication.failures").counter().count());
     assertEquals(0, registry.get("knd.publication.retries").counter().count());
+    headUpdates.verify(() -> OutboxHeads.refresh(em, row.orderingKey()));
   }
 
   @Test

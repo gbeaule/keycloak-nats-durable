@@ -36,6 +36,31 @@ import org.keycloak.events.admin.ResourceType;
 class EventEnvelopeTest {
   private final EventEnvelope encoder = new EventEnvelope(BridgeConfig.from(Map.of()));
 
+  @Test
+  void descriptionFreezesItsDataAndExplicitIdentityMakesSerializationRepeatable() {
+    var original = encoder.describe(login());
+    var data = new java.util.LinkedHashMap<>(original.data());
+    var snapshot =
+        new EventEnvelope.Description(
+            original.realmId(),
+            original.userId(),
+            original.type(),
+            original.subject(),
+            original.time(),
+            data);
+    var ordering = new EventOrdering(original.realmId(), original.userId(), 1);
+    final var first =
+        encoder.serialize("fixed-id", snapshot, ordering, 1234, CaptureFixtures.RETRY);
+    data.put("userId", "changed");
+    assertEquals("target-user", snapshot.data().get("userId"));
+    assertThrows(
+        UnsupportedOperationException.class, () -> snapshot.data().put("userId", "changed"));
+    var second = encoder.serialize("fixed-id", snapshot, ordering, 1234, CaptureFixtures.RETRY);
+    assertEquals("fixed-id", first.id());
+    assertEquals(first.payload(), second.payload());
+    assertFalse(snapshot.data().containsKey("ordering"));
+  }
+
   static Event login() {
     Event event = new Event();
     event.setType(EventType.LOGIN);

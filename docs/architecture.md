@@ -22,18 +22,17 @@ The listener stores selected events in an outbox using Keycloak's existing persi
 failure marks the transaction for rollback. NATS availability is outside the request transaction, so
 a broker outage allows account operations to continue while the database has capacity.
 
-Callbacks freeze selected event data and publication policies without taking counter locks. The
-transaction's prepare phase allocates sequences and persists the batch before the database commits.
-Nested error-event transactions can therefore finish before their caller prepares. Counters are
-acquired in a consistent order across users; each user's callback order within a transaction is
-preserved. Separate transactions receive positions in preparation/commit order. Database capture
-time is recorded during persistence, and failed preparation rolls back the owning transaction.
+Capture separates immutable event and policy snapshots from persistence. Callbacks freeze the
+selected data; transaction preparation stores the batch with its per-user positions. This permits
+nested error-event transactions to finish without waiting on their caller's capture locks.
+Each user's callback order is preserved, and concurrent transactions serialize through durable
+counters. Counters survive user deletion and outbox draining.
 
-Counters survive user deletion and outbox draining. They also point to each user's earliest pending
-event. Capture and resolution update this indexed head atomically with outbox changes, so claims
-skip blocked histories. Counter locks cover short database work and are never held during broker
-requests. Event identity, payload and captured policy stay immutable; sequence allocation and queue
-progress are durable state written explicitly by the repositories.
+Policy evaluation, envelope construction and retry bounds return values. Database reads, random
+identity and delay generation, publication and lifecycle changes happen at explicit effect
+boundaries. Repository commands keep event changes and the indexed pending head in one transaction;
+transaction results become visible to workers only after commit is confirmed. Types, database
+constraints and tests define the detailed invariants.
 
 For supported admin requests, affected-user identity comes from Keycloak's routed `user-id`
 parameter after matching the request to the event's realm and resource. Capture resolves this ID
@@ -59,9 +58,27 @@ unresolved event can be attempted. A delayed retry or another worker's lock cann
 eligible. Userless events remain independent. PostgreSQL row locks coordinate workers without a
 leader or lease service; a failed node's work becomes available when those locks are released.
 
-Before sending, the relay commits publication intent, then reacquires the unchanged eligible head.
-It retains that row lock through the broker request and resolution transaction. Confirmed NATS
-acceptance followed by committed outbox removal ends the extension's publication responsibility.
+```mermaid
+sequenceDiagram
+    participant K as Keycloak request
+    participant D as PostgreSQL
+    participant R as Relay
+    participant N as NATS JetStream
+    K->>K: Freeze selected events and policy
+    K->>D: Prepare capture and commit with account changes
+    K-->>R: Wake after commit
+    R->>D: Lock eligible row, record intent and commit
+    R->>D: Reacquire unchanged eligible row
+    Note over R,D: Hold event row ownership through publication
+    R->>N: Publish original ID, subject and payload
+    N-->>R: Acknowledgement or failure
+    R->>D: Commit resolution and pending-head update
+```
+
+Committed intent preserves uncertainty across crashes. A fresh ownership check prevents a stale
+claim from publishing newer state. Confirmed NATS acceptance followed by committed outbox removal
+ends the extension's publication responsibility. Counter locks cover short database work and are
+never held during broker requests.
 
 Holding the transaction through publication simplifies ownership and crash recovery, at the cost of
 occupying a database connection during bounded broker requests. Local commit notifications reduce
@@ -79,16 +96,26 @@ Pending events retry indefinitely by default. Explicit event policies may allow 
 failed attempts, or either limit. Age starts at database capture time, independently of the source
 event timestamp. Policy snapshots survive filter reloads, which affect future captures only.
 
-Fair expiry scans share the relay's bounded work allowance and can discard queued successors or
-delayed retries without contacting NATS. Discard inserts metadata-only diagnostics and removes the
-original atomically. A committed discard releases that sequence position without publishing a
-replacement, tombstone or control message. If publication intent was recorded, the audit conservatively
-reports an unknown outcome: discard cannot retract an accepted or in-flight original.
+```mermaid
+stateDiagram-v2
+    [*] --> Pending: Capture commits
+    Pending --> IntentRecorded: Publication intent commits
+    IntentRecorded --> IntentRecorded: Retry with original identity
+    IntentRecorded --> Published: ACK and removal commit
+    Pending --> Discarded: Captured policy permits discard
+    IntentRecorded --> Discarded: Captured policy permits discard
+    Published --> [*]
+    Discarded --> [*]
+```
 
-A failed row resolution backs off through a separate transaction that checks the original version.
-Both relay scans respect this cooldown, allowing other users to progress while the original continues
-to block its own successors. Database failures do not consume the publication-failure allowance.
-Workers also apply a separate exponential failure cooldown that capture notifications cannot bypass.
+These are conceptual states, not a persisted status field. Expiry can resolve queued successors or
+delayed retries without contacting NATS. Discard atomically replaces the original with metadata-only
+diagnostics, releasing its position without a replacement message. Recorded intent makes that audit
+conservatively report an unknown outcome: discard cannot retract an accepted or in-flight original.
+
+After an unconfirmed resolution, the relay rechecks persisted state before deferring further work.
+Database rollback does not consume the publication-failure allowance. Bounded, fair scans and worker
+cooldowns let unrelated users progress during failures.
 
 An independent worker removes diagnostic history after seven days by default. Cleanup uses bounded
 transactions and works during broker outages; retention zero makes history eligible on the next
@@ -129,8 +156,9 @@ a later disablement or deletion. Receiving applications remain responsible for t
 
 | Area | Responsibility and source |
 | --- | --- |
-| Capture | [Listener](../extension/src/main/java/io/github/gbeaule/keycloaknats/DurableEventListener.java), [policy](../extension/src/main/java/io/github/gbeaule/keycloaknats/EventFilter.java) and [envelope](../extension/src/main/java/io/github/gbeaule/keycloaknats/EventEnvelope.java) |
+| Capture | [Listener](../extension/src/main/java/io/github/gbeaule/keycloaknats/DurableEventListener.java), [batch persistence](../extension/src/main/java/io/github/gbeaule/keycloaknats/CaptureRepository.java), [policy](../extension/src/main/java/io/github/gbeaule/keycloaknats/EventFilter.java) and [envelope](../extension/src/main/java/io/github/gbeaule/keycloaknats/EventEnvelope.java) |
 | Outbox | [Initial schema](../extension/src/main/resources/META-INF/nats-outbox-changelog.xml), [row claims](../extension/src/main/java/io/github/gbeaule/keycloaknats/OutboxRepository.java) and [relay](../extension/src/main/java/io/github/gbeaule/keycloaknats/OutboxRelay.java) |
+| Transactions | [Committed-result boundary](../extension/src/main/java/io/github/gbeaule/keycloaknats/Transactions.java) and [Keycloak completion checks](../extension/src/main/java/io/github/gbeaule/keycloaknats/KeycloakTransactions.java) |
 | Transport | [Publisher](../extension/src/main/java/io/github/gbeaule/keycloaknats/JetStreamPublisher.java) and shared [NATS transport module](../nats-transport/src/main/java/io/github/gbeaule/keycloaknats) |
 | Operations | [Lifecycle](../extension/src/main/java/io/github/gbeaule/keycloaknats/DurableEventListenerFactory.java), [publication metrics](../extension/src/main/java/io/github/gbeaule/keycloaknats/RelayMetrics.java), [audit cleanup](../extension/src/main/java/io/github/gbeaule/keycloaknats/AuditCleanup.java) and [read-only reports](../consumer-example/src/main/java/io/github/gbeaule/keycloaknats/consumer/OutboxReport.java) |
 | Example receiver | [Inbox processing](../consumer-example/src/main/java/io/github/gbeaule/keycloaknats/consumer/InboxProcessor.java) and [worker](../consumer-example/src/main/java/io/github/gbeaule/keycloaknats/consumer/ConsumerWorker.java) |

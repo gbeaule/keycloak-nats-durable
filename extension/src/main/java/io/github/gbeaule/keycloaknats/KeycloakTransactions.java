@@ -8,7 +8,7 @@ import org.keycloak.models.AbstractKeycloakTransaction;
 import org.keycloak.models.KeycloakSessionTask;
 
 /** Confirms commit after the Keycloak runner has completed and closed its managed session. */
-final class KeycloakTransactions implements OutboxRelay.Transactions {
+final class KeycloakTransactions implements Transactions {
   private final Consumer<KeycloakSessionTask> runner;
 
   KeycloakTransactions(Consumer<KeycloakSessionTask> runner) {

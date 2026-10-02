@@ -111,7 +111,8 @@ class PerUserOrderingBenchmark extends RelayIntegrationSupport {
                   transaction(
                       em -> {
                         long allocating = System.nanoTime();
-                        var ordering = CaptureRepository.next(em, "benchmark", user);
+                        var ordering =
+                            CaptureRepository.allocateNextSequence(em, "benchmark", user);
                         allocation.add(millisSince(allocating));
                         persist(em, ordering, PublicationPolicy.RETRY, 0);
                       });
@@ -183,10 +184,13 @@ class PerUserOrderingBenchmark extends RelayIntegrationSupport {
           for (int i = 0; i < count; i++) {
             var row =
                 persist(
-                    em, CaptureRepository.next(em, "benchmark", user), PublicationPolicy.RETRY, 0);
+                    em,
+                    CaptureRepository.allocateNextSequence(em, "benchmark", user),
+                    PublicationPolicy.RETRY,
+                    0);
             hot.add(row.id());
             if (i == 0) {
-              row.failed(Long.MAX_VALUE, "controlled backoff");
+              row.recordPublicationFailure(Long.MAX_VALUE, "controlled backoff");
             }
             if (i % 500 == 499) {
               em.flush();
@@ -207,7 +211,7 @@ class PerUserOrderingBenchmark extends RelayIntegrationSupport {
     assertEquals(concurrency, cold);
     assertEquals(
         0, scalar("SELECT count(*) FROM " + OUTBOX + " WHERE publication_may_have_occurred"));
-    change(hot.getFirst(), row -> row.failed(0, "recovery"));
+    change(hot.getFirst(), row -> row.recordPublicationFailure(0, "recovery"));
     start = System.nanoTime();
     try (var executor = Executors.newSingleThreadExecutor()) {
       var captures = executor.submit(() -> captureLoad(count, concurrency, false));
@@ -243,8 +247,11 @@ class PerUserOrderingBenchmark extends RelayIntegrationSupport {
           for (int i = 0; i < count; i++) {
             var row =
                 persist(
-                    em, CaptureRepository.next(em, "benchmark", user), PublicationPolicy.RETRY, 0);
-            row.failed(Long.MAX_VALUE, "protected backlog");
+                    em,
+                    CaptureRepository.allocateNextSequence(em, "benchmark", user),
+                    PublicationPolicy.RETRY,
+                    0);
+            row.recordPublicationFailure(Long.MAX_VALUE, "protected backlog");
             if (i % 500 == 499) {
               em.flush();
               em.clear();
@@ -393,7 +400,7 @@ class PerUserOrderingBenchmark extends RelayIntegrationSupport {
           for (int i = 0; i < count; i++) {
             persist(
                 em,
-                CaptureRepository.next(em, "benchmark", user),
+                CaptureRepository.allocateNextSequence(em, "benchmark", user),
                 new PublicationPolicy(1, null),
                 2000);
             if (i % 500 == 499) {
@@ -413,9 +420,10 @@ class PerUserOrderingBenchmark extends RelayIntegrationSupport {
     var envelope = new EventEnvelope(config);
     var row =
         envelope.serialize(
+            UUID.randomUUID().toString(),
             envelope.describe(event),
             ordering,
-            CaptureRepository.databaseTime(em) - ageMillis,
+            CaptureRepository.readDatabaseTime(em) - ageMillis,
             new ResolvedPublicationPolicy(policy, EventFilter.all().sha256(), null));
     em.persist(row);
     OutboxHeads.refresh(em, row.orderingKey());

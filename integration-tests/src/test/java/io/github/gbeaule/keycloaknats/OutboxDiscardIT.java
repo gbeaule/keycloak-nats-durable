@@ -272,9 +272,10 @@ class OutboxDiscardIT extends RelayIntegrationSupport {
         em -> {
           var head = em.find(OutboxEvent.class, "protected");
           for (int i = 0; i < 100; i++) {
-            head.failed(Long.MAX_VALUE, "IOException");
+            head.recordPublicationFailure(Long.MAX_VALUE, "IOException");
           }
-          em.find(OutboxEvent.class, "expired").failed(Long.MAX_VALUE, "IOException");
+          em.find(OutboxEvent.class, "expired")
+              .recordPublicationFailure(Long.MAX_VALUE, "IOException");
           OutboxHeads.refresh(em, head.orderingKey());
         });
     try (var publisher = new JetStreamPublisher(config)) {
@@ -288,7 +289,7 @@ class OutboxDiscardIT extends RelayIntegrationSupport {
       assertEquals(List.of("other"), storedIds(1));
       long headSequence = row("protected").userSequence();
       assertEquals(headSequence + 2, row("successor").userSequence());
-      change("protected", row -> row.failed(0, "due"));
+      change("protected", row -> row.recordPublicationFailure(0, "due"));
       assertEquals(2, relay.runBatch().published());
     }
     assertEquals(List.of("other", "protected", "successor"), storedIds(3));
@@ -341,10 +342,10 @@ class OutboxDiscardIT extends RelayIntegrationSupport {
     try (var owner = sessions.openSession()) {
       owner.beginTransaction();
       var head =
-          OutboxRepository.lockNextExpired(owner, CaptureRepository.databaseTime(owner))
+          OutboxRepository.lockNextExpired(owner, CaptureRepository.readDatabaseTime(owner))
               .orElseThrow();
       OutboxRepository.discard(
-          owner, head, DiscardReason.EXPIRED, CaptureRepository.databaseTime(owner));
+          owner, head, DiscardReason.EXPIRED, CaptureRepository.readDatabaseTime(owner));
       owner.flush();
       assertEquals(
           OutboxRelay.Outcome.NO_WORK,
@@ -591,10 +592,10 @@ class OutboxDiscardIT extends RelayIntegrationSupport {
                   id,
                   "keycloak.events.relay." + id,
                   "{\"id\":\"" + id + "\",\"private\":\"payload\"}",
-                  CaptureRepository.databaseTime(em) - ageMillis,
+                  CaptureRepository.readDatabaseTime(em) - ageMillis,
                   "relay",
                   "io.keycloak.user.login",
-                  CaptureRepository.next(em, "relay", user),
+                  CaptureRepository.allocateNextSequence(em, "relay", user),
                   new ResolvedPublicationPolicy(
                       policy, EventFilter.digest(new byte[0]), "discard-rule"));
           em.persist(row);
@@ -608,7 +609,7 @@ class OutboxDiscardIT extends RelayIntegrationSupport {
         .until(
             () -> {
               try (var session = sessions.openSession()) {
-                return CaptureRepository.databaseTime(session) >= row.expiresAt();
+                return CaptureRepository.readDatabaseTime(session) >= row.expiresAt();
               }
             });
   }

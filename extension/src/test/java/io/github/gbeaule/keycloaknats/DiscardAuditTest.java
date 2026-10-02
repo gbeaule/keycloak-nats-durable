@@ -23,7 +23,7 @@ class DiscardAuditTest {
             new EventOrdering("realm", "user", 11),
             policy);
     row.markPublicationIntent();
-    row.failed(2000, "private exception");
+    row.recordPublicationFailure(2000, "private exception");
     var audit = new DiscardAudit(row, DiscardReason.EXPIRED, 11000);
     var metadata = new HashMap<String, Object>();
     for (var field : DiscardAudit.class.getDeclaredFields()) {
@@ -54,26 +54,6 @@ class DiscardAuditTest {
             Map.entry("attempts", 1L),
             Map.entry("publicationMayHaveOccurred", true)),
         metadata);
-    assertEquals(
-        new DiscardAudit.Metadata(
-            "id",
-            "realm",
-            "type",
-            "subject",
-            row.payloadSha256(),
-            row.orderingKey(),
-            11L,
-            10,
-            2,
-            11000L,
-            "digest",
-            "rule",
-            1000,
-            11000,
-            DiscardReason.EXPIRED,
-            1,
-            true),
-        audit.metadata());
     assertNotNull(new DiscardAudit());
   }
 }

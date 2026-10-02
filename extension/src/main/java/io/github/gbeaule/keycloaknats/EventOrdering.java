@@ -3,65 +3,30 @@ package io.github.gbeaule.keycloaknats;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.Map;
-import java.util.Objects;
 
 /** Descriptive per-user position. Missing positions may have been discarded locally. */
-final class EventOrdering {
-  private final String realmId;
-  private final String userId;
-  private final long sequence;
-  private final String key;
-
-  EventOrdering(String realmId, String userId, long sequence) {
-    this.key = "u." + encode(realmId) + "." + encode(userId);
-    if (key.length() > 2048) {
-      throw new IllegalArgumentException("Ordering key exceeds storage limit");
-    }
+record EventOrdering(String realmId, String userId, long sequence) {
+  EventOrdering {
+    keyFor(realmId, userId);
     if (sequence <= 0) {
       throw new IllegalArgumentException("Ordering sequence must be positive");
     }
-    this.realmId = realmId;
-    this.userId = userId;
-    this.sequence = sequence;
-  }
-
-  String realmId() {
-    return realmId;
-  }
-
-  String userId() {
-    return userId;
-  }
-
-  long sequence() {
-    return sequence;
   }
 
   String key() {
-    return key;
+    return keyFor(realmId, userId);
   }
 
   Map<String, String> wireValue() {
-    return Map.of("key", key, "sequence", Long.toString(sequence));
+    return Map.of("key", key(), "sequence", Long.toString(sequence));
   }
 
-  @Override
-  public boolean equals(Object other) {
-    return other instanceof EventOrdering ordering
-        && sequence == ordering.sequence
-        && key.equals(ordering.key);
-  }
-
-  @Override
-  public int hashCode() {
-    return Objects.hash(key, sequence);
-  }
-
-  static long parseSequence(String value) {
-    if (value == null || !value.matches("[1-9][0-9]*")) {
-      throw new IllegalArgumentException("Ordering sequence must be a positive decimal string");
+  static String keyFor(String realmId, String userId) {
+    String key = "u." + encode(realmId) + "." + encode(userId);
+    if (key.length() > 2048) {
+      throw new IllegalArgumentException("Ordering key exceeds storage limit");
     }
-    return Long.parseLong(value);
+    return key;
   }
 
   private static String encode(String value) {

@@ -6,14 +6,13 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import org.jboss.logging.Logger;
 
 /** Bounded local maintenance, independent of NATS and publication workers. */
 public final class AuditCleanup implements Runnable, AutoCloseable {
   private static final Logger logger = Logger.getLogger(AuditCleanup.class);
-  private final OutboxRelay.Transactions transactions;
+  private final Transactions transactions;
   private final AuditCleanupConfig config;
   private final AuditCleanupMetrics metrics;
   private ScheduledExecutorService executor;
@@ -22,7 +21,7 @@ public final class AuditCleanup implements Runnable, AutoCloseable {
 
   /** The transaction runner must enforce the configured timeout and return only after commit. */
   public AuditCleanup(
-      OutboxRelay.Transactions transactions, AuditCleanupConfig config, MeterRegistry registry) {
+      Transactions transactions, AuditCleanupConfig config, MeterRegistry registry) {
     this.transactions = transactions;
     this.config = config;
     this.metrics = new AuditCleanupMetrics(registry);
@@ -53,7 +52,8 @@ public final class AuditCleanup implements Runnable, AutoCloseable {
         int deleted =
             transact(
                 em -> {
-                  long cutoff = CaptureRepository.databaseTime(em) - config.retention().toMillis();
+                  long cutoff =
+                      CaptureRepository.readDatabaseTime(em) - config.retention().toMillis();
                   var rows = AuditRepository.lockExpired(em, cutoff, config.batchSize());
                   checkRunning();
                   rows.forEach(em::remove);
@@ -75,16 +75,15 @@ public final class AuditCleanup implements Runnable, AutoCloseable {
 
   private <T> T transact(Function<EntityManager, T> work) {
     checkRunning();
-    var result = new AtomicReference<T>();
-    transactions.run(
+    return transactions.commit(
         em -> {
           AuditRepository.limitStatements(em, config.timeoutSeconds());
           checkRunning();
-          result.set(work.apply(em));
+          T result = work.apply(em);
           em.flush();
           checkRunning();
+          return result;
         });
-    return result.get();
   }
 
   private boolean isStopped() {

@@ -54,13 +54,13 @@ class PerUserRelayIT extends RelayIntegrationSupport {
     capture("a1", "a");
     capture("a2", "a");
     capture("b1", "b");
-    change("a1", row -> row.failed(Long.MAX_VALUE, "delayed"));
+    change("a1", row -> row.recordPublicationFailure(Long.MAX_VALUE, "delayed"));
     try (var actual = new JetStreamPublisher(config)) {
       var relay = new OutboxRelay(PerUserRelayIT::transaction, actual, config);
       assertEquals(1, relay.runBatch().published());
       assertEquals(OutboxRelay.Outcome.NO_WORK, relay.runBatch().outcome());
       assertFalse(row("a2").publicationMayHaveOccurred());
-      change("a1", row -> row.failed(0, "due"));
+      change("a1", row -> row.recordPublicationFailure(0, "due"));
       capture("b2", "b");
       var failures = new AtomicInteger();
       var failing =
@@ -204,7 +204,7 @@ class PerUserRelayIT extends RelayIntegrationSupport {
               work -> {
                 transaction(work);
                 if (transactions.incrementAndGet() == 1) {
-                  change("a1", row -> row.failed(0, "new owner"));
+                  change("a1", row -> row.recordPublicationFailure(0, "new owner"));
                 }
               },
               actual,
@@ -259,7 +259,7 @@ class PerUserRelayIT extends RelayIntegrationSupport {
                     em.createNativeQuery("select pg_terminate_backend(:pid)", Boolean.class)
                         .setParameter("pid", Math.toIntExact(backend.get()))
                         .getSingleResult()));
-        change("a1", row -> row.failed(Long.MAX_VALUE, "new owner"));
+        change("a1", row -> row.recordPublicationFailure(Long.MAX_VALUE, "new owner"));
       } finally {
         release.countDown();
       }

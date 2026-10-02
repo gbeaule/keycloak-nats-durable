@@ -53,6 +53,7 @@ class CaptureTransactionTest {
         fatal ? new AssertionError("capture failed") : new IllegalStateException("capture failed");
     doThrow(failure).when(em).persist(any());
     try (var capture = mockStatic(CaptureRepository.class)) {
+      capture.when(() -> CaptureRepository.persistBatch(any(), any(), any())).thenCallRealMethod();
       var event = EventEnvelopeTest.login();
       event.setUserId(null);
       new DurableEventListener(session, BridgeConfig.from(Map.of()), wakeup).onEvent(event);

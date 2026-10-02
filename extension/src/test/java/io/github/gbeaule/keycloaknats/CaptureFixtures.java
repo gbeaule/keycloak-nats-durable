@@ -1,5 +1,6 @@
 package io.github.gbeaule.keycloaknats;
 
+import java.util.UUID;
 import org.keycloak.events.Event;
 import org.keycloak.events.admin.AdminEvent;
 
@@ -14,7 +15,12 @@ final class CaptureFixtures {
   }
 
   static OutboxEvent user(EventEnvelope encoder, Event event, EventOrdering ordering) {
-    return encoder.serialize(encoder.describe(event), ordering, System.currentTimeMillis(), RETRY);
+    return encoder.serialize(
+        UUID.randomUUID().toString(),
+        encoder.describe(event),
+        ordering,
+        System.currentTimeMillis(),
+        RETRY);
   }
 
   static OutboxEvent admin(EventEnvelope encoder, AdminEvent event, Boolean enabled) {
@@ -24,6 +30,7 @@ final class CaptureFixtures {
   static OutboxEvent admin(
       EventEnvelope encoder, AdminEvent event, Boolean enabled, EventOrdering ordering) {
     return encoder.serialize(
+        UUID.randomUUID().toString(),
         encoder.describe(event, AffectedUser.resolve(event), enabled),
         ordering,
         System.currentTimeMillis(),

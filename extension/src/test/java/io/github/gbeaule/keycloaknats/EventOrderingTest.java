@@ -39,8 +39,6 @@ class EventOrderingTest {
     assertNotEquals(new EventOrdering("a.b", "c", 1).key(), new EventOrdering("a", "b.c", 1).key());
     assertNotEquals(ordering.key(), new EventOrdering("other", user, 1).key());
     assertEquals("9223372036854775807", ordering.wireValue().get("sequence"));
-    assertEquals(Long.MAX_VALUE, EventOrdering.parseSequence("9223372036854775807"));
-    assertEquals(1, EventOrdering.parseSequence("1"));
   }
 
   @Test
@@ -53,26 +51,6 @@ class EventOrderingTest {
     assertNotEquals(ordering, new EventOrdering("realm", "other-user", 1));
     assertNotEquals(ordering, "not an ordering");
     assertNotEquals(ordering, null);
-  }
-
-  @ParameterizedTest
-  @NullAndEmptySource
-  @ValueSource(
-      strings = {
-        "0",
-        "-1",
-        "+1",
-        "01",
-        "1.0",
-        "1e3",
-        " 1",
-        "1\n",
-        "١",
-        "9223372036854775808",
-        "99999999999999999999999999999999"
-      })
-  void malformedOrOverflowingSequencesAreRejected(String sequence) {
-    assertThrows(IllegalArgumentException.class, () -> EventOrdering.parseSequence(sequence));
   }
 
   @ParameterizedTest

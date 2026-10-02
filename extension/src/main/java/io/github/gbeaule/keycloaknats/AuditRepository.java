@@ -5,7 +5,6 @@ import jakarta.persistence.LockModeType;
 import java.time.Duration;
 import java.util.List;
 import org.hibernate.Timeouts;
-import org.hibernate.jpa.HibernateHints;
 import org.hibernate.jpa.SpecHints;
 
 /** Audit-only queries on the caller's managed connection and transaction. */
@@ -28,32 +27,9 @@ public final class AuditRepository {
         .getResultList();
   }
 
-  /** Reads a bounded page, oldest first, without payloads or write locks. */
-  public static List<DiscardAudit.Metadata> inspect(
-      EntityManager em, long afterDiscardedAt, String afterId, int limit) {
-    if (limit < 1 || limit > 500 || afterId == null) {
-      throw new IllegalArgumentException("Audit inspection requires a cursor and limit of 1..500");
-    }
-    return em
-        .createQuery(
-            "select audit from NatsDiscardAudit audit"
-                + " where audit.discardedAt > :afterTime"
-                + " or (audit.discardedAt = :afterTime and audit.id > :afterId)"
-                + " order by audit.discardedAt, audit.id",
-            DiscardAudit.class)
-        .setParameter("afterTime", afterDiscardedAt)
-        .setParameter("afterId", afterId)
-        .setMaxResults(limit)
-        .setHint(HibernateHints.HINT_READ_ONLY, true)
-        .getResultList()
-        .stream()
-        .map(DiscardAudit::metadata)
-        .toList();
-  }
-
   /** Reads aggregate metadata using database time; the caller bounds the transaction. */
   public static Statistics statistics(EntityManager em, Duration retention) {
-    long now = CaptureRepository.databaseTime(em);
+    long now = CaptureRepository.readDatabaseTime(em);
     var result =
         em.createQuery(
                 "select count(audit), min(case when audit.discardedAt <= :cutoff"
