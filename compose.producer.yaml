@@ -18,7 +18,7 @@ services:
       file: compose.yaml
       service: nats
   provision:
-    image: natsio/nats-box:0.19.7
+    image: natsio/nats-box:0.20.0
     command: [nats, --server=nats://nats:4222, stream, add, --config=/config/stream.json]
     volumes:
       - ./deploy/stream.json:/config/stream.json:ro
