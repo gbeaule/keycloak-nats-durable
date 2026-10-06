@@ -53,7 +53,8 @@ class CompatibilityMatrixTest(unittest.TestCase):
 class ValidationRunnerTest(unittest.TestCase):
     def test_postgres_selection_keeps_source_and_existing_durability_coverage(self):
         expected = {
-            "ConsumerHardeningIT", "CustomSchemaIT", "UpgradeIT", "PerUserCaptureIT",
+            "ConsumerHardeningIT", "ConsumerStartupIT", "CustomSchemaIT", "UpgradeIT",
+            "AdminUserAttributionIT", "NatsReadinessIT", "PerUserCaptureIT",
             "PerUserRelayIT", "OutboxDiscardIT", "OutboxAuditRetentionIT",
             "NestedEventCaptureIT", "OutboxHeadIT", "OutboxSchemaIT",
             "PerUserPublicationIT", "PerUserSystemIT", "FilteringIT",

@@ -10,6 +10,9 @@ explicitly permits local discard. A pending event blocks later publication for t
 can progress. Sequence gaps are valid, and a timeout can leave an accepted or in-flight original.
 Receiving applications own deduplication and processing order.
 
+OID4VCI (OpenID for Verifiable Credential Issuance) admin events are not currently supported.
+These events lack affected-user attribution and per-user publication ordering.
+
 ## Start here
 
 - [Architecture](docs/architecture.md): transaction boundaries, delivery guarantees and tradeoffs.

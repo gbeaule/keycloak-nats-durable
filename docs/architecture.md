@@ -34,7 +34,7 @@ boundaries. Repository commands keep event changes and the indexed pending head 
 transaction results become visible to workers only after commit is confirmed. Types, database
 constraints and tests define the detailed invariants.
 
-For supported admin requests, affected-user identity comes from Keycloak's routed `user-id`
+For supported admin requests, affected-user identity comes from Keycloak's routed user ID
 parameter after matching the request to the event's realm and resource. Capture resolves this ID
 once for filtering, message metadata and ordering. Without matching request context, only an
 unambiguous direct user path supplies an ID; ambiguous nested events remain independent.

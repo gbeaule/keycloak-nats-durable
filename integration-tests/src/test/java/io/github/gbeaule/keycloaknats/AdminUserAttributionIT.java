@@ -4,6 +4,8 @@ import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import java.net.URLEncoder;
@@ -86,6 +88,120 @@ class AdminUserAttributionIT extends IntegrationSupport {
   }
 
   @ParameterizedTest
+  @ValueSource(strings = {"", "/"})
+  void bruteForceResetSharesTheTargetSequenceAndCannotBypassItsPendingPredecessor(String suffix)
+      throws Exception {
+    replace(ALL);
+    assertEquals(
+        204,
+        request("PUT", "/admin/realms/durable-test", Map.of("bruteForceProtected", true))
+            .statusCode());
+    String username = "brute-force-" + UUID.randomUUID();
+    var created =
+        request(
+            "POST",
+            "/admin/realms/durable-test/users",
+            Map.of(
+                "username",
+                username,
+                "enabled",
+                true,
+                "credentials",
+                List.of(
+                    Map.of("type", "password", "value", "correct-password", "temporary", false))));
+    assertEquals(201, created.statusCode(), created.body());
+    String location = created.headers().firstValue("Location").orElseThrow();
+    String user = location.substring(location.lastIndexOf('/') + 1);
+    assertEquals(
+        400,
+        login(
+                "durable-test",
+                "grant_type=password&client_id=test-client&username="
+                    + username
+                    + "&password=incorrect")
+            .statusCode());
+    String endpoint = "/admin/realms/durable-test/attack-detection/brute-force/users/" + user;
+    await()
+        .atMost(Duration.ofSeconds(10))
+        .until(
+            () ->
+                objectMapper
+                        .readTree(request("GET", endpoint, null).body())
+                        .path("numFailures")
+                        .asInt()
+                    > 0);
+    assertEquals(204, request("DELETE", endpoint + suffix, null).statusCode());
+    var captured = rows(user);
+    assertEquals(3, captured.size());
+    assertUserOrdering(user, captured);
+    assertEquals("CREATE", captured.getFirst().at("/data/operationType").asText());
+    assertEquals("LOGIN_ERROR", captured.get(1).at("/data/eventType").asText());
+    var reset = captured.getLast().path("data");
+    assertEquals("USER_LOGIN_FAILURE", reset.path("resourceType").asText());
+    assertEquals("DELETE", reset.path("operationType").asText());
+    assertEquals(
+        "attack-detection/brute-force/users/" + user + suffix, reset.path("resourcePath").asText());
+    assertFalse(reset.has("userEnabled"));
+
+    // Hold only this user's predecessor; an unrelated publication proves the relay is active.
+    try (var db = database.getConnection();
+        var lock = db.prepareStatement("SELECT id FROM kc_nats_outbox WHERE id=? FOR UPDATE")) {
+      db.setAutoCommit(false);
+      lock.setQueryTimeout(5);
+      lock.setString(1, captured.getFirst().path("id").asText());
+      try (var result = lock.executeQuery()) {
+        assertTrue(result.next());
+      }
+      var docker = broker.getDockerClient();
+      docker.startContainerCmd(broker.getContainerId()).exec();
+      try {
+        connectNats();
+        String unrelated = createUser();
+        // A stopped container's missing DNS alias can remain negatively cached during recovery.
+        await().atMost(Duration.ofSeconds(30)).until(() -> published(unrelated).size() == 1);
+        await()
+            .during(Duration.ofSeconds(2))
+            .atMost(Duration.ofSeconds(5))
+            .until(() -> rows(user).size() == captured.size());
+        assertTrue(published(user).isEmpty(), "The reset must not overtake the locked predecessor");
+        db.commit();
+        drained();
+        assertEquals(
+            captured.stream().map(row -> row.path("id").asText()).toList(),
+            published(user).stream().map(row -> row.path("id").asText()).toList());
+      } finally {
+        docker.stopContainerCmd(broker.getContainerId()).withTimeout(1).exec();
+      }
+    }
+  }
+
+  @Test
+  void bulkBruteForceResetDoesNotAssignTheActorAsAnAffectedUser() throws Exception {
+    replace(ALL);
+    String resource = "attack-detection/brute-force/users";
+    assertEquals(
+        204, request("DELETE", "/admin/realms/durable-test/" + resource, null).statusCode());
+    try (var db = database.getConnection();
+        var query =
+            db.prepareStatement(
+                "SELECT payload,ordering_key,user_sequence FROM kc_nats_outbox"
+                    + " WHERE payload::jsonb->'data'->>'resourcePath'=?")) {
+      query.setString(1, resource);
+      try (var result = query.executeQuery()) {
+        assertTrue(result.next());
+        var data = objectMapper.readTree(result.getString(1)).path("data");
+        assertEquals("USER_LOGIN_FAILURE", data.path("resourceType").asText());
+        assertFalse(data.has("userId"));
+        assertFalse(data.has("ordering"));
+        assertFalse(data.path("actorUserId").asText().isBlank());
+        assertNull(result.getString(2));
+        assertNull(result.getObject(3));
+        assertFalse(result.next());
+      }
+    }
+  }
+
+  @ParameterizedTest
   @ValueSource(strings = {"", "/logout/opaque+%2F/用户/"})
   void logoutSharesTheUsersSequenceAndPreservesOpaqueRoutedIds(String suffix) throws Exception {
     replace(ALL);
@@ -127,15 +243,34 @@ class AdminUserAttributionIT extends IntegrationSupport {
   private static void assertOrdered(String user, List<String> operations) throws Exception {
     var captured = rows(user);
     assertEquals(operations.size(), captured.size());
+    assertUserOrdering(user, captured);
+    for (int index = 0; index < captured.size(); index++) {
+      assertEquals(operations.get(index), captured.get(index).at("/data/operationType").asText());
+    }
+  }
+
+  private static void assertUserOrdering(String user, List<JsonNode> captured) {
     String key = new EventOrdering(realmId, user, 1).key();
     for (int index = 0; index < captured.size(); index++) {
       var data = captured.get(index).path("data");
       assertEquals(user, data.path("userId").asText());
       assertNotEquals(user, data.path("actorUserId").asText());
-      assertEquals(operations.get(index), data.path("operationType").asText());
       assertEquals(key, data.at("/ordering/key").asText());
       assertEquals(Integer.toString(index + 1), data.at("/ordering/sequence").asText());
     }
+  }
+
+  private static List<JsonNode> published(String user) throws Exception {
+    var events = new ArrayList<JsonNode>();
+    long count = messages();
+    for (long sequence = 1; sequence <= count; sequence++) {
+      var event =
+          objectMapper.readTree(nats.jetStreamManagement().getMessage(STREAM, sequence).getData());
+      if (user.equals(event.at("/data/userId").asText())) {
+        events.add(event);
+      }
+    }
+    return events;
   }
 
   private static List<JsonNode> rows(String user) throws Exception {

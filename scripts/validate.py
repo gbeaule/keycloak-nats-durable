@@ -12,7 +12,8 @@ import sys
 ROOT = Path(__file__).resolve().parent.parent
 POSTGRES_MAJORS = ("14", "15", "16", "17")
 POSTGRES_TESTS = (
-    "ConsumerHardeningIT,CustomSchemaIT,UpgradeIT,"
+    "ConsumerHardeningIT,ConsumerStartupIT,CustomSchemaIT,UpgradeIT,"
+    "AdminUserAttributionIT,NatsReadinessIT,"
     "PerUserCaptureIT,PerUserRelayIT,OutboxDiscardIT,OutboxAuditRetentionIT,"
     "NestedEventCaptureIT,OutboxHeadIT,OutboxSchemaIT,"
     "PerUserPublicationIT,PerUserSystemIT,FilteringIT,DurabilityIT#"

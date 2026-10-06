@@ -12,6 +12,7 @@ import org.keycloak.models.KeycloakSession;
 
 /** Uses routed IDs for admin requests; decoded paths alone cannot identify nested users safely. */
 final class AffectedUser {
+  private static final String BRUTE_FORCE_USERS = "attack-detection/brute-force/users/";
   private static final List<String> USER_ACTIONS =
       List.of(
           "reset-password",
@@ -41,8 +42,14 @@ final class AffectedUser {
       var realm = context.getRealm();
       if (uri != null && realm != null) {
         var parameters = uri.getPathParameters();
-        String userId = parameter(parameters, "user-id");
         String resourcePath = event.getResourcePath();
+        // AttackDetectionResource uses userId; ordinary user resources use user-id.
+        String userId =
+            parameter(
+                parameters,
+                resourcePath != null && resourcePath.startsWith(BRUTE_FORCE_USERS)
+                    ? "userId"
+                    : "user-id");
         String requestPath = uri.getPath();
         if (userId != null
             && resourcePath != null
@@ -75,7 +82,8 @@ final class AffectedUser {
                       || event.getOperationType() == OperationType.DELETE)
                   && matchesParameter(path, base + "/federated-identity/", parameters, "provider"));
       case "USER_LOGIN_FAILURE" ->
-          event.getOperationType() == OperationType.DELETE && matchesPath(path, base);
+          event.getOperationType() == OperationType.DELETE
+              && (matchesPath(path, base) || matchesPath(path, BRUTE_FORCE_USERS + userId));
       case "GROUP_MEMBERSHIP" -> matchesParameter(path, base + "/groups/", parameters, "groupId");
       case "REALM_ROLE_MAPPING" -> matchesPath(path, base + "/role-mappings/realm");
       case "CLIENT_ROLE_MAPPING" ->

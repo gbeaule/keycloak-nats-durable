@@ -139,6 +139,65 @@ class AffectedUserTest {
   }
 
   @ParameterizedTest
+  @ValueSource(strings = {"target", "f:p:x/+%2F/用户/"})
+  void bruteForceResetUsesItsOwnRoutedParameterAndPreservesOpaqueIds(String user) {
+    var event = EventEnvelopeTest.admin(OperationType.DELETE);
+    event.setResourceTypeAsString("USER_LOGIN_FAILURE");
+    event.setResourcePath("attack-detection/brute-force/users/" + user);
+    var session = AdminRequestFixtures.request(event, "unrelated", Map.of("userId", user));
+    assertEquals(user, AffectedUser.resolve(event, session));
+    assertFalse(AffectedUser.isDirectUser(event, user));
+    assertNull(AffectedUser.resolve(event), "A decoded path cannot replace the routed identity");
+    event.setResourcePath(event.getResourcePath() + "/");
+    when(session.getContext().getUri().getPath())
+        .thenReturn("/admin/realms/realm-name/" + event.getResourcePath());
+    assertEquals(user, AffectedUser.resolve(event, session));
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "USER_LOGIN_FAILURE,DELETE,attack-detection/brute-force/users",
+    "USER_LOGIN_FAILURE,DELETE,attack-detection/brute-force/users/",
+    "USER_LOGIN_FAILURE,DELETE,attack-detection/brute-force/users/other",
+    "USER_LOGIN_FAILURE,DELETE,attack-detection/brute-force/users/target/extra",
+    "USER_LOGIN_FAILURE,DELETE,attack-detection/brute-force/users/target//",
+    "USER_LOGIN_FAILURE,UPDATE,attack-detection/brute-force/users/target",
+    "USER,DELETE,attack-detection/brute-force/users/target",
+    "USER_LOGIN_FAILURE,DELETE,users/target"
+  })
+  void bruteForceIdentityCannotBeBorrowedByBulkUnrelatedOrOrdinaryUserRoutes(
+      String resource, String operation, String path) {
+    var event = EventEnvelopeTest.admin(OperationType.valueOf(operation));
+    event.setResourceTypeAsString(resource);
+    event.setResourcePath(path);
+    event.setAuthDetails(new AuthDetails());
+    event.getAuthDetails().setUserId("actor");
+    var session = AdminRequestFixtures.request(event, null, Map.of("userId", "target"));
+    assertNull(AffectedUser.resolve(event, session));
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"realm", "path", "missing", "different", "duplicate", "empty", "control"})
+  void bruteForceResetRequiresMatchingContextAndOneValidRoutedIdentity(String mismatch) {
+    var event = EventEnvelopeTest.admin(OperationType.DELETE);
+    event.setResourceTypeAsString("USER_LOGIN_FAILURE");
+    event.setResourcePath("attack-detection/brute-force/users/target");
+    var session = AdminRequestFixtures.request(event, "target", Map.of("userId", "target"));
+    var uri = session.getContext().getUri();
+    switch (mismatch) {
+      case "realm" -> when(session.getContext().getRealm().getId()).thenReturn("another-realm");
+      case "path" -> when(uri.getPath()).thenReturn("/admin/realms/realm-name/users/target");
+      case "missing" -> uri.getPathParameters().remove("userId");
+      case "different" -> uri.getPathParameters().putSingle("userId", "other");
+      case "duplicate" -> uri.getPathParameters().put("userId", List.of("target", "other"));
+      case "empty" -> uri.getPathParameters().putSingle("userId", " ");
+      case "control" -> uri.getPathParameters().putSingle("userId", "target\u0000");
+      default -> throw new AssertionError(mismatch);
+    }
+    assertNull(AffectedUser.resolve(event, session));
+  }
+
+  @ParameterizedTest
   @ValueSource(strings = {"f:p:x/", "f:p:x//", "f:p:x/+%2F/用户/"})
   void trailingDelimiterDoesNotTrimOpaqueRoutedUserIds(String user) {
     var event = EventEnvelopeTest.admin(OperationType.UPDATE);

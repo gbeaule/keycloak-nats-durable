@@ -1,20 +1,25 @@
 package io.github.gbeaule.keycloaknats;
 
 import static org.awaitility.Awaitility.await;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.gbeaule.keycloaknats.consumer.ConsumerMain;
+import io.github.gbeaule.keycloaknats.consumer.FailurePolicy;
 import io.github.gbeaule.keycloaknats.consumer.InboxProcessor;
 import io.github.gbeaule.keycloaknats.consumer.ProcessingLimits;
+import io.github.gbeaule.keycloaknats.consumer.QuarantineStore;
 import io.nats.client.Connection;
 import io.nats.client.Nats;
+import io.nats.client.PublishOptions;
+import io.nats.client.PullSubscribeOptions;
 import io.nats.client.api.AckPolicy;
 import io.nats.client.api.ConsumerConfiguration;
 import io.nats.client.api.DeliverPolicy;
 import io.nats.client.api.DiscardPolicy;
+import io.nats.client.api.PersistMode;
 import io.nats.client.api.RetentionPolicy;
 import io.nats.client.api.StorageType;
 import io.nats.client.api.StreamConfiguration;
@@ -24,6 +29,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -33,6 +39,7 @@ import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.postgresql.ds.PGSimpleDataSource;
@@ -212,19 +219,105 @@ class ConsumerStartupIT {
     }
   }
 
-  private Process launch(String stream) throws Exception {
+  @Test
+  void replayRejectsAsyncPersistenceAndRetainsTheCopyUntilDefaultPersistenceAcceptsIt()
+      throws Exception {
+    String stream = "REPLAY_" + UUID.randomUUID().toString().replace("-", "");
+    String id = UUID.randomUUID().toString();
+    byte[] payload =
+        new ObjectMapper().writeValueAsBytes(Map.of("id", id, "data", Map.of("original", true)));
+    var quarantine = new QuarantineStore(database, DURABLE, ProcessingLimits.defaults());
+    try {
+      replayStream(stream, PersistMode.Default);
+      nats.jetStreamManagement()
+          .createConsumer(
+              stream,
+              ConsumerConfiguration.builder()
+                  .durable(DURABLE)
+                  .ackPolicy(AckPolicy.Explicit)
+                  .build());
+      nats.jetStream().publish(SUBJECT, payload, PublishOptions.builder().messageId(id).build());
+      var subscription =
+          nats.jetStream().subscribe(null, PullSubscribeOptions.bind(stream, DURABLE));
+      try {
+        var messages = subscription.fetch(1, Duration.ofSeconds(5));
+        assertEquals(1, messages.size());
+        var message = messages.getFirst();
+        quarantine.record(message, FailurePolicy.Action.QUARANTINE, "UNSUPPORTED_ENVELOPE");
+        message.ackSync(Duration.ofSeconds(2));
+      } finally {
+        subscription.unsubscribe();
+      }
+      assertEquals(
+          0, nats.jetStreamManagement().getStreamInfo(stream).getStreamState().getMsgCount());
+      assertEquals(1, quarantine.pending(10).size());
+
+      // Persist mode cannot be updated in place. Recreate the empty stream to test each policy.
+      nats.jetStreamManagement().deleteStream(stream);
+      replayStream(stream, PersistMode.Async);
+      assertEquals(
+          PersistMode.Async,
+          nats.jetStreamManagement().getStreamInfo(stream).getConfiguration().getPersistMode());
+      assertTrue(replay(stream, 1).contains("failure category=Violation"));
+      assertEquals(
+          1, quarantine.pending(10).size(), "Rejected replay must keep its recovery copy pending");
+      assertEquals(
+          0, nats.jetStreamManagement().getStreamInfo(stream).getStreamState().getMsgCount());
+
+      nats.jetStreamManagement().deleteStream(stream);
+      replayStream(stream, PersistMode.Default);
+      assertTrue(replay(stream, 0).contains("Replay published;"));
+      assertTrue(quarantine.pending(10).isEmpty());
+      assertEquals(
+          1, nats.jetStreamManagement().getStreamInfo(stream).getStreamState().getMsgCount());
+      var restored = nats.jetStreamManagement().getMessage(stream, 1);
+      assertArrayEquals(payload, restored.getData());
+      assertEquals(id, restored.getHeaders().getFirst("Nats-Msg-Id"));
+    } finally {
+      nats.jetStreamManagement().deleteStream(stream);
+    }
+  }
+
+  private void replayStream(String stream, PersistMode mode) throws Exception {
+    nats.jetStreamManagement()
+        .addStream(
+            StreamConfiguration.builder()
+                .name(stream)
+                .subjects("keycloak.events.>")
+                .storageType(StorageType.File)
+                .retentionPolicy(RetentionPolicy.WorkQueue)
+                .discardPolicy(DiscardPolicy.New)
+                .replicas(1)
+                .persistMode(mode)
+                .duplicateWindow(Duration.ofMinutes(2))
+                .build());
+  }
+
+  private String replay(String stream, int expectedExit) throws Exception {
+    Process consumer = launch(stream, "quarantine-replay", stream, "1");
+    try {
+      assertTrue(
+          consumer.waitFor(20, TimeUnit.SECONDS), "Replay must complete or reject the destination");
+      String output = new String(consumer.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+      Files.writeString(Path.of("target", "consumer-replay-exit-" + expectedExit + ".log"), output);
+      assertEquals(expectedExit, consumer.exitValue(), output);
+      return output;
+    } finally {
+      consumer.destroyForcibly();
+      consumer.waitFor(5, TimeUnit.SECONDS);
+    }
+  }
+
+  private Process launch(String stream, String... arguments) throws Exception {
     boolean windows = System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("win");
     String java =
         Path.of(System.getProperty("java.home"), "bin", windows ? "java.exe" : "java").toString();
-    var process =
-        new ProcessBuilder(
-                java,
-                "-cp",
-                System.getProperty(
-                    "surefire.test.class.path", System.getProperty("java.class.path")),
-                ConsumerMain.class.getName(),
-                "run")
-            .redirectErrorStream(true);
+    // Use the shipped executable; the test classpath also contains the provider's relocated NATS.
+    String artifact = System.getProperty("consumer.jar");
+    assertTrue(Files.isRegularFile(Path.of(artifact)), "Package the consumer before its CLI tests");
+    var command = new ArrayList<>(List.of(java, "-jar", artifact));
+    command.addAll(arguments.length == 0 ? List.of("run") : List.of(arguments));
+    var process = new ProcessBuilder(command).redirectErrorStream(true);
     var environment = process.environment();
     environment.keySet().removeIf(key -> key.toUpperCase(Locale.ROOT).startsWith("KND_"));
     environment.put(
@@ -232,6 +325,7 @@ class ConsumerStartupIT {
     environment.put("KND_STREAM", stream);
     environment.put("KND_CONSUMER", DURABLE);
     environment.put("KND_SUBJECT_PREFIX", "keycloak.events");
+    environment.put("KND_MIN_REPLICAS", "1");
     environment.put("KND_CONSUMER_DB_URL", postgres.getJdbcUrl());
     environment.put("KND_CONSUMER_DB_USER", postgres.getUsername());
     environment.put("KND_CONSUMER_DB_PASSWORD", postgres.getPassword());
