@@ -65,7 +65,11 @@ class EventFilterTest {
 
   static boolean accepts(EventFilter policy, AdminEvent event, Boolean enabled) {
     return policy.accepts(
-        event, AffectedUser.resolve(event), enabled, envelopes.adminSubject(event));
+        event,
+        AffectedUser.resolve(event),
+        enabled,
+        event.getAuthDetails() == null ? null : event.getAuthDetails().getClientId(),
+        envelopes.adminSubject(event));
   }
 
   static EventFilter parse(String json) throws IOException {
@@ -174,6 +178,28 @@ class EventFilterTest {
     admin.setRealmId("selected");
     admin.setAuthDetails(null);
     assertFalse(accepts(policy, admin, false));
+  }
+
+  @Test
+  void adminScopesUseTheResolvedPublicClientRatherThanTheNativeInternalId() throws Exception {
+    var policy =
+        parse(
+            """
+            {"clientIds":["admin-cli"],"userEvents":[],"adminEvents":[
+              {"resourceType":"USER","operations":["UPDATE"]}]}
+            """);
+    var event = EventEnvelopeTest.admin(OperationType.UPDATE);
+    event.setAuthDetails(new AuthDetails());
+    event.getAuthDetails().setClientId("internal-uuid");
+    String subject = envelopes.adminSubject(event);
+    assertTrue(
+        policy.mayAccept(event, subject), "Precheck must defer client scope until resolution");
+    assertTrue(policy.mayAccept(event, "admin-cli", subject));
+    assertFalse(policy.mayAccept(event, "internal-uuid", subject));
+    assertTrue(policy.accepts(event, "target", false, "admin-cli", subject));
+    assertFalse(policy.accepts(event, "target", false, "internal-uuid", subject));
+    event.setOperationType(OperationType.DELETE);
+    assertFalse(policy.mayAccept(event, "admin-cli", subject));
   }
 
   @ParameterizedTest

@@ -53,10 +53,11 @@ final class EventFilter {
           && scope.accepts(event.getRealmId(), event.getClientId(), event.getError(), subject);
     }
 
-    boolean matches(AdminEvent event, String userId, Boolean enabled, String subject) {
+    boolean matches(
+        AdminEvent event, String userId, Boolean enabled, String clientId, String subject) {
       return admin != null
           && admin.matches(event, userId, enabled)
-          && inScope(scope, event, subject);
+          && inScope(scope, event, clientId, subject);
     }
   }
 
@@ -245,13 +246,13 @@ final class EventFilter {
   }
 
   Optional<ResolvedPublicationPolicy> resolve(
-      AdminEvent event, String userId, Boolean enabled, String subject) {
-    if (!accepts(event, userId, enabled, subject)) {
+      AdminEvent event, String userId, Boolean enabled, String clientId, String subject) {
+    if (!accepts(event, userId, enabled, clientId, subject)) {
       return Optional.empty();
     }
     return Optional.of(
         deliveryRules.stream()
-            .filter(rule -> rule.matches(event, userId, enabled, subject))
+            .filter(rule -> rule.matches(event, userId, enabled, clientId, subject))
             .map(DeliveryRule::resolved)
             .findFirst()
             .orElseGet(this::defaultPolicy));
@@ -266,19 +267,25 @@ final class EventFilter {
         && scope.accepts(event.getRealmId(), event.getClientId(), event.getError(), subject);
   }
 
-  boolean accepts(AdminEvent event, String userId, Boolean enabled, String subject) {
-    return inScope(scope, event, subject)
+  boolean accepts(
+      AdminEvent event, String userId, Boolean enabled, String clientId, String subject) {
+    return inScope(scope, event, clientId, subject)
         && adminEvents.stream().anyMatch(rule -> rule.matches(event, userId, enabled));
   }
 
   boolean mayAccept(AdminEvent event, String subject) {
-    return inScope(scope, event, subject)
+    return scope.acceptsWithoutClient(event.getRealmId(), event.getError(), subject)
         && adminEvents.stream().anyMatch(rule -> rule.matches(event));
   }
 
-  private static boolean inScope(CaptureScope scope, AdminEvent event, String subject) {
-    String client = event.getAuthDetails() == null ? null : event.getAuthDetails().getClientId();
-    return scope.accepts(event.getRealmId(), client, event.getError(), subject);
+  boolean mayAccept(AdminEvent event, String clientId, String subject) {
+    return inScope(scope, event, clientId, subject)
+        && adminEvents.stream().anyMatch(rule -> rule.matches(event));
+  }
+
+  private static boolean inScope(
+      CaptureScope scope, AdminEvent event, String clientId, String subject) {
+    return scope.accepts(event.getRealmId(), clientId, event.getError(), subject);
   }
 
   private static void fields(JsonNode node, Set<String> allowed) {

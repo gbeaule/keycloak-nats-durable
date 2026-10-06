@@ -238,6 +238,7 @@ class ReloadingEventFilterTest {
                   event,
                   AffectedUser.resolve(event),
                   false,
+                  null,
                   "keycloak.events.realm.admin.user.update")
               .isEmpty());
       // A valid capture change plus invalid delivery policy cannot partially replace the snapshot.

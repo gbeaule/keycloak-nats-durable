@@ -3,6 +3,7 @@ package io.github.gbeaule.keycloaknats;
 import jakarta.enterprise.context.ContextNotActiveException;
 import jakarta.ws.rs.core.MultivaluedMap;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Objects;
 import org.keycloak.events.Event;
 import org.keycloak.events.admin.AdminEvent;
@@ -11,6 +12,14 @@ import org.keycloak.models.KeycloakSession;
 
 /** Uses routed IDs for admin requests; decoded paths alone cannot identify nested users safely. */
 final class AffectedUser {
+  private static final List<String> USER_ACTIONS =
+      List.of(
+          "reset-password",
+          "logout",
+          "execute-actions-email",
+          "send-verify-email",
+          "reset-password-email");
+
   private AffectedUser() {}
 
   static String resolve(Event event) {
@@ -56,13 +65,19 @@ final class AffectedUser {
     String base = "users/" + userId;
     return switch (resource == null ? "" : resource) {
       case "USER" ->
-          path.equals(base)
+          matchesPath(path, base)
               || (event.getOperationType() == OperationType.ACTION
-                  && (path.equals(base + "/reset-password")
+                  && (USER_ACTIONS.stream()
+                          .anyMatch(action -> matchesPath(path, base + "/" + action))
                       || matchesParameter(path, base + "/credentials/", parameters, "credentialId")
-                      || matchesParameter(path, base + "/consents/", parameters, "client")));
+                      || matchesParameter(path, base + "/consents/", parameters, "client")))
+              || ((event.getOperationType() == OperationType.CREATE
+                      || event.getOperationType() == OperationType.DELETE)
+                  && matchesParameter(path, base + "/federated-identity/", parameters, "provider"));
+      case "USER_LOGIN_FAILURE" ->
+          event.getOperationType() == OperationType.DELETE && matchesPath(path, base);
       case "GROUP_MEMBERSHIP" -> matchesParameter(path, base + "/groups/", parameters, "groupId");
-      case "REALM_ROLE_MAPPING" -> path.equals(base + "/role-mappings/realm");
+      case "REALM_ROLE_MAPPING" -> matchesPath(path, base + "/role-mappings/realm");
       case "CLIENT_ROLE_MAPPING" ->
           matchesParameter(path, base + "/role-mappings/clients/", parameters, "client-id");
       default -> false;
@@ -72,7 +87,13 @@ final class AffectedUser {
   private static boolean matchesParameter(
       String path, String prefix, MultivaluedMap<String, String> parameters, String name) {
     String value = parameter(parameters, name);
-    return value != null && path.equals(prefix + value);
+    return value != null && matchesPath(path, prefix + value);
+  }
+
+  private static boolean matchesPath(String path, String routedPath) {
+    // Compare against the exact routed IDs first; a final slash can be an endpoint delimiter or
+    // part of an opaque ID. Never remove slashes from decoded identities or guess without a route.
+    return routedPath.equals(path) || (routedPath + "/").equals(path);
   }
 
   private static String parameter(MultivaluedMap<String, String> parameters, String name) {
@@ -90,7 +111,7 @@ final class AffectedUser {
   static boolean isDirectUser(AdminEvent event, String userId) {
     return userId != null
         && "USER".equals(event.getResourceTypeAsString())
-        && ("users/" + userId).equals(event.getResourcePath());
+        && matchesPath(event.getResourcePath(), "users/" + userId);
   }
 
   static String directUserId(AdminEvent event) {

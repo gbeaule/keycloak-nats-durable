@@ -28,7 +28,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
+import org.keycloak.events.admin.AuthDetails;
 import org.keycloak.events.admin.OperationType;
+import org.keycloak.models.ClientModel;
+import org.keycloak.models.ClientProvider;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.KeycloakTransaction;
 import org.keycloak.models.KeycloakTransactionManager;
@@ -146,6 +149,97 @@ class DurableEventListenerTest {
     listener.onEvent(EventEnvelopeTest.login());
     listener.onEvent(EventEnvelopeTest.admin(OperationType.UPDATE), false);
     verifyNoInteractions(session, em, tx, wakeRelay);
+  }
+
+  @Test
+  void normalizesTheActingClientOnceForCapturePolicyAndFrozenPayload() throws Exception {
+    var event = EventEnvelopeTest.admin(OperationType.DELETE);
+    var auth = new AuthDetails();
+    auth.setRealmId("management");
+    auth.setClientId("internal-uuid");
+    event.setAuthDetails(auth);
+    var realms = mock(RealmProvider.class);
+    var clients = mock(ClientProvider.class);
+    var realm = mock(RealmModel.class);
+    var client = mock(ClientModel.class);
+    when(session.realms()).thenReturn(realms);
+    when(session.clients()).thenReturn(clients);
+    when(realms.getRealm("management")).thenReturn(realm);
+    when(clients.getClientById(realm, "internal-uuid")).thenReturn(client);
+    when(client.getClientId()).thenReturn("admin-cli", "changed-later");
+    var policy =
+        EventFilterTest.parse(
+            """
+            {"clientIds":["admin-cli"],"userEvents":[],"adminEvents":[
+              {"resourceType":"USER","operations":["DELETE"]}],
+             "delivery":{"rules":[{"id":"client-policy",
+               "match":{"kind":"admin","resourceType":"USER","operations":["DELETE"],
+                        "clientIds":["admin-cli"]},
+               "policy":{"action":"discard","maxFailures":2}}]}}
+            """);
+    listener =
+        new DurableEventListener(session, BridgeConfig.from(Map.of()), wakeRelay, () -> policy);
+    listener.onEvent(event, false);
+    assertEquals("internal-uuid", auth.getClientId());
+    auth.setClientId("changed-source-event");
+    prepare();
+    var captured = ArgumentCaptor.forClass(OutboxEvent.class);
+    verify(em).persist(captured.capture());
+    var row = captured.getValue();
+    var data = new ObjectMapper().readTree(row.payload()).path("data");
+    assertEquals("admin-cli", data.path("clientId").asText());
+    assertEquals("management", data.path("actorRealmId").asText());
+    assertEquals("realm", data.path("realmId").asText());
+    assertEquals("client-policy", row.publicationPolicy().ruleId());
+    verify(client).getClientId();
+    verify(clients).getClientById(realm, "internal-uuid");
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void unresolvedAdminClientsAreOmittedAndNeverMatchAnExplicitClientScope(boolean scoped)
+      throws Exception {
+    var event = EventEnvelopeTest.admin(OperationType.DELETE);
+    var auth = new AuthDetails();
+    auth.setRealmId("removed-realm");
+    auth.setClientId("internal-uuid");
+    event.setAuthDetails(auth);
+    var realms = mock(RealmProvider.class);
+    when(session.realms()).thenReturn(realms);
+    var policy =
+        EventFilterTest.parse(
+            "{\"userEvents\":[],\"adminEvents\":[{\"resourceType\":\"*\",\"operations\":[\"*\"]}]"
+                + (scoped ? ",\"clientIds\":[\"internal-uuid\"]}" : "}"));
+    listener =
+        new DurableEventListener(session, BridgeConfig.from(Map.of()), wakeRelay, () -> policy);
+    listener.onEvent(event, false);
+    if (scoped) {
+      verifyNoInteractions(em, tx, wakeRelay);
+      capture.verifyNoInteractions();
+    } else {
+      prepare();
+      var captured = ArgumentCaptor.forClass(OutboxEvent.class);
+      verify(em).persist(captured.capture());
+      assertFalse(
+          new ObjectMapper().readTree(captured.getValue().payload()).path("data").has("clientId"));
+    }
+    verify(session, never()).clients();
+  }
+
+  @Test
+  void normalizationFailureRollsBackWithoutCapturingMisidentifiedEvents() {
+    var event = EventEnvelopeTest.admin(OperationType.DELETE);
+    var auth = new AuthDetails();
+    auth.setRealmId("management");
+    auth.setClientId("internal-uuid");
+    event.setAuthDetails(auth);
+    var failure = new IllegalStateException("client lookup failed");
+    when(session.realms()).thenThrow(failure);
+    assertSame(
+        failure, assertThrows(IllegalStateException.class, () -> listener.onEvent(event, false)));
+    verify(tx).setRollbackOnly();
+    verifyNoInteractions(em, wakeRelay);
+    capture.verifyNoInteractions();
   }
 
   @Test

@@ -31,7 +31,11 @@ final class CaptureFixtures {
       EventEnvelope encoder, AdminEvent event, Boolean enabled, EventOrdering ordering) {
     return encoder.serialize(
         UUID.randomUUID().toString(),
-        encoder.describe(event, AffectedUser.resolve(event), enabled),
+        encoder.describe(
+            event,
+            AffectedUser.resolve(event),
+            enabled,
+            event.getAuthDetails() == null ? null : event.getAuthDetails().getClientId()),
         ordering,
         System.currentTimeMillis(),
         RETRY);

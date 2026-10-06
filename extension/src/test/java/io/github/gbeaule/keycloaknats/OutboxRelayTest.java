@@ -62,6 +62,8 @@ class OutboxRelayTest {
     unchanged = mock(TypedQuery.class, RETURNS_SELF);
     clock = mock(Query.class);
     when(em.createNativeQuery(anyString(), eq(Long.class))).thenReturn(clock);
+    when(em.createNativeQuery(anyString(), eq(Object[].class)))
+        .thenReturn(mock(Query.class, RETURNS_SELF));
     when(clock.getSingleResult()).thenAnswer(call -> System.currentTimeMillis());
     when(em.createQuery(anyString(), eq(OutboxEvent.class)))
         .thenAnswer(

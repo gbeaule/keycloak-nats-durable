@@ -95,7 +95,9 @@ public final class DurableEventListenerFactory implements EventListenerProviderF
       OutboxRelay relay =
           new OutboxRelay(
               new KeycloakTransactions(
-                  task -> KeycloakModelUtils.runJobInTransaction(factory, task)),
+                  task ->
+                      KeycloakModelUtils.runJobInTransactionWithTimeout(
+                          factory, task, config.relayDatabase().transactionTimeoutSeconds())),
               publisher,
               config,
               metrics);

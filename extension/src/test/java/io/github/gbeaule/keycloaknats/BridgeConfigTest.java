@@ -207,7 +207,8 @@ class BridgeConfigTest {
         (TlsConfig) values.getOrDefault("tls", base.tls()),
         base.filterFile(),
         (Duration) values.getOrDefault("filterReloadInterval", base.filterReloadInterval()),
-        base.auditCleanup());
+        base.auditCleanup(),
+        base.relayDatabase());
   }
 
   @Test
@@ -217,8 +218,33 @@ class BridgeConfigTest {
     assertEquals("KEYCLOAK_EVENTS", c.stream());
     assertEquals(65536, c.maxPayloadBytes());
     assertEquals(1, c.relayWorkers());
+    assertEquals(new RelayDatabaseConfig(10, 5000, 1000), c.relayDatabase());
     assertFalse(c.tls().enabled());
     assertEquals("nats://localhost:4222", c.servers()[0]);
+  }
+
+  @Test
+  void relayDatabaseBudgetAccommodatesTheTotalPublicationBudget() {
+    assertEquals(
+        new RelayDatabaseConfig(3605, 5000, 1000),
+        BridgeConfig.from(Map.of("timeout-ms", "3600000")).relayDatabase());
+    assertEquals(
+        new RelayDatabaseConfig(1, 1000, 1000),
+        BridgeConfig.from(Map.of("timeout-ms", "1", "relay-transaction-timeout-seconds", "1"))
+            .relayDatabase());
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            BridgeConfig.from(
+                Map.of("timeout-ms", "2000", "relay-transaction-timeout-seconds", "2")));
+    assertEquals(
+        new RelayDatabaseConfig(20, 2500, 500),
+        BridgeConfig.from(
+                Map.of(
+                    "relay-transaction-timeout-seconds", "20",
+                    "relay-statement-timeout-ms", "2500",
+                    "relay-lock-timeout-ms", "500"))
+            .relayDatabase());
   }
 
   @ParameterizedTest

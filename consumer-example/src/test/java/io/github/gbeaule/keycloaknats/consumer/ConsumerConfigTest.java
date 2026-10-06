@@ -142,4 +142,24 @@ class ConsumerConfigTest {
         () ->
             new ConsumerConfig(Map.of("KND_CONSUMER_DB_POOL_SIZE", "2147483647")::get).poolSize());
   }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {"", "keycloak.", "keycloak..events", "keycloak.*", ">", "keycloak events"})
+  void subjectNamespaceMustContainLiteralNonemptyTokens(String prefix) {
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> new ConsumerConfig(Map.of("KND_SUBJECT_PREFIX", prefix)::get).subjectPrefix());
+  }
+
+  @Test
+  void namespaceLengthMatchesTheProviderLimit() {
+    assertEquals(
+        "a".repeat(128),
+        new ConsumerConfig(Map.of("KND_SUBJECT_PREFIX", "a".repeat(128))::get).subjectPrefix());
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            new ConsumerConfig(Map.of("KND_SUBJECT_PREFIX", "a".repeat(129))::get).subjectPrefix());
+  }
 }

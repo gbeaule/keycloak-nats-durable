@@ -1,8 +1,43 @@
 # Starting points only: the deployment owner sets thresholds, routing and storage budgets.
 # Collect each outbox once per database (not once per Keycloak replica).
+# Monitoring job names below are templates: keycloak-nats-provider scrapes Keycloak metrics;
+# keycloak-nats-outbox scrapes the database collector; keycloak-nats-example-consumer is optional.
+# Adapt selectors to your scrape jobs. Per-target missing-series checks require up{job,instance}.
+# Removed service-discovery targets require owner-managed expected-target inventory alerts.
 groups:
   - name: keycloak-nats-publication
     rules:
+      - alert: KeycloakPublicationMonitoringTargetDown
+        expr: up{job=~"keycloak-nats-provider|keycloak-nats-outbox"} == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Publication monitoring target cannot be scraped"
+      - alert: KeycloakProviderMetricsMissing
+        expr: |
+          up{job="keycloak-nats-provider"} == 1
+            unless on(job, instance)
+              (knd_publication_failures_total
+                and on(job, instance) knd_audit_cleanup_last_success_timestamp_seconds)
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Reachable Keycloak target is missing publication or cleanup metrics"
+      - alert: KeycloakOutboxMetricsMissing
+        expr: |
+          (up{job="keycloak-nats-outbox"} == 1
+            unless on(job, instance) knd_outbox_scrape_success)
+          or
+          ((up{job="keycloak-nats-outbox"} == 1
+            and on(job, instance) (knd_outbox_scrape_success == 1))
+            unless on(job, instance) knd_outbox_collected_at_timestamp_seconds)
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Reachable outbox target is missing collection metrics"
       - alert: KeycloakOutboxPublicationDelayed
         expr: knd_outbox_oldest_age_seconds > 120
         for: 5m
@@ -59,8 +94,25 @@ groups:
         annotations:
           summary: "Discard diagnostics remain past their configured retention"
   # Optional example application health; separate from the provider's publication obligations.
+  # Omit this group when not operating the example application. No configured target means no alert.
   - name: keycloak-nats-example-consumer
     rules:
+      - alert: KeycloakConsumerMonitoringTargetDown
+        expr: up{job="keycloak-nats-example-consumer"} == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Example consumer monitoring target cannot be scraped"
+      - alert: KeycloakConsumerMetricsMissing
+        expr: |
+          up{job="keycloak-nats-example-consumer"} == 1
+            unless on(job, instance) knd_consumer_ready
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Reachable example consumer target is missing readiness metrics"
       - alert: KeycloakConsumerRetrying
         expr: increase(knd_consumer_retries_total[5m]) > 0
         for: 5m

@@ -81,8 +81,10 @@ ends the extension's publication responsibility. Counter locks cover short datab
 never held during broker requests.
 
 Holding the transaction through publication simplifies ownership and crash recovery, at the cost of
-occupying a database connection during bounded broker requests. Local commit notifications reduce
-latency; periodic scans recover work after missed notifications, another node's failure or a restart.
+occupying a database connection during a bounded publication attempt. The total network deadline
+and relay-specific database limits bound this work; cancelling an attempt does not prove that an
+in-flight original was rejected. Local commit notifications reduce latency; periodic scans recover
+work after missed notifications, another node's failure or a restart.
 Worker concurrency must leave database capacity for Keycloak requests.
 
 A timeout or failed database commit can leave an accepted original whose acknowledgement was lost.

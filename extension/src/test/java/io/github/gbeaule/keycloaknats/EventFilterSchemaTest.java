@@ -69,6 +69,7 @@ class EventFilterSchemaTest {
                     event,
                     AffectedUser.resolve(event),
                     false,
+                    null,
                     "keycloak.events.realm.admin.user.update")
                 .orElseThrow();
         assertEquals(PublicationPolicy.RETRY, policy.policy());

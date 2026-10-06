@@ -59,8 +59,11 @@ share that user's capture sequence. Only direct USER create/update events observ
 
 User identity can be absent, including on a [failed login](examples/user-login-error.json).
 For admin events, the actor and affected user are distinct. A client identifier can describe the
-acting client rather than a resource being edited. Consume optional fields accordingly and reconcile
-state projections as described in [architecture](architecture.md#ordering-and-event-meaning).
+acting client rather than a resource being edited. `data.clientId` and policy `clientIds` use public
+Keycloak client IDs for both event kinds. Admin IDs are resolved in `actorRealmId`, which can differ
+from the affected realm; an unavailable client ID is omitted and cannot match an explicit client scope.
+Consume optional fields accordingly and reconcile state projections as described in
+[architecture](architecture.md#ordering-and-event-meaning).
 
 The envelope omits raw representations and arbitrary event details. Remaining identifiers, resource
 paths and error values still require access controls and an appropriate retention policy.

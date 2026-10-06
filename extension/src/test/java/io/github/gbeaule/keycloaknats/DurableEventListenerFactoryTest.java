@@ -113,7 +113,10 @@ class DurableEventListenerFactoryTest {
       var entityManager = mock(EntityManager.class);
       when(session.getProvider(JpaConnectionProvider.class)).thenReturn(jpa);
       when(jpa.getEntityManager()).thenReturn(entityManager);
-      jobs.when(() -> KeycloakModelUtils.runJobInTransaction(eq(fixture.sessions), any()))
+      jobs.when(
+              () ->
+                  KeycloakModelUtils.runJobInTransactionWithTimeout(
+                      eq(fixture.sessions), any(), eq(10)))
           .thenAnswer(
               invocation -> {
                 KeycloakSessionTask task = invocation.getArgument(1);

@@ -2,6 +2,7 @@ package io.github.gbeaule.keycloaknats.consumer;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.gbeaule.keycloaknats.jetstream.StreamPolicy;
+import io.github.gbeaule.keycloaknats.routing.SubjectPattern;
 import io.nats.client.Connection;
 import io.nats.client.JetStreamOptions;
 import io.nats.client.Nats;
@@ -15,6 +16,7 @@ import io.nats.client.api.RetentionPolicy;
 import io.nats.client.api.StorageType;
 import io.nats.client.api.StreamConfiguration;
 import java.time.Duration;
+import java.util.List;
 
 /** Runs the bounded inbox consumer and explicit provisioning, migration and recovery commands. */
 public final class ConsumerMain {
@@ -104,6 +106,17 @@ public final class ConsumerMain {
               .getConsumerInfo(stream, durable)
               .getConsumerConfiguration();
       validateConsumer(consumerConfig);
+      var filters = consumerConfig.getFilterSubjects();
+      // An unfiltered durable receives every stream subject. Filtered applications may select
+      // any subset of the configured namespace without acquiring stream-info permissions.
+      var subjects =
+          filters == null || filters.isEmpty()
+              ? nats.jetStreamManagement(requests)
+                  .getStreamInfo(stream)
+                  .getConfiguration()
+                  .getSubjects()
+              : filters;
+      validateSubjectNamespace(subjects, config.subjectPrefix());
       settings.validateProgress(consumerConfig);
       if (settings.autoMigrate()) {
         InboxProcessor.initialize(database);
@@ -230,6 +243,18 @@ public final class ConsumerMain {
       throw new IllegalStateException(
           "Require a durable pull consumer with explicit ACKs and disk state;"
               + " retain full history and payloads with no expiry and unlimited redelivery");
+    }
+  }
+
+  static void validateSubjectNamespace(List<String> subjects, String prefix) {
+    if (subjects == null || subjects.isEmpty()) {
+      throw new IllegalStateException("Consumer subject namespace must be explicit");
+    }
+    for (String subject : subjects) {
+      new SubjectPattern(subject);
+      if (!subject.startsWith(prefix + ".")) {
+        throw new IllegalStateException("Consumer subjects must remain within KND_SUBJECT_PREFIX");
+      }
     }
   }
 }

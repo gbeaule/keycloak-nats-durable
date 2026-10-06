@@ -1,12 +1,18 @@
 package io.github.gbeaule.keycloaknats;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import jakarta.persistence.LockModeType;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -15,6 +21,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import org.hibernate.resource.jdbc.spi.PhysicalConnectionHandlingMode;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -293,5 +300,161 @@ class PerUserRelayIT extends RelayIntegrationSupport {
         scalar(
             "SELECT count(*) FROM pg_tables WHERE schemaname='public'"
                 + " AND tablename='kc_nats_outbox'"));
+  }
+
+  @Test
+  void boundedCounterLockWaitRetainsTheOriginalAndItsUserHead() throws Exception {
+    capture("locked-counter-head", "bounded-lock");
+    capture("locked-counter-successor", "bounded-lock");
+    var original = row("locked-counter-head");
+    var successor = row("locked-counter-successor");
+    var bounded =
+        BridgeConfig.from(
+            Map.of(
+                "batch-size", "1",
+                "retry-initial-ms", "1",
+                "retry-max-ms", "1",
+                "relay-statement-timeout-ms", "250",
+                "relay-lock-timeout-ms", "100"));
+    var phases = new AtomicInteger();
+    var sends = new ArrayList<String>();
+    var failures = new ArrayList<String>();
+    String projectionSql =
+        """
+        select last_sequence, head_event_id, head_next_attempt_at, head_created_at
+          from "relay-data".kc_nats_capture_counter where ordering_key=:key
+        """;
+    try (var holder = sessions.openSession();
+        var observer = sessions.openSession()) {
+      var originalHead =
+          observer
+              .createNativeQuery(projectionSql, Object[].class)
+              .setParameter("key", original.orderingKey())
+              .getSingleResult();
+      var relay =
+          new OutboxRelay(
+              work -> {
+                try {
+                  transaction(work);
+                } catch (RuntimeException failure) {
+                  Throwable cause = failure;
+                  while (!(cause instanceof SQLException) && cause.getCause() != null) {
+                    cause = cause.getCause();
+                  }
+                  failures.add(cause instanceof SQLException sql ? sql.getSQLState() : null);
+                  throw failure;
+                }
+                if (phases.incrementAndGet() == 1) {
+                  // Acquire the counter after intent commits. Ownership reacquisition and send do
+                  // not need it; resolving the locked original must wait only for the local bound.
+                  holder.beginTransaction();
+                  holder.find(
+                      CaptureCounter.class, original.orderingKey(), LockModeType.PESSIMISTIC_WRITE);
+                }
+              },
+              publisher(event -> sends.add(event.id())),
+              bounded);
+      try {
+        long started = System.nanoTime();
+        assertEquals(OutboxRelay.Outcome.TRANSACTION_FAILED, relay.runBatch().outcome());
+        assertTrue(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(2));
+        assertEquals(
+            List.of("55P03", "55P03"),
+            failures,
+            "Both resolution and its deferral hit lock_timeout");
+        var retained = row(original.id());
+        assertTrue(retained.publicationMayHaveOccurred());
+        assertEquals(0, retained.attempts());
+        assertEquals(original.payload(), retained.payload());
+        assertEquals(original.subject(), retained.subject());
+        assertEquals(original.userSequence(), retained.userSequence());
+        assertEquals(original.nextAttemptAt(), retained.nextAttemptAt());
+        assertEquals(successor.userSequence(), row(successor.id()).userSequence());
+        assertFalse(row(successor.id()).publicationMayHaveOccurred());
+        assertArrayEquals(
+            originalHead,
+            observer
+                .createNativeQuery(projectionSql, Object[].class)
+                .setParameter("key", original.orderingKey())
+                .getSingleResult(),
+            "Neither failed resolution can advance the head or durable sequence");
+      } finally {
+        if (holder.getTransaction().isActive()) {
+          holder.getTransaction().rollback();
+        }
+      }
+      assertEquals(1, relay.runBatch().published());
+      assertEquals(1, relay.runBatch().published());
+      assertEquals(
+          List.of(original.id(), original.id(), successor.id()),
+          sends,
+          "An unconfirmed resolution retries the original before its successor");
+      assertArrayEquals(
+          new Object[] {originalHead[0], null, null, null},
+          observer
+              .createNativeQuery(projectionSql, Object[].class)
+              .setParameter("key", original.orderingKey())
+              .getSingleResult());
+    }
+  }
+
+  @Test
+  void statementDeadlineAndTransactionLocalSettingsDoNotChangeThePooledConnection()
+      throws Exception {
+    String settingsSql =
+        "select current_setting('statement_timeout'), current_setting('lock_timeout'),"
+            + " pg_backend_pid()";
+    // Retain the borrowed physical connection so restoration cannot pass by switching backends.
+    try (var em =
+        sessions
+            .withOptions()
+            .connectionHandlingMode(PhysicalConnectionHandlingMode.DELAYED_ACQUISITION_AND_HOLD)
+            .openSession()) {
+      em.beginTransaction();
+      final var original = em.createNativeQuery(settingsSql, Object[].class).getSingleResult();
+      capture(em, "timed-out-capture", "bounded-statements", "same-connection");
+      RelayDatabase.limitStatements(em, new RelayDatabaseConfig(10, 100, 50));
+      var limited = em.createNativeQuery(settingsSql, Object[].class).getSingleResult();
+      assertEquals("100ms", limited[0]);
+      assertEquals("50ms", limited[1]);
+      assertEquals(original[2], limited[2]);
+      long started = System.nanoTime();
+      var failure =
+          assertThrows(
+              RuntimeException.class,
+              () -> em.createNativeQuery("select 1 from pg_sleep(5)").getSingleResult());
+      Throwable cause = failure;
+      while (!(cause instanceof SQLException) && cause.getCause() != null) {
+        cause = cause.getCause();
+      }
+      assertEquals("57014", assertInstanceOf(SQLException.class, cause).getSQLState());
+      assertTrue(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(2));
+      em.getTransaction().rollback();
+      em.clear();
+      assertNull(row("timed-out-capture"), "Canceled SQL must roll back earlier outbox mutations");
+      em.beginTransaction();
+      assertArrayEquals(
+          original,
+          em.createNativeQuery(settingsSql, Object[].class).getSingleResult(),
+          "Rollback restores both settings on the same backend");
+      RelayDatabase.limitStatements(em, new RelayDatabaseConfig(10, 100, 50));
+      assertArrayEquals(
+          limited, em.createNativeQuery(settingsSql, Object[].class).getSingleResult());
+      em.getTransaction().commit();
+
+      em.beginTransaction();
+      assertArrayEquals(
+          original,
+          em.createNativeQuery(settingsSql, Object[].class).getSingleResult(),
+          "Commit also restores both settings on the same backend");
+      capture(em, "capture-after-relay", "bounded-statements", "same-connection");
+      assertEquals(
+          1,
+          ((Number) em.createNativeQuery("select 1 from pg_sleep(0.2)").getSingleResult())
+              .intValue(),
+          "A later capture transaction must not inherit the relay's 100ms statement deadline");
+      em.getTransaction().commit();
+    }
+    assertEquals(1L, row("capture-after-relay").userSequence());
   }
 }

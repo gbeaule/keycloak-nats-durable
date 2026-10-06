@@ -5,6 +5,9 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -14,6 +17,7 @@ import static org.mockito.Mockito.when;
 
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import jakarta.persistence.EntityManager;
+import jakarta.persistence.Query;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -242,6 +246,8 @@ class KeycloakTransactionsTest {
     private Consumer<KeycloakSession> beforeClose = session -> {};
 
     Lifecycle() {
+      when(em.createNativeQuery(anyString(), eq(Object[].class)))
+          .thenReturn(mock(Query.class, RETURNS_SELF));
       var jpa = mock(JpaConnectionProvider.class);
       when(jpa.getEntityManager()).thenReturn(em);
       var tracing = mock(TracingProvider.class);

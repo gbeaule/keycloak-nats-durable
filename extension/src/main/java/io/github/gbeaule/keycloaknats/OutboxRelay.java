@@ -62,7 +62,13 @@ public final class OutboxRelay implements Runnable {
       EventPublisher publisher,
       BridgeConfig config,
       RelayMetrics metrics) {
-    this.transactions = transactions;
+    this.transactions =
+        work ->
+            transactions.run(
+                em -> {
+                  RelayDatabase.limitStatements(em, config.relayDatabase());
+                  work.accept(em);
+                });
     this.publisher = publisher;
     this.config = config;
     this.metrics = metrics;

@@ -60,11 +60,17 @@ public final class DurableEventListener implements EventListenerProvider {
           if (!policy.mayAccept(event, subject)) {
             return null;
           }
+          String clientId = ActingClient.resolve(event, session);
+          if (!policy.mayAccept(event, clientId, subject)) {
+            return null;
+          }
           String userId = AffectedUser.resolve(event, session);
           Boolean enabled = loadObservedEnabledState(event, userId);
           return policy
-              .resolve(event, userId, enabled, subject)
-              .map(resolved -> new Capture(envelopes.describe(event, userId, enabled), resolved))
+              .resolve(event, userId, enabled, clientId, subject)
+              .map(
+                  resolved ->
+                      new Capture(envelopes.describe(event, userId, enabled, clientId), resolved))
               .orElse(null);
         });
   }

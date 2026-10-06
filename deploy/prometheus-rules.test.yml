@@ -1,0 +1,165 @@
+# Run from this directory: promtool test rules prometheus-rules.test.yml
+rule_files:
+  - prometheus-rules.yml
+evaluation_interval: 1m
+tests:
+  - name: healthy targets and unrelated jobs
+    interval: 1m
+    input_series:
+      - series: 'up{job="keycloak-nats-provider",instance="kc1"}'
+        values: '1+0x4'
+      - series: 'knd_publication_failures_total{job="keycloak-nats-provider",instance="kc1"}'
+        values: '0+0x4'
+      - series: 'knd_audit_cleanup_last_success_timestamp_seconds{job="keycloak-nats-provider",instance="kc1"}'
+        values: '60+60x4'
+      - series: 'up{job="keycloak-nats-outbox",instance="db1"}'
+        values: '1+0x4'
+      - series: 'knd_outbox_scrape_success{job="keycloak-nats-outbox",instance="db1"}'
+        values: '1+0x4'
+      - series: 'knd_outbox_collected_at_timestamp_seconds{job="keycloak-nats-outbox",instance="db1"}'
+        values: '60+60x4'
+      - series: 'up{job="keycloak-nats-example-consumer",instance="app1"}'
+        values: '1+0x4'
+      - series: 'knd_consumer_ready{job="keycloak-nats-example-consumer",instance="app1"}'
+        values: '1+0x4'
+      - series: 'up{job="unrelated",instance="other"}'
+        values: '0+0x4'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: KeycloakPublicationMonitoringTargetDown
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: KeycloakProviderMetricsMissing
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: KeycloakOutboxMetricsMissing
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: KeycloakConsumerMonitoringTargetDown
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: KeycloakConsumerMetricsMissing
+        exp_alerts: []
+  - name: failed scrapes preserve per-target alerts
+    interval: 1m
+    input_series:
+      - series: 'up{job="keycloak-nats-provider",instance="kc1"}'
+        values: '0+0x4'
+      - series: 'up{job="keycloak-nats-outbox",instance="db1"}'
+        values: '0+0x4'
+      - series: 'up{job="keycloak-nats-example-consumer",instance="app1"}'
+        values: '0+0x4'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: KeycloakPublicationMonitoringTargetDown
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: KeycloakPublicationMonitoringTargetDown
+        exp_alerts:
+          - exp_labels: {job: keycloak-nats-provider, instance: kc1, severity: warning}
+            exp_annotations:
+              summary: "Publication monitoring target cannot be scraped"
+          - exp_labels: {job: keycloak-nats-outbox, instance: db1, severity: warning}
+            exp_annotations:
+              summary: "Publication monitoring target cannot be scraped"
+      - eval_time: 3m
+        alertname: KeycloakConsumerMonitoringTargetDown
+        exp_alerts:
+          - exp_labels: {job: keycloak-nats-example-consumer, instance: app1, severity: warning}
+            exp_annotations:
+              summary: "Example consumer monitoring target cannot be scraped"
+      - eval_time: 3m
+        alertname: KeycloakProviderMetricsMissing
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: KeycloakOutboxMetricsMissing
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: KeycloakConsumerMetricsMissing
+        exp_alerts: []
+  - name: reachable endpoints with incomplete metrics
+    interval: 1m
+    input_series:
+      - series: 'up{job="keycloak-nats-provider",instance="kc1"}'
+        values: '1+0x4'
+      - series: 'knd_publication_failures_total{job="keycloak-nats-provider",instance="kc1"}'
+        values: '0+0x4'
+      - series: 'up{job="keycloak-nats-provider",instance="kc2"}'
+        values: '1+0x4'
+      - series: 'knd_publication_failures_total{job="keycloak-nats-provider",instance="kc2"}'
+        values: '0+0x4'
+      - series: 'knd_audit_cleanup_last_success_timestamp_seconds{job="keycloak-nats-provider",instance="kc2"}'
+        values: '60+60x4'
+      - series: 'up{job="keycloak-nats-outbox",instance="db1"}'
+        values: '1+0x4'
+      - series: 'knd_outbox_scrape_success{job="keycloak-nats-outbox",instance="db1"}'
+        values: '1+0x4'
+      - series: 'up{job="keycloak-nats-outbox",instance="failed-collector"}'
+        values: '1+0x4'
+      - series: 'knd_outbox_scrape_success{job="keycloak-nats-outbox",instance="failed-collector"}'
+        values: '0+0x4'
+      - series: 'up{job="keycloak-nats-outbox",instance="wrong-endpoint"}'
+        values: '1+0x4'
+      - series: 'up{job="keycloak-nats-example-consumer",instance="app1"}'
+        values: '1+0x4'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: KeycloakProviderMetricsMissing
+        exp_alerts:
+          - exp_labels: {job: keycloak-nats-provider, instance: kc1, severity: warning}
+            exp_annotations:
+              summary: "Reachable Keycloak target is missing publication or cleanup metrics"
+      - eval_time: 3m
+        alertname: KeycloakOutboxMetricsMissing
+        exp_alerts:
+          - exp_labels: {job: keycloak-nats-outbox, instance: db1, severity: warning}
+            exp_annotations:
+              summary: "Reachable outbox target is missing collection metrics"
+          - exp_labels: {job: keycloak-nats-outbox, instance: wrong-endpoint, severity: warning}
+            exp_annotations:
+              summary: "Reachable outbox target is missing collection metrics"
+      - eval_time: 3m
+        alertname: KeycloakOutboxCollectionFailed
+        exp_alerts:
+          - exp_labels: {job: keycloak-nats-outbox, instance: failed-collector, severity: warning}
+            exp_annotations:
+              summary: "Outbox monitoring is failing or stale"
+      - eval_time: 3m
+        alertname: KeycloakConsumerMetricsMissing
+        exp_alerts:
+          - exp_labels: {job: keycloak-nats-example-consumer, instance: app1, severity: warning}
+            exp_annotations:
+              summary: "Reachable example consumer target is missing readiness metrics"
+  - name: stale readiness series with another healthy instance
+    interval: 1m
+    input_series:
+      - series: 'up{job="keycloak-nats-example-consumer",instance="app1"}'
+        values: '1+0x5'
+      - series: 'knd_consumer_ready{job="keycloak-nats-example-consumer",instance="app1"}'
+        values: '1 stale'
+      - series: 'up{job="keycloak-nats-example-consumer",instance="app2"}'
+        values: '1+0x5'
+      - series: 'knd_consumer_ready{job="keycloak-nats-example-consumer",instance="app2"}'
+        values: '1+0x5'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: KeycloakConsumerMetricsMissing
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: KeycloakConsumerMetricsMissing
+        exp_alerts:
+          - exp_labels: {job: keycloak-nats-example-consumer, instance: app1, severity: warning}
+            exp_annotations:
+              summary: "Reachable example consumer target is missing readiness metrics"
+  - name: intentionally omitted example application
+    interval: 1m
+    input_series:
+      - series: 'up{job="unrelated",instance="other"}'
+        values: '1+0x4'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: KeycloakConsumerMonitoringTargetDown
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: KeycloakConsumerMetricsMissing
+        exp_alerts: []

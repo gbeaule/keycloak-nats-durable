@@ -81,6 +81,14 @@ batch limits and transaction timeout are independent maintenance settings. These
 provider-over-environment precedence. Event publication policy belongs only in the filter file;
 receiver deadlines and application processing settings do not belong there.
 
+Publication has one total network budget covering connection, stream validation and acknowledgement.
+Relay transaction, statement and lock-wait limits are separate, transaction-local database bounds;
+they do not change capture transactions or pooled connection settings. Their configuration lives in
+[BridgeConfig](../extension/src/main/java/io/github/gbeaule/keycloaknats/BridgeConfig.java) and
+[RelayDatabaseConfig](../extension/src/main/java/io/github/gbeaule/keycloaknats/RelayDatabaseConfig.java).
+Keep the relay transaction budget above the publication budget and leave time for database work.
+The deployment must also bound Keycloak's shared pool acquisition and database socket operations.
+
 The server's `max_payload` and the stream's message-size limit must accommodate the configured
 payload limit plus headers. The publisher checks both before sending; increasing the provider's
 payload limit may also require increasing the broker limits.
@@ -94,8 +102,10 @@ guarantee. Test the actual storage and HA topology; replica counts alone cannot 
 
 Separate provisioning, publisher, consumer and monitoring identities. The publisher needs event
 publication, stream-info access and its reply inbox, without stream administration rights.
-Consumers need their durable's information, pull and ACK permissions. A shared server token does not
-establish per-user authorization. Restrict monitoring endpoints and protect event identifiers and
+Consumers need their durable's information, pull and ACK permissions. Startup validates every filter
+against the configured subject namespace; intentional subsets are allowed. An unfiltered durable
+also needs stream-info access so startup can check all subjects it would receive. A shared server
+token does not establish per-user authorization. Restrict monitoring endpoints and protect event identifiers and
 recovery copies as application data.
 
 The example consumer's schema belongs to
@@ -128,9 +138,10 @@ and [AuditCleanupMetrics](../extension/src/main/java/io/github/gbeaule/keycloakn
 Publication failures count failed calls, even if their database transaction later rolls back;
 publication, retry and discard resolutions count only confirmed source commits. Counters reset with
 the process. Discard reasons are bounded labels; event/user IDs appear only in database diagnostics.
-Adapt the [alert rules](../deploy/prometheus-rules.yml) to your objective and collection interval.
-Alert on failed or stale collection as well as backlog thresholds. Do not sum database-wide gauges
-across replicas or treat consumer cursors and effects as extension health.
+Adapt the [alert rules](../deploy/prometheus-rules.yml), including thresholds, intervals and scrape-job
+selectors. Alert on failed scrapes, missing metrics and stale collection; maintain an expected-target
+inventory for services removed from discovery. Do not sum database-wide gauges across replicas or
+treat consumer cursors and effects as extension health.
 
 Budget outage storage from accepted event rate × outage duration × measured storage per event,
 including indexes, WAL, replication and vacuum headroom. Recovery requires sustained publication

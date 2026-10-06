@@ -37,8 +37,11 @@ record CaptureScope(
   }
 
   boolean accepts(String realm, String client, String error, String subject) {
+    return acceptsWithoutClient(realm, error, subject) && matches(clientIds, client);
+  }
+
+  boolean acceptsWithoutClient(String realm, String error, String subject) {
     return matches(realmIds, realm)
-        && matches(clientIds, client)
         && matches(outcomes, error == null ? "success" : "error")
         && subjects.stream().anyMatch(pattern -> pattern.matches(subject));
   }

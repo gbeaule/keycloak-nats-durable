@@ -28,7 +28,12 @@ class AffectedUserTest {
     "USER,users/target",
     "USER,users/target/credentials/credential",
     "USER,users/target/reset-password",
+    "USER,users/target/logout",
+    "USER,users/target/execute-actions-email",
+    "USER,users/target/send-verify-email",
+    "USER,users/target/reset-password-email",
     "USER,users/target/consents/client",
+    "USER_LOGIN_FAILURE,users/target",
     "GROUP_MEMBERSHIP,users/target/groups/group",
     "REALM_ROLE_MAPPING,users/target/role-mappings/realm",
     "CLIENT_ROLE_MAPPING,users/target/role-mappings/clients/client"
@@ -52,7 +57,7 @@ class AffectedUserTest {
     var row =
         encoder.serialize(
             UUID.randomUUID().toString(),
-            encoder.describe(event, userId, null),
+            encoder.describe(event, userId, null, null),
             new EventOrdering("realm", "target", 2),
             123,
             CaptureFixtures.RETRY);
@@ -90,7 +95,6 @@ class AffectedUserTest {
     "USER,users/ /credentials/c",
     "USER,users//credentials/c",
     "USER,/users/target",
-    "USER,users/target/",
     "USER,users/./credentials/c",
     "USER,users/../credentials/c",
     "USER,users/target/credentials/"
@@ -101,6 +105,85 @@ class AffectedUserTest {
     event.setResourcePath(path);
     assertNull(AffectedUser.resolve(event));
     assertNull(AffectedUser.directUserId(event));
+    assertNull(AffectedUser.resolve(event, request(event, "target")));
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "USER,UPDATE,users/target/",
+    "USER,ACTION,users/target/logout/",
+    "USER,ACTION,users/target/reset-password/",
+    "USER,ACTION,users/target/execute-actions-email/",
+    "USER,ACTION,users/target/send-verify-email/",
+    "USER,ACTION,users/target/reset-password-email/",
+    "USER,ACTION,users/target/credentials/credential/",
+    "USER,ACTION,users/target/consents/client/",
+    "USER,CREATE,users/target/federated-identity/provider/",
+    "USER,DELETE,users/target/federated-identity/provider/",
+    "USER_LOGIN_FAILURE,DELETE,users/target/",
+    "GROUP_MEMBERSHIP,CREATE,users/target/groups/group/",
+    "REALM_ROLE_MAPPING,DELETE,users/target/role-mappings/realm/",
+    "CLIENT_ROLE_MAPPING,CREATE,users/target/role-mappings/clients/client/"
+  })
+  void endpointTrailingSlashesPreserveRoutedIdentity(
+      String resource, String operation, String path) {
+    var event = EventEnvelopeTest.admin(OperationType.valueOf(operation));
+    event.setResourceTypeAsString(resource);
+    event.setResourcePath(path);
+    assertEquals("target", AffectedUser.resolve(event, request(event, "target")));
+    assertEquals(
+        path.equals("users/target/") && resource.equals("USER"),
+        AffectedUser.isDirectUser(event, "target"));
+    assertNull(
+        AffectedUser.resolve(event), "Decoded trailing slashes alone cannot identify a user");
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"f:p:x/", "f:p:x//", "f:p:x/+%2F/用户/"})
+  void trailingDelimiterDoesNotTrimOpaqueRoutedUserIds(String user) {
+    var event = EventEnvelopeTest.admin(OperationType.UPDATE);
+    event.setResourcePath("users/" + user + "/");
+    assertEquals(user, AffectedUser.resolve(event, request(event, user)));
+    assertTrue(AffectedUser.isDirectUser(event, user));
+    assertNull(AffectedUser.resolve(event));
+    event.setOperationType(OperationType.ACTION);
+    event.setResourcePath("users/" + user + "/logout/");
+    assertEquals(user, AffectedUser.resolve(event, request(event, user)));
+    assertFalse(AffectedUser.isDirectUser(event, user));
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"CREATE", "DELETE"})
+  void federatedIdentityRoutesRequireTheirExactOpaqueProvider(String operation) {
+    String user = "f:p:x/federated-identity";
+    String provider = "provider/+%2F/用户/";
+    var event = EventEnvelopeTest.admin(OperationType.valueOf(operation));
+    event.setResourcePath("users/" + user + "/federated-identity/" + provider);
+    var session = AdminRequestFixtures.request(event, user, Map.of("provider", provider));
+    assertEquals(user, AffectedUser.resolve(event, session));
+    assertFalse(AffectedUser.isDirectUser(event, user));
+    assertNull(AffectedUser.resolve(event));
+    session.getContext().getUri().getPathParameters().putSingle("provider", "other");
+    assertNull(AffectedUser.resolve(event, session));
+    session.getContext().getUri().getPathParameters().remove("provider");
+    assertNull(AffectedUser.resolve(event, session));
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "USER,UPDATE,users/target/logout",
+    "USER,DELETE,users/target/send-verify-email",
+    "USER,UPDATE,users/target/federated-identity/provider",
+    "USER,ACTION,users/target/federated-identity/provider",
+    "USER_LOGIN_FAILURE,UPDATE,users/target",
+    "USER_LOGIN_FAILURE,DELETE,users/target/logout",
+    "USER,ACTION,users/target/logout//"
+  })
+  void nestedResourcesRejectUnrelatedOperationsAndExtraDelimiters(
+      String resource, String operation, String path) {
+    var event = EventEnvelopeTest.admin(OperationType.valueOf(operation));
+    event.setResourceTypeAsString(resource);
+    event.setResourcePath(path);
     assertNull(AffectedUser.resolve(event, request(event, "target")));
   }
 
@@ -265,7 +348,9 @@ class AffectedUserTest {
             "groupId",
             "group",
             "client-id",
-            "client"));
+            "client",
+            "provider",
+            "provider"));
   }
 
   @ParameterizedTest
