@@ -19,12 +19,14 @@ flowchart LR
 ```
 
 The listener stores selected events in an outbox using Keycloak's existing persistence unit. Capture
-failure marks the transaction for rollback. NATS availability is outside the request transaction, so
-a broker outage allows account operations to continue while the database has capacity.
+failures reject the account commit even if Keycloak swallows a callback exception. NATS availability
+is outside the request transaction, so a broker outage allows account operations to continue while
+the database has capacity.
 
 Capture separates immutable event and policy snapshots from persistence. Callbacks freeze the
-selected data; transaction preparation stores the batch with its per-user positions. This permits
-nested error-event transactions to finish without waiting on their caller's capture locks.
+selected data in one buffer shared by the transaction's listeners; preparation stores the batch
+with its per-user positions. This permits nested error-event transactions to finish without waiting
+on their caller's capture locks.
 Each user's callback order is preserved, and concurrent transactions serialize through durable
 counters. Counters survive user deletion and outbox draining.
 

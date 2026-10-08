@@ -108,11 +108,56 @@ class OutboxReportTest {
     verify(db).prepareStatement(contains("\"tenant\"\"schema\".\"kc_nats_discard_audit\""));
     verify(query).setLong(1, 42);
     verify(query).setString(2, "previous");
-    verify(query).setInt(3, 10);
+    verify(query).setString(3, "");
+    verify(query).setString(4, "^[^.]+(\\.[^.]+)*$");
+    verify(query).setString(5, "");
+    verify(query).setString(6, "");
+    verify(query).setInt(7, 10);
     verify(query).setQueryTimeout(2);
     verify(db).setReadOnly(true);
     verify(db).commit();
     verify(db).close();
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {">", "events.tenant[1]'.*"})
+  void scopedInspectionBindsLiteralScopeAndCursorWithoutChangingTheReadOnlyBoundary(String subject)
+      throws Exception {
+    var db = mock(Connection.class);
+    var source = source(db);
+    when(db.prepareStatement(contains("set_config"))).thenReturn(mock(PreparedStatement.class));
+    var query = query(db, "ORDER BY discarded_at");
+    when(query.executeQuery().next()).thenReturn(false);
+    String realmPrefix = "events.tenant[1]'.";
+    assertTrue(
+        OutboxReport.inspect(source, "public", subject, realmPrefix, 3, 42, "previous'", 2)
+            .isEmpty());
+    String pattern = OutboxReport.sqlPattern(subject);
+    verify(query).setLong(1, 42);
+    verify(query).setString(2, "previous'");
+    verify(query).setString(3, ">".equals(subject) ? "" : pattern);
+    verify(query).setString(4, pattern);
+    verify(query).setString(5, realmPrefix);
+    verify(query).setString(6, realmPrefix);
+    verify(query).setInt(7, 2);
+    verify(query).setQueryTimeout(3);
+    verify(db).prepareStatement(contains("AND (? = '' OR subject ~ ?)"));
+    verify(db, never()).prepareStatement(contains("tenant[1]"));
+    verify(db, never()).prepareStatement(contains("previous'"));
+    verify(db).setReadOnly(true);
+    verify(db).setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+    verify(db).setAutoCommit(false);
+    verify(db).commit();
+    verify(db).close();
+  }
+
+  @Test
+  void invalidAuditSubjectIsRejectedBeforeDatabaseAcquisition() throws Exception {
+    var source = mock(DataSource.class);
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> OutboxReport.inspect(source, "public", "events.>.login", "", 3, 0, "", 2));
+    verify(source, never()).getConnection();
   }
 
   @Test

@@ -5,6 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyString;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -18,6 +20,7 @@ import static org.mockito.Mockito.when;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.BooleanNode;
 import jakarta.persistence.EntityManager;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
@@ -53,7 +56,7 @@ class DurableEventListenerTest {
   @BeforeEach
   void setup() {
     capture = org.mockito.Mockito.mockStatic(CaptureRepository.class);
-    capture.when(() -> CaptureRepository.persistBatch(any(), any(), any())).thenCallRealMethod();
+    capture.when(() -> CaptureRepository.persistBatch(any(), any())).thenCallRealMethod();
     heads = org.mockito.Mockito.mockStatic(OutboxHeads.class);
     capture
         .when(() -> CaptureRepository.allocateNextSequence(any(), any(), any()))
@@ -64,6 +67,11 @@ class DurableEventListenerTest {
                     : new EventOrdering(call.getArgument(1), call.getArgument(2), 1));
     capture.when(() -> CaptureRepository.readDatabaseTime(any())).thenReturn(1234L);
     session = mock(KeycloakSession.class);
+    var attributes = new HashMap<String, Object>();
+    when(session.getAttribute(anyString())).thenAnswer(call -> attributes.get(call.getArgument(0)));
+    doAnswer(call -> attributes.put(call.getArgument(0), call.getArgument(1)))
+        .when(session)
+        .setAttribute(anyString(), any());
     em = mock(EntityManager.class);
     tx = mock(KeycloakTransactionManager.class);
     when(session.getTransactionManager()).thenReturn(tx);
@@ -125,7 +133,8 @@ class DurableEventListenerTest {
         assertThrows(IllegalArgumentException.class, () -> listener.onEvent(event, false));
     assertEquals("Event subject exceeds storage limit", failure.getMessage());
     verify(tx).setRollbackOnly();
-    verify(tx, never()).enlistAfterCompletion(any());
+    verify(tx).enlistPrepare(any());
+    verify(tx).enlistAfterCompletion(any());
     capture.verifyNoInteractions();
     verifyNoInteractions(em, wakeRelay);
   }
@@ -285,7 +294,8 @@ class DurableEventListenerTest {
     assertThrows(NullPointerException.class, () -> listener.onEvent(event));
     verify(tx).setRollbackOnly();
     verifyNoInteractions(em, wakeRelay);
-    verify(tx, never()).enlistAfterCompletion(any());
+    verify(tx).enlistPrepare(any());
+    verify(tx).enlistAfterCompletion(any());
   }
 
   @Test
@@ -302,7 +312,7 @@ class DurableEventListenerTest {
     when(tx.isActive()).thenReturn(false);
     assertThrows(IllegalStateException.class, () -> listener.onEvent(EventEnvelopeTest.login()));
     verify(em, never()).persist(any());
-    verify(tx).setRollbackOnly();
+    verify(tx, never()).setRollbackOnly();
     verifyNoInteractions(em, wakeRelay);
     verify(tx, never()).enlistAfterCompletion(any());
   }
@@ -441,6 +451,22 @@ class DurableEventListenerTest {
     verifyNoInteractions(em);
     verify(tx).setRollbackOnly();
     verifyNoInteractions(wakeRelay);
+    var guard = ArgumentCaptor.forClass(KeycloakTransaction.class);
+    verify(tx).enlistPrepare(guard.capture());
+    guard.getValue().begin();
+    assertSame(
+        failure, assertThrows(IllegalStateException.class, guard.getValue()::commit).getCause());
+    guard.getValue().rollback();
+    org.mockito.Mockito.doNothing().when(tx).enlistAfterCompletion(any());
+    org.mockito.Mockito.clearInvocations(tx);
+    listener.onEvent(EventEnvelopeTest.login());
+    prepare();
+    var completion = ArgumentCaptor.forClass(KeycloakTransaction.class);
+    verify(tx).enlistAfterCompletion(completion.capture());
+    completion.getValue().begin();
+    completion.getValue().commit();
+    verify(em).persist(any(OutboxEvent.class));
+    verify(wakeRelay).run();
   }
 
   @ParameterizedTest
@@ -657,10 +683,20 @@ class DurableEventListenerTest {
 
   @Test
   void prepareEnlistmentFailureMarksRollbackBeforeAnyPersistence() {
-    doThrow(new IllegalStateException("cannot enlist")).when(tx).enlistPrepare(any());
-    assertThrows(IllegalStateException.class, () -> listener.onEvent(EventEnvelopeTest.login()));
+    var failure = new IllegalStateException("cannot enlist");
+    doThrow(failure).when(tx).enlistPrepare(any());
+    var hibernate = mock(org.hibernate.engine.spi.SessionImplementor.class);
+    var managed = mock(org.hibernate.Transaction.class);
+    when(em.unwrap(org.hibernate.engine.spi.SessionImplementor.class)).thenReturn(hibernate);
+    when(hibernate.accessTransaction()).thenReturn(managed);
+    assertSame(
+        failure,
+        assertThrows(
+            IllegalStateException.class, () -> listener.onEvent(EventEnvelopeTest.login())));
     verify(tx).setRollbackOnly();
-    verifyNoInteractions(em, wakeRelay);
+    verify(managed).markRollbackOnly();
+    verify(em, never()).persist(any());
+    verifyNoInteractions(wakeRelay);
   }
 
   @Test

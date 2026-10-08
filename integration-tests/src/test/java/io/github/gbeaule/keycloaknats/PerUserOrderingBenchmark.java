@@ -379,19 +379,37 @@ class PerUserOrderingBenchmark extends RelayIntegrationSupport {
 
   private static Object expiryPlan() throws Exception {
     long now = scalar("SELECT floor(extract(epoch FROM clock_timestamp())*1000)");
-    try (var connection = database.getConnection();
-        var query =
-            connection.prepareStatement(
-                "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM "
-                    + OUTBOX
-                    + " WHERE next_expiry_attempt_at <= ?"
-                    + " ORDER BY next_expiry_attempt_at,id LIMIT 1 FOR UPDATE SKIP LOCKED")) {
-      query.setLong(1, now);
-      try (var rows = query.executeQuery()) {
-        assertTrue(rows.next());
-        return objectMapper.readTree(rows.getString(1));
+    var queries = new ArrayList<String>();
+    try (var em =
+        sessions
+            .withOptions()
+            .statementInspector(
+                (org.hibernate.resource.jdbc.spi.StatementInspector)
+                    sql -> {
+                      queries.add(sql);
+                      return sql;
+                    })
+            .openSession()) {
+      em.beginTransaction();
+      OutboxRepository.lockNextExpired(em, now);
+      em.getTransaction().rollback();
+    }
+    assertEquals(2, queries.size(), "Expiry inspects both ordered and independent scans");
+    var plans = objectMapper.createArrayNode();
+    try (var connection = database.getConnection()) {
+      for (String sql : queries) {
+        try (var query =
+            connection.prepareStatement("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + sql)) {
+          query.setLong(1, now);
+          query.setInt(2, 1);
+          try (var rows = query.executeQuery()) {
+            assertTrue(rows.next());
+            plans.add(objectMapper.readTree(rows.getString(1)).get(0));
+          }
+        }
       }
     }
+    return plans;
   }
 
   private static void seedExpired(int count, String user) {

@@ -125,7 +125,8 @@ The packaged [OutboxReport](../consumer-example/src/main/java/io/github/gbeaule/
 collector emits JSON or Prometheus output using a read-only database identity with these
 [column grants](../deploy/outbox-monitor.sql). Run its main class from the example JAR with `json`,
 `prometheus` or `audit` as the argument. Only its report settings are loaded: no consumer program,
-consumer database or NATS connection is required. `audit` reads a bounded metadata page; pass
+consumer database or NATS connection is required. All formats apply the configured subject and realm
+scope. `audit` reads a bounded metadata page; pass
 `audit <afterDiscardedAt> <afterId> <limit>` to continue after its last row.
 
 The report counts users with selected events behind an unresolved predecessor. Predecessor checks

@@ -303,9 +303,98 @@ class PerUserRelayIT extends RelayIntegrationSupport {
   }
 
   @Test
+  void lockedCounterSkipsItsUserAndLetsOrderedAndIndependentPublicationsProgress()
+      throws Exception {
+    capture("counter-locked-head", "counter-locked");
+    capture("counter-locked-successor", "counter-locked");
+    capture("counter-other", "counter-other");
+    capture("counter-independent", null);
+    var original = row("counter-locked-head");
+    var sent = new ArrayList<String>();
+    try (var holder = sessions.openSession()) {
+      holder.beginTransaction();
+      holder.find(CaptureCounter.class, original.orderingKey(), LockModeType.PESSIMISTIC_WRITE);
+      var relay =
+          new OutboxRelay(
+              PerUserRelayIT::transaction, publisher(event -> sent.add(event.id())), config);
+      try {
+        assertEquals(2, relay.runBatch().published());
+        assertEquals(Set.of("counter-other", "counter-independent"), Set.copyOf(sent));
+        for (int run = 0; run < 3; run++) {
+          assertEquals(OutboxRelay.Outcome.NO_WORK, relay.runBatch().outcome());
+        }
+        assertEquals(2, sent.size(), "A locked counter must not cause repeated sends");
+        assertFalse(row(original.id()).publicationMayHaveOccurred());
+        assertFalse(row("counter-locked-successor").publicationMayHaveOccurred());
+      } finally {
+        holder.getTransaction().rollback();
+      }
+      assertEquals(2, relay.runBatch().published());
+      assertEquals(List.of("counter-locked-head", "counter-locked-successor"), sent.subList(2, 4));
+    }
+  }
+
+  @Test
+  void lockedCounterSkipsQueuedExpiryAndLetsUnrelatedDiscardsProgress() throws Exception {
+    capture("expiry-locked-head", "expiry-locked");
+    captureExpired("expiry-locked-successor", "expiry-locked");
+    captureExpired("expiry-other", "expiry-other");
+    captureExpired("expiry-independent", null);
+    try (var holder = sessions.openSession()) {
+      holder.beginTransaction();
+      holder.find(
+          CaptureCounter.class,
+          row("expiry-locked-head").orderingKey(),
+          LockModeType.PESSIMISTIC_WRITE);
+      var sent = new ArrayList<String>();
+      var relay =
+          new OutboxRelay(
+              PerUserRelayIT::transaction, publisher(event -> sent.add(event.id())), config);
+      try {
+        assertEquals(2, relay.runBatch().expired());
+        for (int run = 0; run < 3; run++) {
+          assertEquals(OutboxRelay.Outcome.NO_WORK, relay.runBatch().outcome());
+        }
+        assertTrue(sent.isEmpty());
+        assertFalse(row("expiry-locked-successor").publicationMayHaveOccurred());
+        assertNull(row("expiry-other"));
+        assertNull(row("expiry-independent"));
+        assertFalse(row("expiry-locked-head").publicationMayHaveOccurred());
+      } finally {
+        holder.getTransaction().rollback();
+      }
+      var result = relay.runBatch();
+      assertEquals(1, result.expired());
+      assertEquals(1, result.published());
+      assertEquals(List.of("expiry-locked-head"), sent);
+    }
+  }
+
+  private static void captureExpired(String id, String user) {
+    transaction(
+        em -> {
+          var event =
+              new OutboxEvent(
+                  id,
+                  "keycloak.events.relay." + id,
+                  "{\"id\":\"" + id + "\"}",
+                  CaptureRepository.readDatabaseTime(em) - 2000,
+                  "relay",
+                  "io.keycloak.user.login",
+                  CaptureRepository.allocateNextSequence(em, "relay", user),
+                  new ResolvedPublicationPolicy(
+                      new PublicationPolicy(1, null), EventFilter.digest(new byte[0]), null));
+          em.persist(event);
+          OutboxHeads.refresh(em, event.orderingKey());
+        });
+  }
+
+  @Test
   void boundedCounterLockWaitRetainsTheOriginalAndItsUserHead() throws Exception {
     capture("locked-counter-head", "bounded-lock");
     capture("locked-counter-successor", "bounded-lock");
+    capture("after-intent-other", "after-intent-other");
+    capture("after-intent-independent", null);
     var original = row("locked-counter-head");
     var successor = row("locked-counter-successor");
     var bounded =
@@ -378,6 +467,16 @@ class PerUserRelayIT extends RelayIntegrationSupport {
                 .setParameter("key", original.orderingKey())
                 .getSingleResult(),
             "Neither failed resolution can advance the head or durable sequence");
+        assertEquals(1, relay.runBatch().published());
+        assertEquals(1, relay.runBatch().published());
+        for (int run = 0; run < 3; run++) {
+          assertEquals(OutboxRelay.Outcome.NO_WORK, relay.runBatch().outcome());
+        }
+        assertEquals(original.id(), sends.getFirst());
+        assertEquals(
+            Set.of("after-intent-other", "after-intent-independent"),
+            Set.copyOf(sends.subList(1, 3)),
+            "After the first unresolved send, counter contention must not monopolize the worker");
       } finally {
         if (holder.getTransaction().isActive()) {
           holder.getTransaction().rollback();
@@ -386,8 +485,8 @@ class PerUserRelayIT extends RelayIntegrationSupport {
       assertEquals(1, relay.runBatch().published());
       assertEquals(1, relay.runBatch().published());
       assertEquals(
-          List.of(original.id(), original.id(), successor.id()),
-          sends,
+          List.of(original.id(), successor.id()),
+          sends.subList(3, 5),
           "An unconfirmed resolution retries the original before its successor");
       assertArrayEquals(
           new Object[] {originalHead[0], null, null, null},

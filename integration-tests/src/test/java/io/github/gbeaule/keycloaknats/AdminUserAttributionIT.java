@@ -202,6 +202,82 @@ class AdminUserAttributionIT extends IntegrationSupport {
   }
 
   @ParameterizedTest
+  @org.junit.jupiter.params.provider.CsvSource({"false,''", "true,/"})
+  void organizationMemberDeletionSharesTheUserSequenceForManagedAndUnmanagedMembers(
+      boolean managed, String suffix) throws Exception {
+    replace(ALL);
+    assertEquals(
+        204,
+        request("PUT", "/admin/realms/durable-test", Map.of("organizationsEnabled", true))
+            .statusCode());
+    String name = "organization-" + UUID.randomUUID();
+    var created =
+        request(
+            "POST",
+            "/admin/realms/durable-test/organizations",
+            Map.of("name", name, "alias", name));
+    assertEquals(201, created.statusCode(), created.body());
+    String location = created.headers().firstValue("Location").orElseThrow();
+    String organization = location.substring(location.lastIndexOf('/') + 1);
+    String user = createUser();
+    String members = "organizations/" + organization + "/members";
+    var added = request("POST", "/admin/realms/durable-test/" + members, user);
+    assertEquals(201, added.statusCode(), added.body());
+    assertEquals(1, rows(user).size());
+    // Collection-level creation has no routed member ID; it must remain independent.
+    try (var db = database.getConnection();
+        var query =
+            db.prepareStatement(
+                "SELECT payload,ordering_key FROM kc_nats_outbox"
+                    + " WHERE payload::jsonb->'data'->>'resourcePath'=?")) {
+      query.setString(1, members);
+      try (var result = query.executeQuery()) {
+        assertTrue(result.next());
+        assertFalse(objectMapper.readTree(result.getString(1)).path("data").has("userId"));
+        assertNull(result.getString(2));
+        assertFalse(result.next());
+      }
+    }
+    if (managed) {
+      // Set up the membership produced by organization identity-provider registration.
+      try (var db = database.getConnection();
+          var update =
+              db.prepareStatement(
+                  "UPDATE user_group_membership SET membership_type='MANAGED'"
+                      + " WHERE user_id=?"
+                      + " AND group_id=(SELECT group_id FROM org WHERE id=?)")) {
+        update.setString(1, user);
+        update.setString(2, organization);
+        assertEquals(1, update.executeUpdate());
+      }
+    }
+    String member = "/admin/realms/durable-test/" + members + "/" + user;
+    var observed = request("GET", member, null);
+    assertEquals(200, observed.statusCode(), observed.body());
+    assertEquals(
+        managed ? "MANAGED" : "UNMANAGED",
+        objectMapper.readTree(observed.body()).path("membershipType").asText());
+    replace(
+        """
+        {"userEvents":[],"adminEvents":[
+          {"resourceType":"ORGANIZATION_MEMBERSHIP","operations":["DELETE"]}]}
+        """);
+    var deleted = request("DELETE", member + suffix, null);
+    assertEquals(204, deleted.statusCode(), deleted.body());
+    var captured = rows(user);
+    assertEquals(2, captured.size());
+    assertUserOrdering(user, captured);
+    var data = captured.getLast().path("data");
+    assertEquals("ORGANIZATION_MEMBERSHIP", data.path("resourceType").asText());
+    assertEquals("DELETE", data.path("operationType").asText());
+    assertEquals(members + "/" + user + suffix, data.path("resourcePath").asText());
+    assertFalse(data.has("userEnabled"));
+    assertEquals(
+        managed ? 404 : 200,
+        request("GET", "/admin/realms/durable-test/users/" + user, null).statusCode());
+  }
+
+  @ParameterizedTest
   @ValueSource(strings = {"", "/logout/opaque+%2F/用户/"})
   void logoutSharesTheUsersSequenceAndPreservesOpaqueRoutedIds(String suffix) throws Exception {
     replace(ALL);

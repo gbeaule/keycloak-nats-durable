@@ -13,6 +13,7 @@ import org.keycloak.models.KeycloakSession;
 /** Uses routed IDs for admin requests; decoded paths alone cannot identify nested users safely. */
 final class AffectedUser {
   private static final String BRUTE_FORCE_USERS = "attack-detection/brute-force/users/";
+  private static final String ORGANIZATION_MEMBERSHIP = "ORGANIZATION_MEMBERSHIP";
   private static final List<String> USER_ACTIONS =
       List.of(
           "reset-password",
@@ -43,13 +44,18 @@ final class AffectedUser {
       if (uri != null && realm != null) {
         var parameters = uri.getPathParameters();
         String resourcePath = event.getResourcePath();
-        // AttackDetectionResource uses userId; ordinary user resources use user-id.
-        String userId =
-            parameter(
-                parameters,
-                resourcePath != null && resourcePath.startsWith(BRUTE_FORCE_USERS)
-                    ? "userId"
-                    : "user-id");
+        // Organization members and brute-force resets use their own routed user parameters.
+        boolean organizationMembership =
+            ORGANIZATION_MEMBERSHIP.equals(event.getResourceTypeAsString());
+        boolean bruteForceUserPath =
+            resourcePath != null && resourcePath.startsWith(BRUTE_FORCE_USERS);
+        String userIdParameter = "user-id";
+        if (organizationMembership) {
+          userIdParameter = "member-id";
+        } else if (bruteForceUserPath) {
+          userIdParameter = "userId";
+        }
+        String userId = parameter(parameters, userIdParameter);
         String requestPath = uri.getPath();
         if (userId != null
             && resourcePath != null
@@ -88,8 +94,18 @@ final class AffectedUser {
       case "REALM_ROLE_MAPPING" -> matchesPath(path, base + "/role-mappings/realm");
       case "CLIENT_ROLE_MAPPING" ->
           matchesParameter(path, base + "/role-mappings/clients/", parameters, "client-id");
+      case ORGANIZATION_MEMBERSHIP ->
+          event.getOperationType() == OperationType.DELETE
+              && matchesOrganizationMember(path, userId, parameters);
       default -> false;
     };
+  }
+
+  private static boolean matchesOrganizationMember(
+      String path, String userId, MultivaluedMap<String, String> parameters) {
+    String organizationId = parameter(parameters, "org-id");
+    return organizationId != null
+        && matchesPath(path, "organizations/" + organizationId + "/members/" + userId);
   }
 
   private static boolean matchesParameter(

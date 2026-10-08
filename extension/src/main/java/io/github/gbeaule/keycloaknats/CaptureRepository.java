@@ -17,7 +17,10 @@ import org.hibernate.persister.entity.AbstractEntityPersister;
 final class CaptureRepository {
   private CaptureRepository() {}
 
-  record Capture(EventEnvelope.Description description, ResolvedPublicationPolicy policy) {
+  record Capture(
+      EventEnvelope.Description description,
+      ResolvedPublicationPolicy policy,
+      EventEnvelope envelopes) {
     String orderingKey() {
       return description.userId() == null
           ? ""
@@ -25,7 +28,7 @@ final class CaptureRepository {
     }
   }
 
-  static void persistBatch(EntityManager em, EventEnvelope envelopes, List<Capture> pending) {
+  static void persistBatch(EntityManager em, List<Capture> pending) {
     // Compute grouping keys once; ordered groups preserve callback order within each user and give
     // multi-user transactions one counter-lock order. This runs only during transaction prepare.
     var groups =
@@ -38,8 +41,14 @@ final class CaptureRepository {
         var ordering = allocateNextSequence(em, description.realmId(), description.userId());
         long capturedAt = readDatabaseTime(em);
         em.persist(
-            envelopes.serialize(
-                UUID.randomUUID().toString(), description, ordering, capturedAt, capture.policy()));
+            capture
+                .envelopes()
+                .serialize(
+                    UUID.randomUUID().toString(),
+                    description,
+                    ordering,
+                    capturedAt,
+                    capture.policy()));
       }
     }
     em.flush();
