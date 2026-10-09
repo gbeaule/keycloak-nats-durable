@@ -164,6 +164,9 @@ public final class ConsumerConfig {
     new ProcessingLimits(timeout, timeout, timeout * 1000, 1000, timeout * 1000, 1000)
         .configure(database);
     String realm = environment.optional("KND_REPORT_REALM_ID");
+    if (realm != null && realm.isBlank()) {
+      throw new IllegalArgumentException("KND_REPORT_REALM_ID must not be blank");
+    }
     String realmPrefix =
         realm == null
             ? ""

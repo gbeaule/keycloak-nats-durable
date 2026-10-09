@@ -113,6 +113,7 @@ findings are harmless. Scanner failures and incomplete runtime inventories fail 
 
 Use fresh scan reports in `target/security` and their `gate.json` verdict for the candidate being
 reviewed. Inventories must come from the same build; Maven offline mode skips inventory generation.
+The validation and release workflows enforce fresh build inputs and record their hashes in the verdict.
 Consume upstream servers as released and follow their update path rather than replacing internal
 libraries through the provider.
 
