@@ -8,7 +8,8 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
-import zipfile
+
+from test_packaged_licenses import copy_license_assets, write_jar
 
 
 def load(name):
@@ -113,13 +114,10 @@ class ReleaseManifestTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             module.__file__ = str(root / "scripts" / "release-manifest.py")
+            copy_license_assets(root)
             for name, artifact in (("extension", "keycloak-nats-durable"),
                                    ("consumer-example", "consumer-example")):
-                target = root / name / "target"
-                target.mkdir(parents=True)
-                with zipfile.ZipFile(target / f"{artifact}-1.2.3.jar", "w") as jar:
-                    jar.writestr(f"META-INF/maven/io.github.gbeaule/{artifact}/pom.properties",
-                                 "version=1.2.3\n")
+                write_jar(root, name, artifact)
             for name in ("", "extension", "consumer-example"):
                 target = root / name / "target"
                 target.mkdir(parents=True, exist_ok=True)
@@ -134,7 +132,7 @@ class ReleaseManifestTest(unittest.TestCase):
                 "  provision:\n    image: natsio/nats-box:0.19.7\n")
             (root / "deploy").mkdir()
             (root / "deploy" / "Dockerfile.keycloak").write_text(
-                "ARG KEYCLOAK_IMAGE=quay.io/keycloak/keycloak:26.7.4\n"
+                "ARG KEYCLOAK_IMAGE=quay.io/keycloak/keycloak:26.7.5\n"
                 "FROM ${KEYCLOAK_IMAGE}\n")
             (root / "deploy" / "Dockerfile.consumer").write_text("FROM eclipse-temurin:21-jre\n")
             output = root / "target" / "release"
@@ -145,7 +143,10 @@ class ReleaseManifestTest(unittest.TestCase):
             manifest = json.loads((output / "manifest.json").read_text())
             self.assertEqual(manifest["version"], "1.2.3")
             self.assertEqual(manifest["sourceCommit"], "b" * 40)
-            self.assertEqual(len(manifest["artifacts"]), 8)
+            self.assertEqual(len(manifest["artifacts"]), 12)
+            for source, name, _ in module.license_assets(root):
+                self.assertEqual((output / name).read_bytes(), source.read_bytes())
+                self.assertIn(name, manifest["artifacts"])
             for name, digest in manifest["artifacts"].items():
                 self.assertEqual(hashlib.sha256((output / name).read_bytes()).hexdigest(), digest)
             checksums = dict(line.split("  ", 1)[::-1]
@@ -157,20 +158,36 @@ class ReleaseManifestTest(unittest.TestCase):
             self.assertEqual(manifest["baseImages"]["compose.producer.yaml"],
                              ["postgres:18.6-alpine", "natsio/nats-box:0.19.7"])
             self.assertEqual(manifest["baseImages"]["deploy/Dockerfile.keycloak"],
-                             ["quay.io/keycloak/keycloak:26.7.4"])
+                             ["quay.io/keycloak/keycloak:26.7.5"])
             self.assertEqual(manifest["baseImages"]["deploy/Dockerfile.consumer"],
                              ["eclipse-temurin:21-jre"])
             for name in ("aggregate", "extension", "consumer-example"):
                 self.assertIn(name + "-bom.json", manifest["artifacts"])
                 self.assertIn(name + "-runtime-bom.json", manifest["artifacts"])
 
-            original = {path.name: path.read_bytes() for path in output.iterdir()}
+            original = {str(path.relative_to(output)): path.read_bytes()
+                        for path in output.rglob("*") if path.is_file()}
             with patch("sys.argv", ["release-manifest", "--version", "1.2.3", "--commit", "b" * 40,
                                     "--output", str(output)]):
                 with patch("sys.stderr"), self.assertRaises(SystemExit) as failure:
                     module.main()
             self.assertEqual(failure.exception.code, 2)
-            self.assertEqual(original, {path.name: path.read_bytes() for path in output.iterdir()})
+            self.assertEqual(original, {str(path.relative_to(output)): path.read_bytes()
+                                       for path in output.rglob("*") if path.is_file()})
+
+    def test_missing_packaged_license_prevents_creating_a_bundle(self):
+        module = load("release-manifest")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            module.__file__ = str(root / "scripts" / "release-manifest.py")
+            copy_license_assets(root)
+            write_jar(root, "extension", "keycloak-nats-durable",
+                      changes={"META-INF/licenses/Apache-2.0.txt": None})
+            with patch("sys.argv", ["release-manifest", "--version", "1.2.3", "--commit", "b" * 40]):
+                with patch("sys.stderr"), self.assertRaises(SystemExit) as failure:
+                    module.main()
+            self.assertEqual(failure.exception.code, 2)
+            self.assertFalse((root / "target/release").exists())
 
 
 if __name__ == "__main__":

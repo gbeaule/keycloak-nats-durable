@@ -24,6 +24,150 @@ import org.keycloak.models.KeycloakSession;
 
 class AffectedUserTest {
   @ParameterizedTest
+  @CsvSource({
+    "CREATE,target,organization,group",
+    "DELETE,target,organization,group",
+    "CREATE,f:p:x/+%2F/用户/,org/+%2F/组织/,group/+%2F/组/",
+    "DELETE,f:p:x/+%2F/用户/,org/+%2F/组织/,group/+%2F/组/"
+  })
+  void organizationGroupMembershipPreservesRoutedIdentitiesAndUserOrdering(
+      String operation, String user, String organization, String group) throws Exception {
+    var event = EventEnvelopeTest.admin(OperationType.valueOf(operation));
+    event.setResourceTypeAsString("ORGANIZATION_GROUP_MEMBERSHIP");
+    event.setResourcePath(
+        "organizations/" + organization + "/groups/" + group + "/members/" + user);
+    event.setAuthDetails(new AuthDetails());
+    event.getAuthDetails().setUserId("actor");
+    event.setError("denied");
+    var session =
+        AdminRequestFixtures.request(
+            event,
+            "unrelated-user",
+            Map.of(
+                "userId",
+                user,
+                "member-id",
+                "unrelated-member",
+                "org-id",
+                organization,
+                "group-id",
+                group));
+    assertEquals(user, AffectedUser.resolve(event, session));
+    assertFalse(AffectedUser.isDirectUser(event, user));
+    assertNull(AffectedUser.resolve(event), "Organization group paths require routed identities");
+    var encoder = new EventEnvelope(BridgeConfig.from(Map.of()));
+    var ordering = new EventOrdering("realm", user, 2);
+    var row =
+        encoder.serialize(
+            UUID.randomUUID().toString(),
+            encoder.describe(event, AffectedUser.resolve(event, session), null, null),
+            ordering,
+            123,
+            CaptureFixtures.RETRY);
+    var data = new ObjectMapper().readTree(row.payload()).path("data");
+    assertEquals(user, data.path("userId").asText());
+    assertEquals("actor", data.path("actorUserId").asText());
+    assertEquals(ordering.key(), data.at("/ordering/key").asText());
+    assertEquals("2", data.at("/ordering/sequence").asText());
+    assertEquals(ordering.key(), row.orderingKey());
+    assertEquals(2L, row.userSequence());
+    assertFalse(data.has("userEnabled"));
+    event.setResourcePath(event.getResourcePath() + "/");
+    when(session.getContext().getUri().getPath())
+        .thenReturn("/admin/realms/realm-name/" + event.getResourcePath());
+    assertEquals(user, AffectedUser.resolve(event, session));
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "ORGANIZATION_GROUP_MEMBERSHIP,UPDATE,organizations/organization/groups/group/members/target",
+    "ORGANIZATION_GROUP_MEMBERSHIP,ACTION,organizations/organization/groups/group/members/target",
+    "ORGANIZATION_GROUP_MEMBERSHIP,CREATE,organizations/organization/groups/group/members",
+    "ORGANIZATION_GROUP_MEMBERSHIP,DELETE,organizations/organization/groups/group/members/",
+    "ORGANIZATION_GROUP_MEMBERSHIP,CREATE,organizations/other/groups/group/members/target",
+    "ORGANIZATION_GROUP_MEMBERSHIP,DELETE,organizations/organization/groups/other/members/target",
+    "ORGANIZATION_GROUP_MEMBERSHIP,CREATE,organizations/organization/groups/group/members/other",
+    "ORGANIZATION_GROUP_MEMBERSHIP,DELETE,organizations/organization/groups/group/members/target//",
+    "ORGANIZATION_GROUP_MEMBERSHIP,CREATE,"
+        + "organizations/organization/groups/group/members/target/extra",
+    "ORGANIZATION_GROUP_MEMBERSHIP,DELETE,organizations/organization/members/target",
+    "ORGANIZATION_GROUP_MEMBERSHIP,CREATE,users/target",
+    "ORGANIZATION_GROUP,CREATE,organizations/organization/groups/group/members/target",
+    "ORGANIZATION_MEMBERSHIP,DELETE,organizations/organization/groups/group/members/target",
+    "custom:ORGANIZATION_GROUP_MEMBERSHIP,CREATE,"
+        + "organizations/organization/groups/group/members/target"
+  })
+  void organizationGroupRoutesRejectOtherOperationsCollectionsAndMismatchedPaths(
+      String resource, String operation, String path) {
+    var event = EventEnvelopeTest.admin(OperationType.valueOf(operation));
+    event.setResourceTypeAsString(resource);
+    event.setResourcePath(path);
+    var session = organizationGroupRequest(event);
+    assertNull(AffectedUser.resolve(event, session));
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"org-id", "group-id", "userId"})
+  void organizationGroupMembershipRequiresOneValidValueForEachRoutedIdentity(String parameter) {
+    var event = EventEnvelopeTest.admin(OperationType.CREATE);
+    event.setResourceTypeAsString("ORGANIZATION_GROUP_MEMBERSHIP");
+    event.setResourcePath("organizations/organization/groups/group/members/target");
+    for (var invalid :
+        List.of(List.<String>of(), List.of("target", "other"), List.of(" "), List.of("id\u0000"))) {
+      var session = organizationGroupRequest(event);
+      session.getContext().getUri().getPathParameters().put(parameter, invalid);
+      assertNull(AffectedUser.resolve(event, session));
+    }
+    var session = organizationGroupRequest(event);
+    session.getContext().getUri().getPathParameters().remove(parameter);
+    assertNull(AffectedUser.resolve(event, session));
+    session
+        .getContext()
+        .getUri()
+        .getPathParameters()
+        .put(parameter, Collections.singletonList(null));
+    assertNull(AffectedUser.resolve(event, session));
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"realm", "path", "inactive", "uri", "missing-realm", "no-context"})
+  void organizationGroupMembershipRequiresItsOwnActiveRealmAndRequest(String mismatch) {
+    var event = EventEnvelopeTest.admin(OperationType.DELETE);
+    event.setResourceTypeAsString("ORGANIZATION_GROUP_MEMBERSHIP");
+    event.setResourcePath("organizations/organization/groups/group/members/target");
+    var session = organizationGroupRequest(event);
+    var context = session.getContext();
+    switch (mismatch) {
+      case "realm" -> when(context.getRealm().getId()).thenReturn("other-realm");
+      case "path" ->
+          when(context.getUri().getPath()).thenReturn("/admin/realms/realm-name/users/target");
+      case "inactive" ->
+          when(context.getUri().getPathParameters()).thenThrow(new ContextNotActiveException());
+      case "uri" -> when(context.getUri()).thenReturn(null);
+      case "missing-realm" -> when(context.getRealm()).thenReturn(null);
+      case "no-context" -> when(session.getContext()).thenReturn(null);
+      default -> throw new AssertionError(mismatch);
+    }
+    assertNull(AffectedUser.resolve(event, session));
+  }
+
+  private static KeycloakSession organizationGroupRequest(
+      org.keycloak.events.admin.AdminEvent event) {
+    return AdminRequestFixtures.request(
+        event,
+        "target",
+        Map.of(
+            "userId",
+            "target",
+            "member-id",
+            "target",
+            "org-id",
+            "organization",
+            "group-id",
+            "group"));
+  }
+
+  @ParameterizedTest
   @CsvSource({"target,organization", "f:p:x/+%2F/用户/,org/+%2F/组织/"})
   void organizationMemberDeletionPreservesRoutedIdentityAndActor(String user, String organization)
       throws Exception {

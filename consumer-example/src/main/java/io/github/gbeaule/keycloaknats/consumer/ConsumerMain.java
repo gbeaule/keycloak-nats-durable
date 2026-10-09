@@ -137,7 +137,7 @@ public final class ConsumerMain {
                 + " deadline_ms="
                 + settings.processing().deadlineMs());
         while (!Thread.currentThread().isInterrupted()) {
-          for (var message : subscription.fetch(1, Duration.ofSeconds(2))) {
+          for (var message : ConsumerPull.fetch(nats, subscription)) {
             worker.handle(message, processor::recordEffect);
           }
         }

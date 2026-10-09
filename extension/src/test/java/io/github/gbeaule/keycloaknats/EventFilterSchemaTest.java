@@ -92,7 +92,7 @@ class EventFilterSchemaTest {
             .readTree(getClass().getResourceAsStream("/schemas/event-filter.schema.json"))
             .get("$defs");
     var catalogue =
-        mapper.readTree(getClass().getResourceAsStream("/schemas/keycloak-catalogue-26.7.4.json"));
+        mapper.readTree(getClass().getResourceAsStream("/schemas/keycloak-catalogue-26.7.5.json"));
     assertEquals(
         catalogue.get("userEventTypes"), withoutWildcard(definitions.at("/eventTypes/items/enum")));
     assertEquals(

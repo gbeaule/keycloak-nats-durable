@@ -1,0 +1,36 @@
+Third-party software
+
+The runtime SBOMs identify the exact dependency versions in each artifact.
+The project's MIT license is included separately as project/LICENSE in the JARs
+and LICENSE in the release bundle. It does not replace dependency licenses.
+
+Apache-2.0 software
+
+The complete license is included in Apache-2.0.txt.
+
+Both artifacts include:
+  io.nats:jnats — https://github.com/nats-io/nats.java
+  org.jspecify:jspecify — https://github.com/jspecify/jspecify
+
+The consumer additionally includes:
+  com.fasterxml.jackson.core:jackson-core
+  com.fasterxml.jackson.core:jackson-databind
+  com.fasterxml.jackson.core:jackson-annotations
+    https://github.com/FasterXML
+  com.zaxxer:HikariCP — https://github.com/brettwooldridge/HikariCP
+
+Packaging preserves upstream LICENSE and NOTICE resources, combining resources
+that share the same path. Jackson's named FastDoubleParser and Schubfach license
+resources and PostgreSQL's named third-party license resources remain in META-INF.
+
+Other dependency notices
+
+Bouncy Castle's complete MIT copyright, permission and disclaimer text remains
+in org.bouncycastle.LICENSE (relocated in the provider artifact). SLF4J's MIT
+license, PostgreSQL's license and its embedded dependency licenses remain in the
+consumer's META-INF resources. The consumer also includes Checker Framework
+annotations; their complete MIT notice is included in Checker-qual-MIT.txt.
+
+The provider relocates the JNATS and Bouncy Castle packages under
+io.github.gbeaule.keycloaknats.internal. These are packaging changes; the
+dependencies retain their upstream licenses.

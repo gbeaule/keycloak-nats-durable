@@ -14,6 +14,7 @@ import org.keycloak.models.KeycloakSession;
 final class AffectedUser {
   private static final String BRUTE_FORCE_USERS = "attack-detection/brute-force/users/";
   private static final String ORGANIZATION_MEMBERSHIP = "ORGANIZATION_MEMBERSHIP";
+  private static final String ORGANIZATION_GROUP_MEMBERSHIP = "ORGANIZATION_GROUP_MEMBERSHIP";
   private static final List<String> USER_ACTIONS =
       List.of(
           "reset-password",
@@ -44,7 +45,7 @@ final class AffectedUser {
       if (uri != null && realm != null) {
         var parameters = uri.getPathParameters();
         String resourcePath = event.getResourcePath();
-        // Organization members and brute-force resets use their own routed user parameters.
+        // Organization routes and brute-force resets use their own routed user parameters.
         boolean organizationMembership =
             ORGANIZATION_MEMBERSHIP.equals(event.getResourceTypeAsString());
         boolean bruteForceUserPath =
@@ -52,7 +53,8 @@ final class AffectedUser {
         String userIdParameter = "user-id";
         if (organizationMembership) {
           userIdParameter = "member-id";
-        } else if (bruteForceUserPath) {
+        } else if (ORGANIZATION_GROUP_MEMBERSHIP.equals(event.getResourceTypeAsString())
+            || bruteForceUserPath) {
           userIdParameter = "userId";
         }
         String userId = parameter(parameters, userIdParameter);
@@ -97,6 +99,10 @@ final class AffectedUser {
       case ORGANIZATION_MEMBERSHIP ->
           event.getOperationType() == OperationType.DELETE
               && matchesOrganizationMember(path, userId, parameters);
+      case ORGANIZATION_GROUP_MEMBERSHIP ->
+          (event.getOperationType() == OperationType.CREATE
+                  || event.getOperationType() == OperationType.DELETE)
+              && matchesOrganizationGroupMember(path, userId, parameters);
       default -> false;
     };
   }
@@ -106,6 +112,16 @@ final class AffectedUser {
     String organizationId = parameter(parameters, "org-id");
     return organizationId != null
         && matchesPath(path, "organizations/" + organizationId + "/members/" + userId);
+  }
+
+  private static boolean matchesOrganizationGroupMember(
+      String path, String userId, MultivaluedMap<String, String> parameters) {
+    String organizationId = parameter(parameters, "org-id");
+    String groupId = parameter(parameters, "group-id");
+    return organizationId != null
+        && groupId != null
+        && matchesPath(
+            path, "organizations/" + organizationId + "/groups/" + groupId + "/members/" + userId);
   }
 
   private static boolean matchesParameter(

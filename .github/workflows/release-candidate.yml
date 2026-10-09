@@ -41,6 +41,8 @@ jobs:
           "-Dproject.build.outputTimestamp=$SOURCE_DATE_EPOCH" verify
       - name: Scan dependencies and images using the repository security policy
         run: python3 scripts/security-check.py --version "$RELEASE_VERSION"
+      - name: Verify packaged licenses and dependency notices
+        run: python3 scripts/packaged_licenses.py --version "$RELEASE_VERSION"
       - name: Package checksummed candidate
         # Project dependency findings block packaging; upstream server findings are advisory.
         if: success()

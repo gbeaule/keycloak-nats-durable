@@ -9,6 +9,8 @@ import re
 import shutil
 import zipfile
 
+from packaged_licenses import check_jar, license_assets
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -37,6 +39,10 @@ def main():
             if properties.get("version") != args.version:
                 parser.error(f"Artifact version does not match release: {jar.name}")
         artifacts.append((jar, jar.name))
+        try:
+            check_jar(root, jar, module)
+        except (OSError, ValueError, KeyError) as error:
+            parser.error(f"Incomplete packaged licenses: {error}")
     for module in ("", "extension", "consumer-example"):
         for name in ("bom.json", "runtime-bom.json"):
             bom = root / module / "target" / name
@@ -46,6 +52,10 @@ def main():
             if inventory.get("metadata", {}).get("component", {}).get("version") != args.version:
                 parser.error(f"SBOM version does not match release: {bom}")
             artifacts.append((bom, f"{module or 'aggregate'}-{name}"))
+    for source, name, _ in license_assets(root):
+        if not source.is_file() or not source.read_bytes().strip():
+            parser.error(f"Missing release license asset: {source}")
+        artifacts.append((source, name))
     images = {}
     # Record configured image versions without inventing a digest for a tag.
     for path in ("compose.yaml", "compose.producer.yaml"):
@@ -67,6 +77,7 @@ def main():
     checksums = {}
     for source, name in artifacts:
         destination = output / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, destination)
         checksums[name] = hashlib.sha256(destination.read_bytes()).hexdigest()
     manifest = {"version": args.version, "sourceCommit": args.commit,

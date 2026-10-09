@@ -76,7 +76,7 @@ class ProductionModeIT extends IntegrationSupport {
     database.setPassword(postgres.getPassword());
     connectAdmin();
     provisionStream();
-    String version = System.getProperty("keycloak.version", "26.7.4");
+    String version = System.getProperty("keycloak.version", "26.7.5");
     Path provider = Path.of(System.getProperty("extension.jar")).toAbsolutePath();
     String artifactVersion =
         provider.getFileName().toString().replace("keycloak-nats-durable-", "").replace(".jar", "");

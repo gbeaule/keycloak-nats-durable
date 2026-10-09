@@ -144,7 +144,7 @@ class EventSchemaTest {
   void publishedCatalogueContainsEveryEnumInCompileBaseline() throws IOException {
     var catalogue =
         objectMapper.readTree(
-            getClass().getResourceAsStream("/schemas/keycloak-catalogue-26.7.4.json"));
+            getClass().getResourceAsStream("/schemas/keycloak-catalogue-26.7.5.json"));
     assertEquals(enumNames(EventType.values()), names(catalogue.get("userEventTypes")));
     assertEquals(enumNames(ResourceType.values()), names(catalogue.get("adminResourceTypes")));
     assertEquals(enumNames(OperationType.values()), names(catalogue.get("adminOperationTypes")));

@@ -54,7 +54,8 @@ class ValidationRunnerTest(unittest.TestCase):
     def test_postgres_selection_keeps_source_and_existing_durability_coverage(self):
         expected = {
             "ConsumerHardeningIT", "ConsumerStartupIT", "CustomSchemaIT", "UpgradeIT",
-            "AdminUserAttributionIT", "NatsReadinessIT", "PerUserCaptureIT",
+            "AdminUserAttributionIT", "OrganizationGroupAttributionIT", "ConsumerReconnectIT",
+            "NatsReadinessIT", "PerUserCaptureIT",
             "PerUserRelayIT", "OutboxDiscardIT", "OutboxAuditRetentionIT",
             "NestedEventCaptureIT", "OutboxHeadIT", "OutboxSchemaIT",
             "PerUserPublicationIT", "PerUserSystemIT", "FilteringIT",
@@ -101,10 +102,19 @@ class ValidationRunnerTest(unittest.TestCase):
         with patch.object(validate.shutil, "which", return_value="mvn"):
             with patch.object(validate, "run") as run:
                 self.assertEqual(validate.main([]), 0)
-        self.assertEqual(run.call_count, 2)
-        command = run.call_args.args[0]
+        self.assertEqual(run.call_count, 3)
+        command = run.call_args_list[1].args[0]
         self.assertEqual(command[-1], "verify")
         self.assertFalse(any(argument.startswith("-P") or "skip" in argument.lower() for argument in command))
+        self.assertIn("scripts/packaged_licenses.py", run.call_args.args[0])
+
+    def test_failed_packaged_license_check_prevents_security_scan(self):
+        with patch.object(validate.shutil, "which", return_value="mvn"):
+            with patch.object(validate, "run", side_effect=[None, None,
+                    subprocess.CalledProcessError(5, "packaged_licenses")]) as run:
+                self.assertEqual(validate.main(["security"]), 5)
+        self.assertEqual(run.call_count, 3)
+        self.assertIn("--built-after", run.call_args.args[0])
 
     def test_runtime_flags_are_not_silently_ignored(self):
         for args in (["postgres"], ["quick", "--postgres-major", "14"],

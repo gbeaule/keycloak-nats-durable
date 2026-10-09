@@ -25,7 +25,7 @@ class NatsReadinessIT extends IntegrationSupport {
   void asyncPersistenceRetainsTheOutboxUntilTheStreamIsReplacedWithDefaultPersistence()
       throws Exception {
     try {
-      startInfrastructure(System.getProperty("keycloak.version", "26.7.4"), container -> {}, false);
+      startInfrastructure(System.getProperty("keycloak.version", "26.7.5"), container -> {}, false);
       drained();
       var safe = nats.jetStreamManagement().getStreamInfo(STREAM).getConfiguration();
       nats.jetStreamManagement().deleteStream(STREAM);

@@ -48,7 +48,7 @@ installation or a period with the listener disabled. Keycloak error events can h
 transaction from the operation that failed.
 
 `JpaEntityProvider` registers the entities and initializes the schema through Liquibase. Keycloak
-marks this mechanism [unsupported](https://www.keycloak.org/docs/26.7.4/server_development/#_extensions_jpa)
+marks this mechanism [unsupported](https://www.keycloak.org/docs/26.7.5/server_development/#_extensions_jpa)
 and classifies the event-listener SPI as internal. These dependencies require runtime and restart
 validation for each candidate server version; see [development](development.md#compatibility).
 Replacing JPA registration would require preserving capture in Keycloak's database transaction.

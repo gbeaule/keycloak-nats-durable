@@ -40,7 +40,7 @@ class AdminUserAttributionIT extends IntegrationSupport {
   @BeforeAll
   static void start() throws Exception {
     startInfrastructure(
-        System.getProperty("keycloak.version", "26.7.4"),
+        System.getProperty("keycloak.version", "26.7.5"),
         container ->
             container
                 .withEnv("KND_FILTER_FILE", FILTER)

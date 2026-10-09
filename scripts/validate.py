@@ -8,12 +8,13 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parent.parent
 POSTGRES_MAJORS = ("14", "15", "16", "17")
 POSTGRES_TESTS = (
     "ConsumerHardeningIT,ConsumerStartupIT,CustomSchemaIT,UpgradeIT,"
-    "AdminUserAttributionIT,NatsReadinessIT,"
+    "AdminUserAttributionIT,OrganizationGroupAttributionIT,ConsumerReconnectIT,NatsReadinessIT,"
     "PerUserCaptureIT,PerUserRelayIT,OutboxDiscardIT,OutboxAuditRetentionIT,"
     "NestedEventCaptureIT,OutboxHeadIT,OutboxSchemaIT,"
     "PerUserPublicationIT,PerUserSystemIT,FilteringIT,DurabilityIT#"
@@ -92,7 +93,9 @@ def main(argv=None):
         run([sys.executable, "-m", "unittest", "discover", "-s", "scripts", "-p", "test_*.py"])
         for command in maven_commands(args.mode, matrix, args.keycloak_version,
                                       args.postgres_major, args.maven_arg):
+            build_started = time.time_ns()
             run([maven, *command])
+            run([sys.executable, "scripts/packaged_licenses.py", "--built-after", str(build_started)])
         if args.mode == "security":
             run([sys.executable, "scripts/security-check.py"])
     except subprocess.CalledProcessError as error:
