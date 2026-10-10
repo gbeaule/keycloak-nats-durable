@@ -51,7 +51,7 @@ jobs:
         # Project dependency findings block packaging; upstream server findings are advisory.
         if: success()
         run: python3 scripts/release-manifest.py --version "$RELEASE_VERSION" --commit "$GITHUB_SHA"
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         if: always()
         with:
           name: release-candidate-${{ github.sha }}-${{ github.run_id }}
