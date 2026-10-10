@@ -48,13 +48,13 @@ jobs:
       - name: Unit tests, style, packaging and validation tooling
         run: python3 scripts/validate.py quick
       - name: Unit coverage reports
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         if: always()
         with:
           name: unit-coverage
           retention-days: 3
           path: '**/target/site/jacoco-unit/**'
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         if: failure()
         with:
           name: quick-check-results
@@ -77,7 +77,7 @@ jobs:
       - name: Verify the full integration suite on the default runtime
         # Read default Keycloak and PostgreSQL versions from the POM.
         run: python3 scripts/validate.py integration
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         if: always()
         with:
           name: test-results-baseline
@@ -108,7 +108,7 @@ jobs:
         env:
           KEYCLOAK_RUNTIME_VERSION: ${{ matrix.keycloak }}
         run: python3 scripts/validate.py integration --keycloak-version "$KEYCLOAK_RUNTIME_VERSION"
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         if: always()
         with:
           name: test-results-kc-${{ matrix.keycloak }}
@@ -140,7 +140,7 @@ jobs:
         env:
           POSTGRES_MAJOR: ${{ matrix.postgres }}
         run: python3 scripts/validate.py postgres --postgres-major "$POSTGRES_MAJOR"
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         if: always()
         with:
           name: postgres-compatibility-${{ matrix.postgres }}
