@@ -5,13 +5,19 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import io.github.gbeaule.keycloaknats.consumer.ConsumerConfig;
 import io.github.gbeaule.keycloaknats.consumer.OutboxReport;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
@@ -381,6 +387,82 @@ class OutboxAuditRetentionIT extends RelayIntegrationSupport {
   }
 
   @Test
+  void auditScopeFiltersOtherRealmsAndSubjectsBeforeKeysetPaginationAndCliOutput()
+      throws Exception {
+    String ownLogin = "keycloak.events.cmVhbG0vYQ.user.login";
+    String otherLogin = "keycloak.events.cmVhbG0vYg.user.login";
+    transaction(
+        em -> {
+          audit(em, "a-own-login", 1000, "realm/a", ownLogin);
+          audit(em, "b-other-login", 1000, "realm/b", otherLogin);
+          audit(em, "c-own-logout", 1000, "realm/a", "keycloak.events.cmVhbG0vYQ.user.logout");
+          audit(em, "d-own-login", 1000, "realm/a", ownLogin);
+          audit(em, "e-own-login", 2000, "realm/a", ownLogin);
+        });
+    execute("CREATE ROLE audit_scope_reader LOGIN PASSWORD 'integration-only'");
+    execute("GRANT USAGE ON SCHEMA \"relay-data\" TO audit_scope_reader");
+    execute("GRANT SELECT ON " + TABLE + " TO audit_scope_reader");
+    var values =
+        Map.of(
+            "KND_OUTBOX_DB_URL", postgres.getJdbcUrl(),
+            "KND_OUTBOX_DB_USER", "audit_scope_reader",
+            "KND_OUTBOX_DB_PASSWORD", "integration-only",
+            "KND_OUTBOX_DB_SCHEMA", "relay-data",
+            "KND_REPORT_SUBJECT", "keycloak.events.*.user.login",
+            "KND_REPORT_REALM_ID", "realm/a");
+    var settings = new ConsumerConfig(values::get).report();
+    var first =
+        OutboxReport.inspect(
+            settings.database(),
+            settings.schema(),
+            settings.subject(),
+            settings.realmPrefix(),
+            settings.timeoutSeconds(),
+            Long.MIN_VALUE,
+            "",
+            1);
+    assertEquals(List.of("a-own-login"), first.stream().map(row -> row.get("id")).toList());
+    var last = first.getLast();
+    var remaining =
+        OutboxReport.inspect(
+            settings.database(),
+            settings.schema(),
+            settings.subject(),
+            settings.realmPrefix(),
+            settings.timeoutSeconds(),
+            ((Number) last.get("discarded_at")).longValue(),
+            (String) last.get("id"),
+            10);
+    assertEquals(
+        List.of("d-own-login", "e-own-login"),
+        remaining.stream().map(row -> row.get("id")).toList());
+    assertEquals(
+        4,
+        OutboxReport.inspect(
+                settings.database(),
+                "relay-data",
+                settings.subject(),
+                "",
+                5,
+                Long.MIN_VALUE,
+                "",
+                10)
+            .size());
+    assertEquals(
+        5,
+        OutboxReport.inspect(settings.database(), "relay-data", 5, Long.MIN_VALUE, "", 10).size());
+
+    var page = auditCli(values, "audit");
+    assertEquals(3, page.size());
+    assertEquals("a-own-login", page.get(0).path("id").asText());
+    assertEquals("d-own-login", page.get(1).path("id").asText());
+    assertEquals("e-own-login", page.get(2).path("id").asText());
+    var continued = auditCli(values, "audit", "1000", "a-own-login", "1");
+    assertEquals(1, continued.size());
+    assertEquals("d-own-login", continued.get(0).path("id").asText());
+  }
+
+  @Test
   void largeBacklogDrainsWhileCapturesPublicationsAndNewAuditsContinue() throws Exception {
     try (var publisher = new JetStreamPublisher(config);
         var metrics = new TestRegistry();
@@ -451,18 +533,54 @@ class OutboxAuditRetentionIT extends RelayIntegrationSupport {
   }
 
   private static void audit(EntityManager em, String id, long discardedAt) {
+    audit(em, id, discardedAt, "relay", "keycloak.events.audit");
+  }
+
+  private static void audit(
+      EntityManager em, String id, long discardedAt, String realmId, String subject) {
     var original =
         new OutboxEvent(
             id,
-            "keycloak.events.audit",
+            subject,
             "private payload",
             0,
-            "relay",
+            realmId,
             "io.keycloak.user.login",
             null,
             new ResolvedPublicationPolicy(
                 new PublicationPolicy(1, null), EventFilter.digest(new byte[0]), "retention-test"));
     em.persist(new DiscardAudit(original, DiscardReason.EXPIRED, discardedAt));
+  }
+
+  private static JsonNode auditCli(Map<String, String> reportSettings, String... arguments)
+      throws Exception {
+    boolean windows = System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("win");
+    String executable =
+        Path.of(System.getProperty("java.home"), "bin", windows ? "java.exe" : "java").toString();
+    String artifact = System.getProperty("consumer.jar");
+    assertTrue(Files.isRegularFile(Path.of(artifact)), "Package the consumer before its CLI tests");
+    var command =
+        new ArrayList<>(List.of(executable, "-cp", artifact, OutboxReport.class.getName()));
+    command.addAll(List.of(arguments));
+    var builder = new ProcessBuilder(command).redirectErrorStream(true);
+    var environment = builder.environment();
+    environment.keySet().removeIf(key -> key.toUpperCase(Locale.ROOT).startsWith("KND_"));
+    environment.putAll(reportSettings);
+    environment.put("KND_CONSUMER_DEADLINE_MS", "invalid");
+    environment.put("KND_NATS_URL", "invalid");
+    environment.put("KND_TOKEN", "token");
+    environment.put("KND_CREDENTIALS_FILE", "conflicting.creds");
+    Process process = builder.start();
+    try {
+      assertTrue(
+          process.waitFor(20, TimeUnit.SECONDS), "Audit inspection must finish within its bound");
+      String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+      assertEquals(0, process.exitValue(), output);
+      return objectMapper.readTree(output);
+    } finally {
+      process.destroyForcibly();
+      process.waitFor(5, TimeUnit.SECONDS);
+    }
   }
 
   private static List<String> ids() {

@@ -1,8 +1,15 @@
 package io.github.gbeaule.keycloaknats;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.nats.client.Options;
+import io.nats.client.api.PersistMode;
+import io.nats.client.api.StreamConfiguration;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -14,6 +21,51 @@ import org.testcontainers.containers.Network;
 /** Exercises authenticated publication and reconnects while NATS is still starting. */
 @SuppressWarnings("checkstyle:AbbreviationAsWordInName") // Maven Failsafe discovers the IT suffix.
 class NatsReadinessIT extends IntegrationSupport {
+  @Test
+  void asyncPersistenceRetainsTheOutboxUntilTheStreamIsReplacedWithDefaultPersistence()
+      throws Exception {
+    try {
+      startInfrastructure(System.getProperty("keycloak.version", "26.7.5"), container -> {}, false);
+      drained();
+      var safe = nats.jetStreamManagement().getStreamInfo(STREAM).getConfiguration();
+      nats.jetStreamManagement().deleteStream(STREAM);
+      nats.jetStreamManagement()
+          .addStream(StreamConfiguration.builder(safe).persistMode(PersistMode.Async).build());
+      assertEquals(
+          PersistMode.Async,
+          nats.jetStreamManagement().getStreamInfo(STREAM).getConfiguration().getPersistMode());
+
+      String user = createUser();
+      await()
+          .atMost(Duration.ofSeconds(10))
+          .until(() -> scalar("SELECT count(*) FROM kc_nats_outbox WHERE attempts > 0") == 1);
+      assertEquals(0, messages(), "An async stream must receive no publication from the provider");
+      String id;
+      String payload;
+      try (var db = database.getConnection();
+          var query = db.createStatement();
+          var result = query.executeQuery("SELECT id,payload FROM kc_nats_outbox")) {
+        assertTrue(result.next(), "Rejection must retain the original capture");
+        id = result.getString(1);
+        payload = result.getString(2);
+        assertEquals(user, objectMapper.readTree(payload).at("/data/userId").asText());
+        assertFalse(result.next());
+      }
+
+      // Persist mode is immutable: repair the destination by recreating the empty stream.
+      nats.jetStreamManagement().deleteStream(STREAM);
+      provisionStream();
+      drained();
+      assertEquals(1, messages());
+      var message = nats.jetStreamManagement().getMessage(STREAM, 1);
+      assertEquals(payload, new String(message.getData(), StandardCharsets.UTF_8));
+      assertEquals(id, message.getHeaders().getFirst("Nats-Msg-Id"));
+      assertTrue(nats.jetStreamManagement().getConsumerNames(STREAM).isEmpty());
+    } finally {
+      stopInfrastructure();
+    }
+  }
+
   @Test
   void publisherPreservesWhitespaceInAuthenticationTokens() throws Exception {
     String token = " integration-token ";

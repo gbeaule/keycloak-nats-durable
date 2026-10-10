@@ -42,7 +42,12 @@ class DeliveryRulesTest {
 
   static ResolvedPublicationPolicy resolve(EventFilter filter, AdminEvent event, Boolean enabled) {
     return filter
-        .resolve(event, AffectedUser.resolve(event), enabled, envelopes.adminSubject(event))
+        .resolve(
+            event,
+            AffectedUser.resolve(event),
+            enabled,
+            event.getAuthDetails() == null ? null : event.getAuthDetails().getClientId(),
+            envelopes.adminSubject(event))
         .orElseThrow();
   }
 
@@ -86,7 +91,7 @@ class DeliveryRulesTest {
     assertFalse(filter.mayAccept(admin, envelopes.adminSubject(admin)));
     assertTrue(
         filter
-            .resolve(admin, AffectedUser.resolve(admin), false, envelopes.adminSubject(admin))
+            .resolve(admin, AffectedUser.resolve(admin), false, null, envelopes.adminSubject(admin))
             .isEmpty());
   }
 

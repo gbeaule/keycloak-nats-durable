@@ -27,6 +27,7 @@ import org.keycloak.events.EventType;
 class PerUserOrderingBenchmark extends RelayIntegrationSupport {
   private static final String OUTBOX = "\"relay-data\".kc_nats_outbox";
   private static final String AUDIT = "\"relay-data\".kc_nats_discard_audit";
+  private final BenchmarkTimeouts timeouts = BenchmarkTimeouts.configured(300);
 
   private static final class Registry extends SimpleMeterRegistry implements AutoCloseable {}
 
@@ -36,6 +37,7 @@ class PerUserOrderingBenchmark extends RelayIntegrationSupport {
     int concurrency = setting("benchmark.concurrency", 8, 1, 16);
     var report = new LinkedHashMap<String, Object>();
     report.put("timestamp", Instant.now().toString());
+    report.put("waitBudgets", timeouts.report());
     report.put(
         "environment",
         Map.of(
@@ -92,7 +94,7 @@ class PerUserOrderingBenchmark extends RelayIntegrationSupport {
     }
   }
 
-  private static Map<String, Object> captureLoad(int count, int concurrency, boolean hot)
+  private Map<String, Object> captureLoad(int count, int concurrency, boolean hot)
       throws Exception {
     var allocation = new ConcurrentLinkedQueue<Double>();
     var commits = new ConcurrentLinkedQueue<Double>();
@@ -121,9 +123,7 @@ class PerUserOrderingBenchmark extends RelayIntegrationSupport {
                 }));
       }
       start.countDown();
-      for (var future : work) {
-        future.get(2, TimeUnit.MINUTES);
-      }
+      BenchmarkTimeouts.finish(work, began, timeouts.workload());
     }
     return Map.of(
         "events",
@@ -175,7 +175,7 @@ class PerUserOrderingBenchmark extends RelayIntegrationSupport {
         percentiles(sends));
   }
 
-  private static Map<String, Object> fairnessAndRecovery(
+  private Map<String, Object> fairnessAndRecovery(
       JetStreamPublisher publisher, int count, int concurrency) throws Exception {
     var hot = new ArrayList<String>();
     String user = UUID.randomUUID().toString();
@@ -191,6 +191,7 @@ class PerUserOrderingBenchmark extends RelayIntegrationSupport {
             hot.add(row.id());
             if (i == 0) {
               row.recordPublicationFailure(Long.MAX_VALUE, "controlled backoff");
+              OutboxHeads.refresh(em, row.orderingKey());
             }
             if (i % 500 == 499) {
               em.flush();
@@ -216,7 +217,7 @@ class PerUserOrderingBenchmark extends RelayIntegrationSupport {
     try (var executor = Executors.newSingleThreadExecutor()) {
       var captures = executor.submit(() -> captureLoad(count, concurrency, false));
       await()
-          .atMost(Duration.ofMinutes(5))
+          .atMost(timeouts.recovery())
           .pollInterval(Duration.ofMillis(10))
           .until(
               () -> {
@@ -240,7 +241,7 @@ class PerUserOrderingBenchmark extends RelayIntegrationSupport {
     }
   }
 
-  private static Map<String, Object> expiryAndCleanup(int count) throws Exception {
+  private Map<String, Object> expiryAndCleanup(int count) throws Exception {
     String user = UUID.randomUUID().toString();
     transaction(
         em -> {
@@ -252,6 +253,9 @@ class PerUserOrderingBenchmark extends RelayIntegrationSupport {
                     PublicationPolicy.RETRY,
                     0);
             row.recordPublicationFailure(Long.MAX_VALUE, "protected backlog");
+            if (i == 0) {
+              OutboxHeads.refresh(em, row.orderingKey());
+            }
             if (i % 500 == 499) {
               em.flush();
               em.clear();
@@ -335,7 +339,7 @@ class PerUserOrderingBenchmark extends RelayIntegrationSupport {
                   return null;
                 });
         await()
-            .atMost(Duration.ofMinutes(5))
+            .atMost(timeouts.workload())
             .pollInterval(Duration.ofMillis(100))
             .until(
                 () -> {
@@ -379,19 +383,37 @@ class PerUserOrderingBenchmark extends RelayIntegrationSupport {
 
   private static Object expiryPlan() throws Exception {
     long now = scalar("SELECT floor(extract(epoch FROM clock_timestamp())*1000)");
-    try (var connection = database.getConnection();
-        var query =
-            connection.prepareStatement(
-                "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM "
-                    + OUTBOX
-                    + " WHERE next_expiry_attempt_at <= ?"
-                    + " ORDER BY next_expiry_attempt_at,id LIMIT 1 FOR UPDATE SKIP LOCKED")) {
-      query.setLong(1, now);
-      try (var rows = query.executeQuery()) {
-        assertTrue(rows.next());
-        return objectMapper.readTree(rows.getString(1));
+    var queries = new ArrayList<String>();
+    try (var em =
+        sessions
+            .withOptions()
+            .statementInspector(
+                (org.hibernate.resource.jdbc.spi.StatementInspector)
+                    sql -> {
+                      queries.add(sql);
+                      return sql;
+                    })
+            .openSession()) {
+      em.beginTransaction();
+      OutboxRepository.lockNextExpired(em, now);
+      em.getTransaction().rollback();
+    }
+    assertEquals(2, queries.size(), "Expiry inspects both ordered and independent scans");
+    var plans = objectMapper.createArrayNode();
+    try (var connection = database.getConnection()) {
+      for (String sql : queries) {
+        try (var query =
+            connection.prepareStatement("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + sql)) {
+          query.setLong(1, now);
+          query.setInt(2, 1);
+          try (var rows = query.executeQuery()) {
+            assertTrue(rows.next());
+            plans.add(objectMapper.readTree(rows.getString(1)).get(0));
+          }
+        }
       }
     }
+    return plans;
   }
 
   private static void seedExpired(int count, String user) {
@@ -426,13 +448,14 @@ class PerUserOrderingBenchmark extends RelayIntegrationSupport {
             CaptureRepository.readDatabaseTime(em) - ageMillis,
             new ResolvedPublicationPolicy(policy, EventFilter.all().sha256(), null));
     em.persist(row);
-    OutboxHeads.refresh(em, row.orderingKey());
+    em.flush();
+    OutboxHeads.append(em, row);
     return row;
   }
 
-  private static void drain(OutboxRelay relay) {
+  private void drain(OutboxRelay relay) {
     await()
-        .atMost(Duration.ofMinutes(5))
+        .atMost(timeouts.drain())
         .pollInterval(Duration.ofMillis(10))
         .until(
             () -> {

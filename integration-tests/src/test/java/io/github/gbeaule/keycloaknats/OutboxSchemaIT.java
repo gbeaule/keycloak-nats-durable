@@ -71,7 +71,11 @@ class OutboxSchemaIT {
               List.of("1"),
               query(connection, "SELECT count(*) FROM initial_setup.databasechangelog"));
           assertEquals(
-              List.of("idx_kc_nats_head_due", "idx_kc_nats_independent_due"),
+              List.of(
+                  "idx_kc_nats_head_due",
+                  "idx_kc_nats_independent_due",
+                  "idx_kc_nats_independent_expiry",
+                  "idx_kc_nats_ordered_expiry"),
               query(
                   connection,
                   "SELECT indexname FROM pg_indexes WHERE schemaname='initial_setup'"

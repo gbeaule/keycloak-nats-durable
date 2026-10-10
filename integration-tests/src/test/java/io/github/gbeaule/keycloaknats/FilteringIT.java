@@ -2,6 +2,7 @@ package io.github.gbeaule.keycloaknats;
 
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.node.BooleanNode;
@@ -228,6 +229,70 @@ class FilteringIT extends IntegrationSupport {
     }
     drained();
     assertEquals(1, messages(), "Only the matching failed authentication was captured");
+  }
+
+  @Test
+  void publicAdminClientIdScopesCaptureAndDeliveryInTheActingRealm() throws Exception {
+    replace(ALL, true);
+    drained();
+    nats.jetStreamManagement().purgeStream(STREAM);
+    String internalClientId =
+        objectMapper
+            .readTree(
+                request("GET", "/admin/realms/master/clients?clientId=admin-cli", null).body())
+            .get(0)
+            .path("id")
+            .asText();
+    String actorRealmId =
+        objectMapper
+            .readTree(request("GET", "/admin/realms/master", null).body())
+            .path("id")
+            .asText();
+    String policy =
+        """
+        {"clientIds":["admin-cli"],"userEvents":[],"adminEvents":[
+          {"resourceType":"USER","operations":["CREATE"]}],
+         "delivery":{"rules":[{"id":"admin-client",
+           "match":{"kind":"admin","resourceType":"USER","operations":["CREATE"],
+                    "clientIds":["admin-cli"]},
+           "policy":{"action":"discard","maxFailures":10000}}]}}
+        """;
+    var docker = broker.getDockerClient();
+    docker.stopContainerCmd(broker.getContainerId()).withTimeout(1).exec();
+    try {
+      replace(policy, true);
+      createUser();
+      assertEquals(1, scalar("SELECT count(*) FROM kc_nats_outbox WHERE rule_id='admin-client'"));
+      try (var db = database.getConnection();
+          var statement = db.createStatement();
+          var rows = statement.executeQuery("SELECT payload FROM kc_nats_outbox")) {
+        assertTrue(rows.next());
+        var data = objectMapper.readTree(rows.getString(1)).path("data");
+        assertEquals("admin-cli", data.path("clientId").asText());
+        assertEquals(actorRealmId, data.path("actorRealmId").asText());
+        assertNotEquals(actorRealmId, data.path("realmId").asText());
+        assertNotEquals(internalClientId, data.path("clientId").asText());
+      }
+      replace(policy.replace("\"admin-cli\"", "\"" + internalClientId + "\""), true);
+      createUser();
+      assertEquals(1, scalar("SELECT count(*) FROM kc_nats_outbox"));
+    } finally {
+      docker.startContainerCmd(broker.getContainerId()).exec();
+      connectNats();
+      replace(ALL, true);
+    }
+    drained();
+    var subscription = nats.jetStream().subscribe(null, PullSubscribeOptions.bind(STREAM, DURABLE));
+    try {
+      var messages = subscription.fetch(1, Duration.ofSeconds(10));
+      assertEquals(1, messages.size());
+      var message = messages.getFirst();
+      assertEquals(
+          "admin-cli", objectMapper.readTree(message.getData()).at("/data/clientId").asText());
+      message.ackSync(Duration.ofSeconds(2));
+    } finally {
+      subscription.unsubscribe();
+    }
   }
 
   private static String loginForm(String password) {

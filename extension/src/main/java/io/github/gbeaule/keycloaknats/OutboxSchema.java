@@ -73,6 +73,17 @@ public final class OutboxSchema implements CustomSqlChange {
             "CREATE INDEX IDX_KC_NATS_INDEPENDENT_DUE ON "
                 + table(database, "KC_NATS_OUTBOX")
                 + " (NEXT_ATTEMPT_AT, CREATED_AT, ID) WHERE ORDERING_KEY IS NULL"));
+    // Each expiry scan must skip the other event class even when only that class has expired rows.
+    statements.add(
+        new RawSqlStatement(
+            "CREATE INDEX IDX_KC_NATS_ORDERED_EXPIRY ON "
+                + table(database, "KC_NATS_OUTBOX")
+                + " (NEXT_EXPIRY_ATTEMPT_AT, ID) WHERE ORDERING_KEY IS NOT NULL"));
+    statements.add(
+        new RawSqlStatement(
+            "CREATE INDEX IDX_KC_NATS_INDEPENDENT_EXPIRY ON "
+                + table(database, "KC_NATS_OUTBOX")
+                + " (NEXT_EXPIRY_ATTEMPT_AT, ID) WHERE ORDERING_KEY IS NULL"));
     statements.add(
         new RawSqlStatement("ALTER TABLE " + table(database, "KC_NATS_OUTBOX") + VACUUM_SETTINGS));
     return statements.toArray(SqlStatement[]::new);

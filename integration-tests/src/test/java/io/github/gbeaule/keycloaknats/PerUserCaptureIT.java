@@ -4,19 +4,25 @@ import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.node.BooleanNode;
+import io.opentelemetry.api.trace.Span;
 import jakarta.transaction.Status;
 import jakarta.transaction.Synchronization;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -26,7 +32,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
+import java.util.stream.Stream;
 import org.hibernate.Session;
 import org.hibernate.SessionFactory;
 import org.hibernate.cfg.Configuration;
@@ -35,12 +43,31 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.keycloak.common.ClientConnection;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.events.Event;
+import org.keycloak.events.EventListenerProvider;
+import org.keycloak.events.EventListenerProviderFactory;
 import org.keycloak.events.EventType;
+import org.keycloak.events.admin.AdminEvent;
+import org.keycloak.events.admin.OperationType;
+import org.keycloak.events.admin.ResourceType;
+import org.keycloak.models.AbstractKeycloakTransaction;
+import org.keycloak.models.ClientModel;
+import org.keycloak.models.ClientProvider;
+import org.keycloak.models.KeycloakContext;
 import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.KeycloakSessionFactory;
 import org.keycloak.models.KeycloakTransaction;
 import org.keycloak.models.KeycloakTransactionManager;
+import org.keycloak.models.RealmModel;
+import org.keycloak.models.RealmProvider;
+import org.keycloak.models.UserModel;
+import org.keycloak.models.UserProvider;
+import org.keycloak.services.DefaultKeycloakTransactionManager;
+import org.keycloak.services.resources.admin.AdminAuth;
+import org.keycloak.services.resources.admin.AdminEventBuilder;
+import org.keycloak.tracing.TracingProvider;
 
 /**
  * Real PostgreSQL locks and listener callbacks, plus the supported runtime's emitted admin paths.
@@ -62,6 +89,7 @@ class PerUserCaptureIT extends IntegrationSupport {
             .setProperty("hibernate.connection.username", postgres.getUsername())
             .setProperty("hibernate.connection.password", postgres.getPassword())
             .setProperty("hibernate.hbm2ddl.auto", "validate")
+            .setProperty("hibernate.jpa.compliance.transaction", "true")
             .buildSessionFactory();
   }
 
@@ -85,6 +113,7 @@ class PerUserCaptureIT extends IntegrationSupport {
         var captures = new java.util.ArrayList<java.util.concurrent.Future<?>>();
         for (int worker = 0; worker < 8; worker++) {
           boolean rollback = rollBackSome && worker % 2 == 0;
+          int callbackCount = worker % 3 + 1;
           captures.add(
               executor.submit(
                   () -> {
@@ -92,7 +121,10 @@ class PerUserCaptureIT extends IntegrationSupport {
                       session.beginTransaction();
                       ready.countDown();
                       assertTrue(start.await(10, TimeUnit.SECONDS));
-                      listener(session, EventFilter::all).onEvent(event("first-capture", user));
+                      var capture = listener(session, EventFilter::all);
+                      for (int callback = 0; callback < callbackCount; callback++) {
+                        capture.onEvent(event("first-capture", user));
+                      }
                       if (rollback) {
                         session.getTransaction().rollback();
                       } else {
@@ -110,9 +142,13 @@ class PerUserCaptureIT extends IntegrationSupport {
         for (var capture : captures) {
           capture.get(10, TimeUnit.SECONDS);
         }
+        long expected =
+            java.util.stream.IntStream.range(0, 8)
+                .filter(worker -> !rollBackSome || worker % 2 != 0)
+                .map(worker -> worker % 3 + 1)
+                .sum();
         assertEquals(
-            java.util.stream.LongStream.rangeClosed(1, rollBackSome ? 4 : 8).boxed().toList(),
-            sequences(user));
+            java.util.stream.LongStream.rangeClosed(1, expected).boxed().toList(), sequences(user));
       }
     }
   }
@@ -220,6 +256,166 @@ class PerUserCaptureIT extends IntegrationSupport {
         scalar(
             "SELECT count(*) FROM kc_nats_outbox WHERE realm_id='independent'"
                 + " AND ordering_key IS NULL AND user_sequence IS NULL"));
+  }
+
+  @Test
+  void interleavedListenerInstancesShareCallbackOrderAndFreezeTheirSnapshots() throws Exception {
+    String user = UUID.randomUUID().toString();
+    String realm = UUID.randomUUID().toString();
+    try (var em = sessions.openSession()) {
+      em.beginTransaction();
+      var owner = captureSession(em);
+      var first = listener(owner, EventFilter::all);
+      final var second = listener(owner, EventFilter::all);
+      var login = event(realm, user);
+      login.setId("first-callback");
+      first.onEvent(login);
+      var admin = new AdminEvent();
+      admin.setId("second-callback");
+      admin.setRealmId(realm);
+      admin.setResourceType(ResourceType.USER);
+      admin.setOperationType(OperationType.DELETE);
+      admin.setResourcePath("users/" + user);
+      second.onEvent(admin, false);
+      login.setId("third-callback");
+      first.onEvent(login);
+      admin.setId("mutated-after-callback");
+      em.getTransaction().commit();
+      assertEquals(
+          List.of("first-callback", "second-callback", "third-callback"),
+          em.createNativeQuery(
+                  "SELECT payload::jsonb->'data'->>'keycloakEventId' FROM kc_nats_outbox"
+                      + " WHERE ordering_key=:key ORDER BY user_sequence",
+                  String.class)
+              .setParameter("key", EventOrdering.keyFor(realm, user))
+              .getResultList());
+    }
+    assertEquals(List.of(1L, 2L, 3L), sequences(user));
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"callback", "laterPrepare", "firstPrepare"})
+  @SuppressWarnings("unchecked")
+  void swallowedAdminLookupFailureCannotCommitTheAccountUpdate(String phase) throws Exception {
+    String userId = createUser();
+    var positionsBefore = sequences(userId);
+    var failure = new IllegalStateException("remote user storage failed");
+    try (var em = sessions.openSession()) {
+      em.beginTransaction();
+      final String realmId =
+          em.createNativeQuery("SELECT realm_id FROM user_entity WHERE id=:user", String.class)
+              .setParameter("user", userId)
+              .getSingleResult();
+      assertEquals(
+          1,
+          em.createNativeMutationQuery("UPDATE user_entity SET enabled=false WHERE id=:user")
+              .setParameter("user", userId)
+              .executeUpdate());
+      var owner = mock(KeycloakSession.class);
+      var attributes = new HashMap<String, Object>();
+      when(owner.getAttribute(anyString())).thenAnswer(call -> attributes.get(call.getArgument(0)));
+      doAnswer(call -> attributes.put(call.getArgument(0), call.getArgument(1)))
+          .when(owner)
+          .setAttribute(anyString(), any());
+      var tx = new DefaultKeycloakTransactionManager(owner);
+      tx.setJTAPolicy(KeycloakTransactionManager.JTAPolicy.NOT_SUPPORTED);
+      when(owner.getTransactionManager()).thenReturn(tx);
+      // The real manager owns account work before the builder dispatches its listener callback.
+      tx.enlist(
+          new AbstractKeycloakTransaction() {
+            @Override
+            protected void commitImpl() {
+              em.getTransaction().commit();
+            }
+
+            @Override
+            protected void rollbackImpl() {
+              em.getTransaction().rollback();
+            }
+          });
+      var tracing = mock(TracingProvider.class);
+      doAnswer(
+              call -> {
+                ((Consumer<?>) call.getArgument(2)).accept(null);
+                return null;
+              })
+          .when(tracing)
+          .trace(any(Class.class), any(String.class), any(Consumer.class));
+      when(tracing.getCurrentSpan()).thenReturn(mock(Span.class));
+      when(owner.getProvider(TracingProvider.class)).thenReturn(tracing);
+      var jpa = mock(JpaConnectionProvider.class);
+      when(owner.getProvider(JpaConnectionProvider.class)).thenReturn(jpa);
+      when(jpa.getEntityManager()).thenReturn(em);
+      var realm = mock(RealmModel.class);
+      when(realm.getId()).thenReturn(realmId);
+      when(realm.getName()).thenReturn("durable-test");
+      when(realm.getEventsListenersStream()).thenAnswer(call -> Stream.of("nats-durable"));
+      var realms = mock(RealmProvider.class);
+      when(owner.realms()).thenReturn(realms);
+      when(owner.clients()).thenReturn(mock(ClientProvider.class));
+      when(realms.getRealm(realmId)).thenReturn(realm);
+      var users = mock(UserProvider.class);
+      var user = mock(UserModel.class);
+      when(owner.users()).thenReturn(users);
+      when(users.getUserById(realm, userId)).thenReturn(user);
+      when(user.isEnabled()).thenThrow(failure);
+      var context = mock(KeycloakContext.class);
+      when(context.getRealm()).thenReturn(realm);
+      when(owner.getContext()).thenReturn(context);
+      var factory = mock(KeycloakSessionFactory.class);
+      when(owner.getKeycloakSessionFactory()).thenReturn(factory);
+      var provider = mock(EventListenerProviderFactory.class);
+      var wakeup = mock(Runnable.class);
+      when(provider.getId()).thenReturn("nats-durable");
+      when(provider.create(owner))
+          .thenAnswer(call -> new DurableEventListener(owner, BridgeConfig.from(Map.of()), wakeup));
+      when(factory.getProviderFactoriesStream(EventListenerProvider.class))
+          .thenAnswer(call -> Stream.of(provider));
+      var auth = mock(AdminAuth.class);
+      var actor = mock(UserModel.class);
+      when(actor.getId()).thenReturn("actor");
+      var client = mock(ClientModel.class);
+      when(client.getId()).thenReturn("internal-client");
+      when(auth.getRealm()).thenReturn(realm);
+      when(auth.getUser()).thenReturn(actor);
+      when(auth.getClient()).thenReturn(client);
+      tx.begin();
+      Runnable captureAdmin =
+          () ->
+              new AdminEventBuilder(realm, auth, owner, mock(ClientConnection.class))
+                  .resource(ResourceType.USER)
+                  .operation(OperationType.UPDATE)
+                  .resourcePath("users", userId)
+                  .success();
+      if (!phase.equals("callback")) {
+        if (phase.equals("laterPrepare")) {
+          new DurableEventListener(owner, BridgeConfig.from(Map.of()), wakeup)
+              .onEvent(event(realmId, userId));
+        }
+        tx.enlistPrepare(
+            new AbstractKeycloakTransaction() {
+              @Override
+              protected void commitImpl() {
+                captureAdmin.run();
+              }
+
+              @Override
+              protected void rollbackImpl() {}
+            });
+      } else {
+        captureAdmin.run();
+      }
+      var rejection = assertThrows(RuntimeException.class, tx::commit);
+      if (phase.equals("callback")) {
+        assertSame(failure, rejection.getCause());
+      }
+      assertTrue(tx.getRollbackOnly());
+      assertFalse(em.getTransaction().isActive());
+      verifyNoInteractions(wakeup);
+    }
+    assertEquals(
+        1, scalar("SELECT count(*) FROM user_entity WHERE id='" + userId + "' AND enabled"));
+    assertEquals(positionsBefore, sequences(userId));
   }
 
   @Test
@@ -334,6 +530,42 @@ class PerUserCaptureIT extends IntegrationSupport {
   }
 
   @Test
+  void atomicRangeCanReachTheLastSequenceButCannotPartiallyAllocatePastIt() {
+    String user = "z-" + UUID.randomUUID();
+    final String earlier = "a-" + UUID.randomUUID();
+    commitEvent(event("capture", user));
+    try (var session = sessions.openSession()) {
+      session.beginTransaction();
+      session
+          .createNativeMutationQuery(
+              "UPDATE kc_nats_capture_counter SET last_sequence="
+                  + (Long.MAX_VALUE - 3)
+                  + " WHERE user_id=:user")
+          .setParameter("user", user)
+          .executeUpdate();
+      var capture = listener(session, EventFilter::all);
+      for (int callback = 0; callback < 3; callback++) {
+        capture.onEvent(event("capture", user));
+      }
+      session.getTransaction().commit();
+    }
+    var expected = List.of(1L, Long.MAX_VALUE - 2, Long.MAX_VALUE - 1, Long.MAX_VALUE);
+    assertEquals(expected, sequences(user));
+    try (var session = sessions.openSession()) {
+      session.beginTransaction();
+      var capture = listener(session, EventFilter::all);
+      capture.onEvent(event("capture", earlier));
+      capture.onEvent(event("capture", user));
+      capture.onEvent(event("capture", user));
+      assertThrows(RuntimeException.class, () -> session.getTransaction().commit());
+    }
+    assertEquals(expected, sequences(user));
+    assertEquals(List.of(), sequences(earlier));
+    commitEvent(event("capture", earlier));
+    assertEquals(List.of(1L), sequences(earlier));
+  }
+
+  @Test
   void lockTimeoutRollsBackEarlierCallbacksForOtherUsers() {
     String locked = "z-" + UUID.randomUUID();
     String earlier = "a-" + UUID.randomUUID();
@@ -371,9 +603,9 @@ class PerUserCaptureIT extends IntegrationSupport {
                     session
                         .createNativeMutationQuery("SET LOCAL lock_timeout='5s'")
                         .executeUpdate();
-                    var capture = listener(session, EventFilter::all);
-                    capture.onEvent(event(realm, users.get(side)));
-                    capture.onEvent(event(realm, users.get(1 - side)));
+                    var owner = captureSession(session);
+                    listener(owner, EventFilter::all).onEvent(event(realm, users.get(side)));
+                    listener(owner, EventFilter::all).onEvent(event(realm, users.get(1 - side)));
                     staged.countDown();
                     assertTrue(staged.await(10, TimeUnit.SECONDS));
                     session.getTransaction().commit();
@@ -444,6 +676,40 @@ class PerUserCaptureIT extends IntegrationSupport {
           "23505",
           assertThrows(java.sql.SQLException.class, duplicate::executeUpdate).getSQLState());
     }
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void atomicAllocationCannotReuseACounterWithAnInconsistentIdentity(boolean wrongKey)
+      throws Exception {
+    String user = UUID.randomUUID().toString();
+    commitEvent(event("capture", user));
+    try (var connection = database.getConnection();
+        var corrupt =
+            connection.prepareStatement(
+                "UPDATE kc_nats_capture_counter SET "
+                    + (wrongKey ? "ordering_key='incorrect-key'" : "realm_id='incorrect-realm'")
+                    + " WHERE user_id=?")) {
+      corrupt.setString(1, user);
+      assertEquals(1, corrupt.executeUpdate());
+    }
+    try (var session = sessions.openSession()) {
+      session.beginTransaction();
+      var capture = listener(session, EventFilter::all);
+      capture.onEvent(event("capture", user));
+      capture.onEvent(event("capture", user));
+      assertThrows(RuntimeException.class, () -> session.getTransaction().commit());
+    }
+    assertEquals(
+        1,
+        scalar("SELECT last_sequence FROM kc_nats_capture_counter WHERE user_id='" + user + "'"));
+    assertEquals(
+        1,
+        scalar(
+            "SELECT count(*) FROM kc_nats_outbox WHERE realm_id='capture'"
+                + " AND payload::jsonb->'data'->>'userId'='"
+                + user
+                + "'"));
   }
 
   @Test
@@ -591,7 +857,21 @@ class PerUserCaptureIT extends IntegrationSupport {
   }
 
   private static DurableEventListener listener(Session em, Supplier<EventFilter> filter) {
+    return listener(captureSession(em), filter);
+  }
+
+  private static DurableEventListener listener(
+      KeycloakSession owner, Supplier<EventFilter> filter) {
+    return new DurableEventListener(owner, BridgeConfig.from(Map.of()), () -> {}, filter);
+  }
+
+  private static KeycloakSession captureSession(Session em) {
     var session = mock(KeycloakSession.class);
+    var attributes = new HashMap<String, Object>();
+    when(session.getAttribute(anyString())).thenAnswer(call -> attributes.get(call.getArgument(0)));
+    doAnswer(call -> attributes.put(call.getArgument(0), call.getArgument(1)))
+        .when(session)
+        .setAttribute(anyString(), any());
     var jpa = mock(JpaConnectionProvider.class);
     var tx = mock(KeycloakTransactionManager.class);
     when(session.getProvider(JpaConnectionProvider.class)).thenReturn(jpa);
@@ -647,7 +927,7 @@ class PerUserCaptureIT extends IntegrationSupport {
             })
         .when(tx)
         .setRollbackOnly();
-    return new DurableEventListener(session, BridgeConfig.from(Map.of()), () -> {}, filter);
+    return session;
   }
 
   private static void captureNow(Session em, Event event) {

@@ -36,11 +36,17 @@ jobs:
           RELEASE_REF_TYPE: ${{ github.ref_type }}
         run: python3 scripts/release-identity.py
       - name: Build fresh artifacts, integration evidence and SBOMs
-        run: >-
-          mvn -B -ntp -Pintegration,sbom "-Drevision=$RELEASE_VERSION"
-          "-Dproject.build.outputTimestamp=$SOURCE_DATE_EPOCH" verify
+        run: |
+          rm -f target/security/gate.json
+          echo "SECURITY_BUILD_STARTED_NS=$(python3 -c 'import time; print(time.time_ns())')" >> "$GITHUB_ENV"
+          mvn -B -ntp -Pintegration,sbom "-Drevision=$RELEASE_VERSION" \
+            "-Dproject.build.outputTimestamp=$SOURCE_DATE_EPOCH" verify
       - name: Scan dependencies and images using the repository security policy
-        run: python3 scripts/security-check.py --version "$RELEASE_VERSION"
+        run: >-
+          python3 scripts/security-check.py --version "$RELEASE_VERSION"
+          --built-after "$SECURITY_BUILD_STARTED_NS"
+      - name: Verify packaged licenses and dependency notices
+        run: python3 scripts/packaged_licenses.py --version "$RELEASE_VERSION"
       - name: Package checksummed candidate
         # Project dependency findings block packaging; upstream server findings are advisory.
         if: success()

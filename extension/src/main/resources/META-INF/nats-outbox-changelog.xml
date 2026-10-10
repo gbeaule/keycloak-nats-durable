@@ -112,10 +112,6 @@
       <column name="CREATED_AT"/>
       <column name="ID"/>
     </createIndex>
-    <createIndex tableName="KC_NATS_OUTBOX" indexName="IDX_KC_NATS_OUTBOX_EXPIRY">
-      <column name="NEXT_EXPIRY_ATTEMPT_AT"/>
-      <column name="ID"/>
-    </createIndex>
     <createIndex tableName="KC_NATS_DISCARD_AUDIT" indexName="IDX_KC_NATS_DISCARD_RETENTION">
       <column name="DISCARDED_AT"/>
       <column name="ID"/>

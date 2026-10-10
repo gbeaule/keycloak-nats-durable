@@ -69,6 +69,7 @@ class EventFilterSchemaTest {
                     event,
                     AffectedUser.resolve(event),
                     false,
+                    null,
                     "keycloak.events.realm.admin.user.update")
                 .orElseThrow();
         assertEquals(PublicationPolicy.RETRY, policy.policy());
@@ -91,7 +92,7 @@ class EventFilterSchemaTest {
             .readTree(getClass().getResourceAsStream("/schemas/event-filter.schema.json"))
             .get("$defs");
     var catalogue =
-        mapper.readTree(getClass().getResourceAsStream("/schemas/keycloak-catalogue-26.7.4.json"));
+        mapper.readTree(getClass().getResourceAsStream("/schemas/keycloak-catalogue-26.7.5.json"));
     assertEquals(
         catalogue.get("userEventTypes"), withoutWildcard(definitions.at("/eventTypes/items/enum")));
     assertEquals(
@@ -200,6 +201,34 @@ class EventFilterSchemaTest {
         document(
             rule("rule", USER_MATCH, "{\"action\":\"retry\"}")
                 .replace("\"id\":\"rule\"", "\"id\":" + id)));
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "\\u0000",
+        "\\u0000protected",
+        "protected\\u0000login",
+        "protected\\u0000",
+        "protected\\n\\u0000login"
+      })
+  void nulRuleIdsAreRejectedBySchemaAndParserForBothEventKinds(String id) {
+    assertRejected(document(rule(id, USER_MATCH, "{\"action\":\"retry\"}")));
+    assertRejected(document(rule(id, ADMIN_MATCH, "{\"action\":\"retry\"}")));
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "protected-login",
+        "protected-\\u00e9-\\ud83d\\ude00",
+        "protected\\u0001login",
+        "literal\\\\u0000",
+        "protected\\nlogin"
+      })
+  void databaseCompatibleRuleIdsKeepTheirSchemaAndParserAcceptance(String id) {
+    assertAccepted(document(rule(id, USER_MATCH, "{\"action\":\"retry\"}")));
+    assertAccepted(document(rule(id, ADMIN_MATCH, "{\"action\":\"retry\"}")));
   }
 
   @Test

@@ -21,6 +21,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Clock;
 import java.time.Duration;
 import java.util.Map;
 import java.util.UUID;
@@ -47,7 +48,8 @@ abstract class IntegrationSupport {
   static GenericContainer<?> keycloak;
   static Connection nats;
   static PGSimpleDataSource database;
-  static String adminToken;
+  private static final AdminAuthentication adminAuthentication =
+      new AdminAuthentication(Clock.systemUTC(), IntegrationSupport::adminToken);
 
   static PostgreSQLContainer postgresContainer() {
     // Allow compatible PostgreSQL image overrides.
@@ -58,7 +60,7 @@ abstract class IntegrationSupport {
   }
 
   static void startInfrastructure() throws Exception {
-    startInfrastructure(System.getProperty("keycloak.version", "26.7.4"));
+    startInfrastructure(System.getProperty("keycloak.version", "26.7.5"));
   }
 
   static void startInfrastructure(String initialVersion) throws Exception {
@@ -114,7 +116,7 @@ abstract class IntegrationSupport {
   }
 
   static GenericContainer<?> keycloakContainer(boolean importRealm) {
-    return keycloakContainer(importRealm, System.getProperty("keycloak.version", "26.7.4"));
+    return keycloakContainer(importRealm, System.getProperty("keycloak.version", "26.7.5"));
   }
 
   static GenericContainer<?> keycloakContainer(boolean importRealm, String version) {
@@ -247,11 +249,18 @@ abstract class IntegrationSupport {
 
   static HttpResponse<String> requestTo(
       GenericContainer<?> node, String method, String path, Object body) throws Exception {
+    return adminAuthentication.request(
+        token -> authenticatedRequestTo(node, method, path, body, token));
+  }
+
+  private static HttpResponse<String> authenticatedRequestTo(
+      GenericContainer<?> node, String method, String path, Object body, String token)
+      throws Exception {
     String address = "http://" + node.getHost() + ":" + currentPort(node, 8080);
     return httpClient.send(
         HttpRequest.newBuilder(URI.create(address + path))
             .timeout(Duration.ofSeconds(15))
-            .header("Authorization", "Bearer " + adminToken)
+            .header("Authorization", "Bearer " + token)
             .header("Content-Type", "application/json")
             .method(
                 method,
@@ -286,12 +295,16 @@ abstract class IntegrationSupport {
   }
 
   static void loginAdmin() throws Exception {
+    adminAuthentication.login();
+  }
+
+  private static String adminToken() throws Exception {
     var result =
         login(
             "master",
             "grant_type=password&client_id=admin-cli&username=admin&password=admin-password");
     assertEquals(200, result.statusCode(), result.body());
-    adminToken = objectMapper.readTree(result.body()).get("access_token").asText();
+    return objectMapper.readTree(result.body()).get("access_token").asText();
   }
 
   static String createUser() throws Exception {
@@ -327,9 +340,11 @@ abstract class IntegrationSupport {
   }
 
   static void drained() {
-    await()
-        .atMost(Duration.ofSeconds(20))
-        .until(() -> scalar("SELECT count(*) FROM kc_nats_outbox") == 0);
+    drained(Duration.ofSeconds(20));
+  }
+
+  static void drained(Duration budget) {
+    await().atMost(budget).until(() -> scalar("SELECT count(*) FROM kc_nats_outbox") == 0);
   }
 
   static long messages() throws Exception {

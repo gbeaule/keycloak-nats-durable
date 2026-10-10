@@ -3,13 +3,55 @@
 
 import argparse
 from datetime import datetime, timezone
+import hashlib
+import io
 import json
 from pathlib import Path
 import re
 import subprocess
+import time
+import zipfile
+
+from packaged_licenses import MODULES
 
 SCANNER = "aquasec/trivy:0.74.0"
 BLOCKING_REPORT = "runtime-dependencies.json"
+
+
+def build_inputs(root, version, built_after):
+    """Associate the scan with inventories and shaded JARs from one fresh build."""
+    if built_after is None or built_after <= 0 or built_after > time.time_ns():
+        raise ValueError("--built-after must be the Unix timestamp in nanoseconds captured before "
+                         "the successful build; use python scripts/validate.py security")
+    paths = [(root / module / "target" / f"{artifact}-{version}.jar", artifact)
+             for module, artifact in MODULES]
+    paths.extend((root / module / "target" / name, None)
+                 for module in ("", *(module for module, _ in MODULES))
+                 for name in ("bom.json", "runtime-bom.json"))
+    checksums = {}
+    for path, artifact in paths:
+        name = path.relative_to(root).as_posix()
+        if not path.is_file() or path.stat().st_mtime_ns < built_after:
+            raise ValueError(f"Missing or stale build input: {name}. "
+                             "Build both shaded artifacts and inventories with online Maven.")
+        content = path.read_bytes()
+        if artifact:
+            with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                metadata = archive.read(f"META-INF/maven/io.github.gbeaule/{artifact}/pom.properties")
+                properties = dict(line.split("=", 1) for line in metadata.decode().splitlines()
+                                  if "=" in line and not line.startswith("#"))
+                if properties.get("version") != version:
+                    raise ValueError(f"Artifact version does not match build: {name}")
+        else:
+            inventory = json.loads(content.decode("utf-8"))
+            if (not isinstance(inventory, dict) or inventory.get("bomFormat") != "CycloneDX"
+                    or not isinstance(inventory.get("components"), list)
+                    or not inventory["components"]
+                    or any(not isinstance(component, dict) for component in inventory["components"])
+                    or inventory.get("metadata", {}).get("component", {}).get("version") != version):
+                raise ValueError(f"Empty or mismatched inventory: {name}")
+        checksums[name] = hashlib.sha256(content).hexdigest()
+    return {"version": version, "startedAtUnixNs": built_after, "sha256": checksums}
 
 
 def evaluate(outputs):
@@ -45,12 +87,12 @@ def run(*command):
     subprocess.run(command, check=True)
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", default="1.0.0-SNAPSHOT")
-    args = parser.parse_args()
-    if not re.fullmatch(r"\d+\.\d+\.\d+(?:-SNAPSHOT)?", args.version):
-        parser.error("Expected a numeric Maven version, optionally ending in -SNAPSHOT")
+    parser.add_argument("--built-after", type=int,
+                        help="Required: Unix timestamp in nanoseconds captured before the build")
+    args = parser.parse_args(argv)
     root = Path(__file__).resolve().parent.parent
     reports = root / "target" / "security"
     cache = root / ".work" / "trivy-cache"
@@ -58,13 +100,12 @@ def main():
     cache.mkdir(parents=True, exist_ok=True)
     # A failed new scan must not leave an old gate verdict looking current.
     (reports / "gate.json").unlink(missing_ok=True)
-    for name in ("bom.json", "runtime-bom.json"):
-        bom = root / "target" / name
-        if not bom.is_file():
-            parser.error("Run mvn -Psbom verify first; both complete and runtime inventories are required")
-        inventory = json.loads(bom.read_text(encoding="utf-8"))
-        if not inventory.get("components") or inventory.get("metadata", {}).get("component", {}).get("version") != args.version:
-            parser.error(f"Empty or mismatched inventory: {name}")
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-SNAPSHOT)?", args.version):
+        parser.error("Expected a numeric Maven version, optionally ending in -SNAPSHOT")
+    try:
+        inputs = build_inputs(root, args.version, args.built_after)
+    except (OSError, ValueError, KeyError, AttributeError, zipfile.BadZipFile) as error:
+        parser.error(f"Security build inputs rejected: {error}")
     base = ["docker", "run", "--rm", "--mount", f"type=bind,src={root},dst=/workspace,readonly",
             "--mount", f"type=bind,src={reports},dst=/reports",
             "--mount", f"type=bind,src={cache},dst=/root/.cache/trivy", SCANNER]
@@ -99,6 +140,12 @@ def main():
         run(*base, "image", *shared, "--scanners", "vuln", "--output", f"/reports/{name}.json", image)
         outputs.append(reports / f"{name}.json")
     gate = evaluate(outputs)
+    try:
+        if build_inputs(root, args.version, args.built_after) != inputs:
+            raise ValueError("Build inputs changed during scanning; rebuild and scan again")
+    except (OSError, ValueError, KeyError, AttributeError, zipfile.BadZipFile) as error:
+        parser.error(f"Security build inputs rejected: {error}")
+    gate["build"] = inputs
     (reports / "gate.json").write_text(json.dumps(gate, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(gate, indent=2))
     raise SystemExit(1 if gate["blockingFindings"] else 0)

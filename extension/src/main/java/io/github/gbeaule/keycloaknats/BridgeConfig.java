@@ -28,7 +28,8 @@ public record BridgeConfig(
     TlsConfig tls,
     String filterFile,
     Duration filterReloadInterval,
-    AuditCleanupConfig auditCleanup) {
+    AuditCleanupConfig auditCleanup,
+    RelayDatabaseConfig relayDatabase) {
   /** Reads provider settings, falling back to matching environment variables. */
   public static BridgeConfig from(Config.Scope scope) {
     Environment environment = Environment.system();
@@ -47,13 +48,22 @@ public record BridgeConfig(
           return value == null || value.isBlank() ? null : value.trim();
         };
     int pollMillis = number(get, "poll-ms", 500);
+    int timeoutMillis = number(get, "timeout-ms", 2000);
+    int transactionSeconds =
+        number(
+            get,
+            "relay-transaction-timeout-seconds",
+            Math.max(10, (int) ((timeoutMillis + 999L) / 1000) + 5));
+    int statementMillis =
+        number(get, "relay-statement-timeout-ms", Math.min(5000, transactionSeconds * 1000));
     String[] servers = value(get, "nats-url", "nats://localhost:4222").split(",", -1);
     return new BridgeConfig(
         servers,
         value(get, "stream", "KEYCLOAK_EVENTS"),
         value(get, "subject-prefix", "keycloak.events"),
         number(get, "min-replicas", 3),
-        Duration.ofMillis(number(get, "timeout-ms", 2000)),
+        // Total publication-attempt budget, including DNS, connect, validation and publish.
+        Duration.ofMillis(timeoutMillis),
         Duration.ofMillis(pollMillis),
         Duration.ofMillis(number(get, "idle-poll-max-ms", Math.max(pollMillis, 5000))),
         number(get, "batch-size", 64),
@@ -71,12 +81,17 @@ public record BridgeConfig(
             Duration.ofMillis(number(get, "audit-cleanup-interval-ms", 60000)),
             number(get, "audit-cleanup-batch-size", 500),
             number(get, "audit-cleanup-max-batches", 10),
-            number(get, "audit-cleanup-timeout-seconds", 10)));
+            number(get, "audit-cleanup-timeout-seconds", 10)),
+        new RelayDatabaseConfig(
+            transactionSeconds,
+            statementMillis,
+            number(get, "relay-lock-timeout-ms", Math.min(1000, statementMillis))));
   }
 
   /** Validates all limits and defensively copies the server list. */
   public BridgeConfig {
     java.util.Objects.requireNonNull(auditCleanup, "auditCleanup");
+    java.util.Objects.requireNonNull(relayDatabase, "relayDatabase");
     servers = NatsServers.validate(servers);
     if (stream == null || !stream.matches("[A-Za-z0-9_-]{1,128}")) {
       throw new IllegalArgumentException("Invalid stream name");
@@ -109,6 +124,10 @@ public record BridgeConfig(
     }
     if (retryMax.compareTo(retryInitial) < 0) {
       throw new IllegalArgumentException("retry-max-ms must be >= retry-initial-ms");
+    }
+    if (relayDatabase.transactionTimeoutSeconds() * 1000L <= timeout.toMillis()) {
+      throw new IllegalArgumentException(
+          "relay-transaction-timeout-seconds must exceed timeout-ms");
     }
     if (credentialsFile != null && token != null) {
       throw new IllegalArgumentException("Choose credentials-file or token, not both");

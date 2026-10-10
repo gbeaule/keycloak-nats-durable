@@ -1,6 +1,7 @@
 package io.github.gbeaule.keycloaknats.jetstream;
 
 import io.nats.client.api.DiscardPolicy;
+import io.nats.client.api.PersistMode;
 import io.nats.client.api.RetentionPolicy;
 import io.nats.client.api.StorageType;
 import io.nats.client.api.StreamConfiguration;
@@ -27,6 +28,9 @@ public final class StreamPolicy {
         stream.getSubjects().equals(List.of(prefix + ".>")),
         "Stream must own the configured subject prefix exclusively");
     require(stream.getStorageType() == StorageType.File, "File storage is required");
+    // Async bypasses the server's sync_interval, even when it is configured as always.
+    require(
+        stream.getPersistMode() != PersistMode.Async, "Asynchronous persistence must be disabled");
     require(stream.getReplicas() >= replicas, "Insufficient stream replicas");
     require(
         stream.getRetentionPolicy() == RetentionPolicy.WorkQueue

@@ -51,11 +51,25 @@ class CompatibilityMatrixTest(unittest.TestCase):
 
 
 class ValidationRunnerTest(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        (root / "config").mkdir()
+        (root / "config/keycloak-versions.json").write_bytes(
+            (validate.ROOT / "config/keycloak-versions.json").read_bytes())
+        workspace = patch.object(validate, "ROOT", root)
+        workspace.start()
+        self.addCleanup(workspace.stop)
+
     def test_postgres_selection_keeps_source_and_existing_durability_coverage(self):
         expected = {
-            "ConsumerHardeningIT", "CustomSchemaIT", "UpgradeIT", "PerUserCaptureIT",
+            "ConsumerHardeningIT", "ConsumerStartupIT", "CustomSchemaIT", "UpgradeIT",
+            "AdminUserAttributionIT", "OrganizationGroupAttributionIT", "ConsumerReconnectIT",
+            "NatsReadinessIT", "PerUserCaptureIT",
             "PerUserRelayIT", "OutboxDiscardIT", "OutboxAuditRetentionIT",
-            "NestedEventCaptureIT", "OutboxHeadIT", "OutboxSchemaIT",
+            "NestedEventCaptureIT", "OutboxHeadIT", "OutboxSchemaIT", "OutboxExpiryIT",
+            "CaptureLockOrderIT",
             "PerUserPublicationIT", "PerUserSystemIT", "FilteringIT",
             "DurabilityIT#uncommittedAndRolledBackRowsAreNeverPublished+"
             "outboxWritesKeepSynchronousCommitForAuthenticationOnlyTransactions+"
@@ -100,10 +114,51 @@ class ValidationRunnerTest(unittest.TestCase):
         with patch.object(validate.shutil, "which", return_value="mvn"):
             with patch.object(validate, "run") as run:
                 self.assertEqual(validate.main([]), 0)
-        self.assertEqual(run.call_count, 2)
-        command = run.call_args.args[0]
+        self.assertEqual(run.call_count, 3)
+        command = run.call_args_list[1].args[0]
         self.assertEqual(command[-1], "verify")
         self.assertFalse(any(argument.startswith("-P") or "skip" in argument.lower() for argument in command))
+        self.assertIn("scripts/packaged_licenses.py", run.call_args.args[0])
+
+    def test_failed_packaged_license_check_prevents_security_scan(self):
+        with patch.object(validate.shutil, "which", return_value="mvn"):
+            with patch.object(validate, "run", side_effect=[None, None,
+                    subprocess.CalledProcessError(5, "packaged_licenses")]) as run:
+                self.assertEqual(validate.main(["security"]), 5)
+        self.assertEqual(run.call_count, 3)
+        self.assertIn("--built-after", run.call_args.args[0])
+
+    def test_security_scan_receives_timestamp_captured_before_maven(self):
+        commands = []
+        def execute(command):
+            commands.append(command)
+            if command[0] == "mvn":
+                self.assertEqual(clock.call_count, 1)
+        with patch.object(validate.shutil, "which", return_value="mvn"):
+            with patch.object(validate.time, "time_ns", return_value=123456789) as clock:
+                with patch.object(validate, "run", side_effect=execute):
+                    self.assertEqual(validate.main(["security"]), 0)
+        self.assertEqual(commands[-1][1:],
+                         ["scripts/security-check.py", "--built-after", "123456789"])
+        self.assertEqual(commands[-2][-2:], ["--built-after", "123456789"])
+
+    def test_failed_security_validation_removes_previous_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            gate = root / "target/security/gate.json"
+            gate.parent.mkdir(parents=True)
+            with patch.object(validate, "ROOT", root), \
+                    patch.object(validate, "compatibility_matrix", return_value={}), \
+                    patch.object(validate.shutil, "which", return_value="mvn"):
+                for successful_steps in (0, 1, 2):
+                    with self.subTest(successful_steps=successful_steps):
+                        gate.write_text('{"blockingFindings": []}')
+                        results = [None] * successful_steps + [subprocess.CalledProcessError(9, "validation")]
+                        with patch.object(validate, "run", side_effect=results) as run:
+                            self.assertEqual(validate.main(["security"]), 9)
+                        self.assertFalse(gate.exists())
+                        self.assertFalse(any("scripts/security-check.py" in call.args[0]
+                                             for call in run.call_args_list))
 
     def test_runtime_flags_are_not_silently_ignored(self):
         for args in (["postgres"], ["quick", "--postgres-major", "14"],

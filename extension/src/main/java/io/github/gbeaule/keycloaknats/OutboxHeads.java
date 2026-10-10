@@ -8,6 +8,19 @@ import java.util.Objects;
 final class OutboxHeads {
   private OutboxHeads() {}
 
+  static void append(EntityManager em, OutboxEvent first) {
+    // Capture holds this counter and has flushed the whole allocated range. Appended positions
+    // cannot replace an existing head; a previously empty queue starts at this range's first row.
+    em.createQuery(
+            "update NatsCaptureCounter set headEventId = :id, headNextAttemptAt = :due,"
+                + " headCreatedAt = :created where orderingKey = :key and headEventId is null")
+        .setParameter("id", first.id())
+        .setParameter("due", first.nextAttemptAt())
+        .setParameter("created", first.createdAt())
+        .setParameter("key", first.orderingKey())
+        .executeUpdate();
+  }
+
   static void refresh(EntityManager em, String orderingKey) {
     em.flush();
     if (orderingKey == null) {

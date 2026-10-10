@@ -37,7 +37,8 @@ import org.junit.jupiter.api.Test;
 class OutboxRelayTest {
   private EntityManager em;
   private TypedQuery<OutboxEvent> query;
-  private TypedQuery<OutboxEvent> heads;
+  private TypedQuery<Object[]> heads;
+  private TypedQuery<Object[]> expiredHeads;
   private TypedQuery<OutboxEvent> prepared;
   private TypedQuery<OutboxEvent> expired;
   private TypedQuery<OutboxEvent> unchanged;
@@ -57,19 +58,25 @@ class OutboxRelayTest {
     publisher = mock(EventPublisher.class);
     query = mock(TypedQuery.class, RETURNS_SELF);
     heads = mock(TypedQuery.class, RETURNS_SELF);
+    expiredHeads = mock(TypedQuery.class, RETURNS_SELF);
     prepared = mock(TypedQuery.class, RETURNS_SELF);
     expired = mock(TypedQuery.class, RETURNS_SELF);
     unchanged = mock(TypedQuery.class, RETURNS_SELF);
     clock = mock(Query.class);
     when(em.createNativeQuery(anyString(), eq(Long.class))).thenReturn(clock);
+    when(em.createNativeQuery(anyString(), eq(Object[].class)))
+        .thenReturn(mock(Query.class, RETURNS_SELF));
     when(clock.getSingleResult()).thenAnswer(call -> System.currentTimeMillis());
+    when(em.createQuery(anyString(), eq(Object[].class)))
+        .thenAnswer(
+            call ->
+                ((String) call.getArgument(0)).contains("event.nextExpiryAttemptAt")
+                    ? expiredHeads
+                    : heads);
     when(em.createQuery(anyString(), eq(OutboxEvent.class)))
         .thenAnswer(
             call -> {
               String hql = call.getArgument(0);
-              if (hql.contains("NatsCaptureCounter")) {
-                return heads;
-              }
               return hql.contains(":version")
                   ? (hql.contains("event.nextAttemptAt") ? prepared : unchanged)
                   : hql.contains("event.nextExpiryAttemptAt") ? expired : query;
@@ -429,6 +436,31 @@ class OutboxRelayTest {
     verify(expired, times(2)).setMaxResults(1);
     verify(expired, times(2)).setLockMode(LockModeType.PESSIMISTIC_WRITE);
     verify(expired, times(2)).setHint(SpecHints.HINT_SPEC_LOCK_TIMEOUT, Timeouts.SKIP_LOCKED_MILLI);
+  }
+
+  @Test
+  void orderedExpiryLocksTheCounterAndEventInThePreparationTransaction() {
+    usePolicy(new PublicationPolicy(1, null));
+    when(expiredHeads.getResultList())
+        .thenReturn(java.util.Collections.singletonList(new Object[] {null, row}), List.of());
+    when(query.getResultList()).thenReturn(List.of());
+    assertEquals(1, relay.runBatch().expired());
+    verify(expiredHeads, times(2)).setLockMode(LockModeType.PESSIMISTIC_WRITE);
+    verify(expiredHeads, times(2))
+        .setHint(SpecHints.HINT_SPEC_LOCK_TIMEOUT, Timeouts.SKIP_LOCKED_MILLI);
+    verifyNoInteractions(publisher, prepared);
+  }
+
+  @Test
+  void orderedPublicationLocksTheCounterOnlyDuringPreparation() throws Exception {
+    when(heads.getResultList())
+        .thenReturn(java.util.Collections.singletonList(new Object[] {null, row}), List.of());
+    when(query.getResultList()).thenReturn(List.of());
+    assertEquals(1, relay.runBatch().published());
+    verify(heads, times(2)).setLockMode(LockModeType.PESSIMISTIC_WRITE);
+    verify(heads, times(2)).setHint(SpecHints.HINT_SPEC_LOCK_TIMEOUT, Timeouts.SKIP_LOCKED_MILLI);
+    verify(publisher).publish(row);
+    verify(prepared).setLockMode(LockModeType.PESSIMISTIC_WRITE);
   }
 
   @Test

@@ -26,7 +26,7 @@ class NestedEventCaptureIT extends IntegrationSupport {
   void passwordSuccessAndNestedEmailErrorAreBothDurable() throws Exception {
     try {
       startInfrastructure(
-          System.getProperty("keycloak.version", "26.7.4"),
+          System.getProperty("keycloak.version", "26.7.5"),
           container -> {
             try {
               execute("ALTER ROLE keycloak SET lock_timeout = '1500ms'");

@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -16,6 +17,7 @@ import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -38,6 +40,7 @@ import io.nats.client.api.StreamConfiguration;
 import io.nats.client.api.StreamInfo;
 import io.nats.client.impl.Headers;
 import java.io.IOException;
+import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -49,6 +52,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -115,6 +119,11 @@ class JetStreamPublisherTest {
     publisher = new JetStreamPublisher(config, connector);
   }
 
+  @AfterEach
+  void closePublisher() {
+    publisher.close();
+  }
+
   @Test
   void validatesBeforePublishingOriginalBytesAndDeduplicationIdentityWithBoundedRequests()
       throws Exception {
@@ -139,9 +148,12 @@ class JetStreamPublisherTest {
     assertNull(options.getValue().getMessageTtl());
     var request = ArgumentCaptor.forClass(JetStreamOptions.class);
     verify(connection).jetStreamManagement(request.capture());
-    assertEquals(config.timeout(), request.getValue().getRequestTimeout());
+    Duration managementBudget = request.getValue().getRequestTimeout();
+    assertTrue(managementBudget.compareTo(Duration.ZERO) > 0);
+    assertTrue(managementBudget.compareTo(config.timeout()) <= 0);
     verify(connection).jetStream(request.capture());
-    assertEquals(config.timeout(), request.getValue().getRequestTimeout());
+    assertTrue(request.getValue().getRequestTimeout().compareTo(Duration.ZERO) > 0);
+    assertTrue(request.getValue().getRequestTimeout().compareTo(managementBudget) <= 0);
   }
 
   @Test
@@ -215,7 +227,7 @@ class JetStreamPublisherTest {
     publisher.publish(event);
     publisher.close();
     verify(connector, times(2)).connect(any());
-    verify(replacement).close();
+    verify(replacement, timeout(1000)).close();
     verify(connection, never()).close();
   }
 
@@ -227,7 +239,8 @@ class JetStreamPublisherTest {
       var options = ArgumentCaptor.forClass(Options.class);
       verify(connector).connect(options.capture());
       assertEquals(" private-token ", options.getValue().getToken());
-      assertEquals(settings.timeout(), options.getValue().getConnectionTimeout());
+      assertTrue(options.getValue().getConnectionTimeout().compareTo(Duration.ZERO) > 0);
+      assertTrue(options.getValue().getConnectionTimeout().compareTo(settings.timeout()) <= 0);
       assertEquals(-1, options.getValue().getMaxReconnect());
       assertEquals(0, options.getValue().getReconnectBufferSize());
       assertEquals("keycloak-nats-durable", options.getValue().getConnectionName());
@@ -303,7 +316,7 @@ class JetStreamPublisherTest {
         .thenAnswer(
             call -> {
               connecting.countDown();
-              assertTrue(finishConnect.await(3, TimeUnit.SECONDS));
+              awaitIgnoringInterrupt(finishConnect);
               return connection;
             });
     var executor = Executors.newFixedThreadPool(2);
@@ -320,7 +333,7 @@ class JetStreamPublisherTest {
       var failure =
           assertThrows(ExecutionException.class, () -> publishing.get(2, TimeUnit.SECONDS));
       assertInstanceOf(IOException.class, failure.getCause());
-      verify(connection).close();
+      verify(connection, timeout(1000)).close();
       verifyNoInteractions(management, jetStream);
       assertThrows(IOException.class, () -> publisher.publish(event));
       verify(connector).connect(any());
@@ -374,7 +387,7 @@ class JetStreamPublisherTest {
       var failure =
           assertThrows(ExecutionException.class, () -> publishing.get(2, TimeUnit.SECONDS));
       assertInstanceOf(IOException.class, failure.getCause());
-      verify(connection).close();
+      verify(connection, timeout(1000)).close();
     } finally {
       releaseRequest.countDown();
       publisher.close();
@@ -442,7 +455,7 @@ class JetStreamPublisherTest {
     publisher.publish(event);
     publisher.close();
     publisher.close();
-    verify(connection).close();
+    verify(connection, timeout(1000)).close();
   }
 
   @Test
@@ -450,10 +463,209 @@ class JetStreamPublisherTest {
     publisher.publish(event);
     doThrow(new InterruptedException()).when(connection).close();
     try {
+      Thread.currentThread().interrupt();
       publisher.close();
       assertTrue(Thread.currentThread().isInterrupted());
     } finally {
       Thread.interrupted();
+    }
+    verify(connection, timeout(1000)).close();
+  }
+
+  @Test
+  void anInterruptedCallerNeverStartsNetworkWork() {
+    try {
+      Thread.currentThread().interrupt();
+      assertThrows(InterruptedException.class, () -> publisher.publish(event));
+      verifyNoInteractions(connector, management, jetStream);
+    } finally {
+      Thread.interrupted();
+    }
+  }
+
+  @Test
+  void fatalNetworkTaskFailuresReachTheOwner() throws Exception {
+    var failure = new AssertionError("fatal network failure");
+    when(connector.connect(any())).thenThrow(failure);
+    assertSame(failure, assertThrows(AssertionError.class, () -> publisher.publish(event)));
+  }
+
+  @Test
+  void totalBudgetIncludesConnectionAndStreamValidationBeforePublishing() throws Exception {
+    var entered = new CountDownLatch(1);
+    var release = new CountDownLatch(1);
+    when(connector.connect(any()))
+        .thenAnswer(
+            call -> {
+              Thread.sleep(75);
+              return connection;
+            });
+    when(management.getStreamInfo(config.stream()))
+        .thenAnswer(
+            call -> {
+              entered.countDown();
+              awaitIgnoringInterrupt(release);
+              return safeStreamInfo();
+            });
+    var bounded = new JetStreamPublisher(BridgeConfig.from(Map.of("timeout-ms", "250")), connector);
+    try {
+      long started = System.nanoTime();
+      assertThrows(SocketTimeoutException.class, () -> bounded.publish(event));
+      assertEquals(0, entered.getCount());
+      assertTrue(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(2));
+      verify(connection, timeout(1000)).close();
+      // Cancellation must be checked after the late metadata response, before any original send.
+      release.countDown();
+      bounded.close();
+      verify(jetStream, never())
+          .publish(anyString(), any(Headers.class), any(byte[].class), any(PublishOptions.class));
+    } finally {
+      release.countDown();
+      bounded.close();
+    }
+  }
+
+  @Test
+  void elapsedValidationBudgetCannotRenewThePublishBudget() throws Exception {
+    var clock = new java.util.concurrent.atomic.AtomicLong();
+    when(management.getStreamInfo(config.stream()))
+        .thenAnswer(
+            call -> {
+              clock.set(config.timeout().toNanos());
+              return safeStreamInfo();
+            });
+    try (var bounded = new JetStreamPublisher(config, connector, clock::get)) {
+      assertThrows(SocketTimeoutException.class, () -> bounded.publish(event));
+      verifyNoInteractions(jetStream);
+    }
+  }
+
+  @Test
+  void timedOutConnectCannotAccumulateTasksOrInstallItsLateConnection() throws Exception {
+    var entered = new CountDownLatch(1);
+    var release = new CountDownLatch(1);
+    when(connector.connect(any()))
+        .thenAnswer(
+            call -> {
+              entered.countDown();
+              awaitIgnoringInterrupt(release);
+              return connection;
+            });
+    try (var bounded =
+        new JetStreamPublisher(BridgeConfig.from(Map.of("timeout-ms", "150")), connector)) {
+      assertThrows(SocketTimeoutException.class, () -> bounded.publish(event));
+      assertEquals(0, entered.getCount());
+      for (int retry = 0; retry < 10; retry++) {
+        assertThrows(IOException.class, () -> bounded.publish(event));
+      }
+      verify(connector).connect(any());
+      verifyNoInteractions(management, jetStream);
+      release.countDown();
+      verify(connection, timeout(1000)).close();
+      when(connector.connect(any())).thenReturn(connection);
+      long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+      while (true) {
+        try {
+          bounded.publish(event);
+          break;
+        } catch (IOException completing) {
+          assertTrue(System.nanoTime() < deadline, completing::toString);
+          Thread.sleep(1);
+        }
+      }
+      verify(connector, times(2)).connect(any());
+      verify(jetStream)
+          .publish(anyString(), any(Headers.class), any(byte[].class), any(PublishOptions.class));
+    } finally {
+      release.countDown();
+    }
+  }
+
+  @Test
+  void slowConnectionCleanupCannotExtendTheDeadlineOrAccumulateMoreTasks() throws Exception {
+    var closing = new CountDownLatch(1);
+    var releaseClose = new CountDownLatch(1);
+    when(management.getStreamInfo(config.stream()))
+        .thenAnswer(
+            call -> {
+              Thread.sleep(5000);
+              return safeStreamInfo();
+            });
+    doAnswer(
+            call -> {
+              closing.countDown();
+              awaitIgnoringInterrupt(releaseClose);
+              return null;
+            })
+        .when(connection)
+        .close();
+    try (var bounded =
+        new JetStreamPublisher(BridgeConfig.from(Map.of("timeout-ms", "150")), connector)) {
+      long started = System.nanoTime();
+      assertThrows(SocketTimeoutException.class, () -> bounded.publish(event));
+      assertTrue(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(2));
+      assertTrue(closing.await(1, TimeUnit.SECONDS));
+      for (int retry = 0; retry < 100; retry++) {
+        assertThrows(IOException.class, () -> bounded.publish(event));
+        Thread.sleep(1);
+      }
+      verify(connector).connect(any());
+      verify(connection).close();
+      verifyNoInteractions(jetStream);
+    } finally {
+      releaseClose.countDown();
+    }
+  }
+
+  @Test
+  void callerInterruptionCancelsItsAttemptAndClosesTheConnection() throws Exception {
+    var requesting = new CountDownLatch(1);
+    when(management.getStreamInfo(config.stream()))
+        .thenAnswer(
+            call -> {
+              requesting.countDown();
+              Thread.sleep(5000);
+              return safeStreamInfo();
+            });
+    var outcome = new java.util.concurrent.CompletableFuture<Exception>();
+    Thread owner =
+        Thread.ofPlatform()
+            .start(
+                () -> {
+                  try {
+                    publisher.publish(event);
+                    outcome.complete(null);
+                  } catch (Exception failure) {
+                    outcome.complete(failure);
+                  }
+                });
+    try {
+      assertTrue(requesting.await(1, TimeUnit.SECONDS));
+      owner.interrupt();
+      assertInstanceOf(InterruptedException.class, outcome.get(1, TimeUnit.SECONDS));
+      verify(connection, timeout(1000)).close();
+      verifyNoInteractions(jetStream);
+    } finally {
+      owner.interrupt();
+      owner.join(1000);
+    }
+  }
+
+  private static StreamInfo safeStreamInfo() {
+    var info = mock(StreamInfo.class);
+    when(info.getConfiguration()).thenReturn(safeStream().build());
+    return info;
+  }
+
+  private static void awaitIgnoringInterrupt(CountDownLatch release) {
+    boolean finished = false;
+    while (!finished) {
+      try {
+        finished = release.await(3, TimeUnit.SECONDS);
+        assertTrue(finished);
+      } catch (InterruptedException ignored) {
+        // Model DNS, credential loading or an operation that does not support interruption.
+      }
     }
   }
 }

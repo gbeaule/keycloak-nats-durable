@@ -12,7 +12,8 @@
       "$ref": "#/$defs/identifiers"
     },
     "clientIds": {
-      "$ref": "#/$defs/identifiers"
+      "$ref": "#/$defs/identifiers",
+      "description": "Public Keycloak client IDs, including the acting client for admin events; not internal client UUIDs."
     },
     "outcomes": {
       "$ref": "#/$defs/outcomes"
@@ -398,7 +399,8 @@
           "$ref": "#/$defs/identifiers"
         },
         "clientIds": {
-          "$ref": "#/$defs/identifiers"
+          "$ref": "#/$defs/identifiers",
+          "description": "Public Keycloak client IDs."
         },
         "outcomes": {
           "$ref": "#/$defs/outcomes"
@@ -433,7 +435,8 @@
           "$ref": "#/$defs/identifiers"
         },
         "clientIds": {
-          "$ref": "#/$defs/identifiers"
+          "$ref": "#/$defs/identifiers",
+          "description": "Public Keycloak client IDs resolved in the admin actor's realm."
         },
         "outcomes": {
           "$ref": "#/$defs/outcomes"
@@ -482,7 +485,10 @@
       "properties": {
         "id": {
           "type": "string",
-          "pattern": "[^\\u0009-\\u000d\\u001c-\\u0020\\u1680\\u2000-\\u2006\\u2008-\\u200a\\u2028\\u2029\\u205f\\u3000]"
+          "pattern": "[^\\u0009-\\u000d\\u001c-\\u0020\\u1680\\u2000-\\u2006\\u2008-\\u200a\\u2028\\u2029\\u205f\\u3000]",
+          "not": {
+            "pattern": "\\u0000"
+          }
         },
         "match": {
           "oneOf": [

@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import io.nats.client.api.DiscardPolicy;
 import io.nats.client.api.Mirror;
+import io.nats.client.api.PersistMode;
 import io.nats.client.api.RetentionPolicy;
 import io.nats.client.api.Source;
 import io.nats.client.api.StorageType;
@@ -21,6 +22,7 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class StreamPolicyTest {
   private static final String MODES = "Rollup, TTL, scheduling and counter modes must be disabled";
@@ -61,6 +63,28 @@ class StreamPolicyTest {
     assertThrows(
         StreamPolicy.Violation.class,
         () -> StreamPolicy.validate(stream, "CUSTOM", "custom.subject", 2, 1024));
+  }
+
+  @ParameterizedTest
+  @ValueSource(ints = {1, 3, 5})
+  void acceptsOmittedOrExplicitDefaultPersistence(int replicas) {
+    var stream = safe().replicas(replicas).build();
+    assertDoesNotThrow(
+        () -> StreamPolicy.validate(stream, "EVENTS", "auth.events", replicas, 1024));
+    var explicit = StreamConfiguration.builder(stream).persistMode(PersistMode.Default).build();
+    assertDoesNotThrow(
+        () -> StreamPolicy.validate(explicit, "EVENTS", "auth.events", replicas, 1024));
+  }
+
+  @Test
+  void rejectsAsyncPersistenceEvenWhenOneReplicaIsExplicitlyAllowed() {
+    var stream = safe().replicas(1).persistMode(PersistMode.Async).build();
+    var failure =
+        assertThrows(
+            StreamPolicy.Violation.class,
+            () -> StreamPolicy.validate(stream, "EVENTS", "auth.events", 1, 1024));
+    assertEquals("Asynchronous persistence must be disabled", failure.getMessage());
+    assertNull(failure.getCause());
   }
 
   @ParameterizedTest(name = "{0}")

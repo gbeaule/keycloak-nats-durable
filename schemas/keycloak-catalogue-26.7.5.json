@@ -1,5 +1,5 @@
 {
-  "keycloakVersion": "26.7.4",
+  "keycloakVersion": "26.7.5",
   "userEventTypes": [
     "LOGIN",
     "LOGIN_ERROR",

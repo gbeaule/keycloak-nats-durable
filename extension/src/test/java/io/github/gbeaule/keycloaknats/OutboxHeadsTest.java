@@ -19,6 +19,34 @@ import org.junit.jupiter.api.Test;
 
 class OutboxHeadsTest {
   @Test
+  void appendedRangeOnlyInitializesAnEmptyHeadWithoutReadingOrReplacingExistingState() {
+    var em = mock(EntityManager.class);
+    var update = mock(Query.class, RETURNS_SELF);
+    when(em.createQuery(anyString())).thenReturn(update);
+    var first =
+        new OutboxEvent(
+            "first",
+            "subject",
+            "{}",
+            23,
+            "realm",
+            "io.keycloak.user.login",
+            new EventOrdering("realm", "user", 7),
+            CaptureFixtures.RETRY);
+    OutboxHeads.append(em, first);
+    verify(em)
+        .createQuery(
+            "update NatsCaptureCounter set headEventId = :id, headNextAttemptAt = :due,"
+                + " headCreatedAt = :created where orderingKey = :key and headEventId is null");
+    verify(update).setParameter("id", "first");
+    verify(update).setParameter("due", 23L);
+    verify(update).setParameter("created", 23L);
+    verify(update).setParameter("key", first.orderingKey());
+    verify(update).executeUpdate();
+    verifyNoMoreInteractions(em);
+  }
+
+  @Test
   @SuppressWarnings("unchecked")
   void locksBeforeReadingAndExplicitlyWritesTheEarliestSurvivorOrClearsTheHead() {
     var em = mock(EntityManager.class);

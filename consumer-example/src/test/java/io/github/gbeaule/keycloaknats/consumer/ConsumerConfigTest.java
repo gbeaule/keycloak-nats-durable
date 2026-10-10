@@ -107,6 +107,38 @@ class ConsumerConfigTest {
     assertThrows(IllegalArgumentException.class, config::nats);
   }
 
+  @ParameterizedTest
+  @ValueSource(strings = {"", " ", "\t\r\n", "\u2003"})
+  void collectorRejectsConfiguredBlankRealmsInsteadOfSilentlyHidingEvents(String realm) {
+    var config =
+        new ConsumerConfig(
+            Map.of(
+                    "KND_OUTBOX_DB_URL",
+                    "jdbc:postgresql://database/keycloak",
+                    "KND_REPORT_REALM_ID",
+                    realm)
+                ::get);
+    assertThrows(IllegalArgumentException.class, config::report);
+  }
+
+  @Test
+  void collectorWithoutRealmConfigurationRemainsUnscoped() {
+    var config =
+        new ConsumerConfig(Map.of("KND_OUTBOX_DB_URL", "jdbc:postgresql://database/keycloak")::get);
+    assertEquals("", config.report().realmPrefix());
+  }
+
+  @Test
+  void collectorPreservesWhitespaceWithinNonblankRealmIdentity() {
+    var config =
+        new ConsumerConfig(
+            Map.of(
+                    "KND_OUTBOX_DB_URL", "jdbc:postgresql://database/keycloak",
+                    "KND_REPORT_REALM_ID", " realm/a ")
+                ::get);
+    assertEquals("keycloak.events.IHJlYWxtL2Eg.", config.report().realmPrefix());
+  }
+
   @Test
   void collectorValidatesRetentionIndependentlyOfConsumerSettings() {
     for (String value : new String[] {"0", "315360000"}) {
@@ -141,5 +173,25 @@ class ConsumerConfigTest {
         IllegalArgumentException.class,
         () ->
             new ConsumerConfig(Map.of("KND_CONSUMER_DB_POOL_SIZE", "2147483647")::get).poolSize());
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {"", "keycloak.", "keycloak..events", "keycloak.*", ">", "keycloak events"})
+  void subjectNamespaceMustContainLiteralNonemptyTokens(String prefix) {
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> new ConsumerConfig(Map.of("KND_SUBJECT_PREFIX", prefix)::get).subjectPrefix());
+  }
+
+  @Test
+  void namespaceLengthMatchesTheProviderLimit() {
+    assertEquals(
+        "a".repeat(128),
+        new ConsumerConfig(Map.of("KND_SUBJECT_PREFIX", "a".repeat(128))::get).subjectPrefix());
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            new ConsumerConfig(Map.of("KND_SUBJECT_PREFIX", "a".repeat(129))::get).subjectPrefix());
   }
 }

@@ -50,13 +50,27 @@ final class OutboxRepository {
 
   static Optional<OutboxEvent> lockNextExpired(EntityManager entityManager, long now) {
     // Expiry applies to queued successors and delayed retries, but never races a locked send.
-    return lock(
-        entityManager
-            .createQuery(
-                "select event from NatsOutboxEvent event where event.nextExpiryAttemptAt <= :now"
-                    + " order by event.nextExpiryAttemptAt, event.id",
-                OutboxEvent.class)
-            .setParameter("now", now));
+    var ordered =
+        lockPair(
+            entityManager
+                .createQuery(
+                    "select counter, event from NatsCaptureCounter counter"
+                        + " join NatsOutboxEvent event on event.orderingKey = counter.orderingKey"
+                        + " where event.nextExpiryAttemptAt <= :now"
+                        + " order by event.nextExpiryAttemptAt, event.id",
+                    Object[].class)
+                .setParameter("now", now));
+    var independent =
+        lock(
+            entityManager
+                .createQuery(
+                    "select event from NatsOutboxEvent event"
+                        + " where event.orderingKey is null and event.nextExpiryAttemptAt <= :now"
+                        + " order by event.nextExpiryAttemptAt, event.id",
+                    OutboxEvent.class)
+                .setParameter("now", now));
+    return Stream.concat(ordered.stream(), independent.stream())
+        .min(Comparator.comparing(OutboxEvent::nextExpiryAttemptAt).thenComparing(OutboxEvent::id));
   }
 
   static void discard(
@@ -74,16 +88,16 @@ final class OutboxRepository {
     // Each indexed scan claims at most one row. Both locks end with the short preparation
     // transaction; only the chosen event is reacquired for the subsequent broker request.
     var ordered =
-        lock(
+        lockPair(
             entityManager
                 .createQuery(
-                    "select event from NatsCaptureCounter counter"
+                    "select counter, event from NatsCaptureCounter counter"
                         + " join NatsOutboxEvent event on event.id = counter.headEventId"
                         + " where counter.headEventId is not null"
                         + " and counter.headNextAttemptAt <= :now"
                         + " order by counter.headNextAttemptAt,"
                         + " counter.headCreatedAt, counter.headEventId",
-                    OutboxEvent.class)
+                    Object[].class)
                 .setParameter("now", now));
     var independent =
         lock(
@@ -126,7 +140,13 @@ final class OutboxRepository {
             .setParameter("version", version));
   }
 
-  private static Optional<OutboxEvent> lock(TypedQuery<OutboxEvent> query) {
+  private static Optional<OutboxEvent> lockPair(TypedQuery<Object[]> query) {
+    // Selecting both entities makes Hibernate lock and skip both aliases. Counter contention
+    // must exclude this user's work before a send, because both resolution and backoff need it.
+    return lock(query).map(pair -> (OutboxEvent) pair[1]);
+  }
+
+  private static <T> Optional<T> lock(TypedQuery<T> query) {
     // Hibernate supplies schema qualification and PostgreSQL FOR UPDATE SKIP LOCKED.
     return query
         .setMaxResults(1)

@@ -113,7 +113,11 @@ public final class ConsumerConfig {
 
   /** Subject prefix, shared with the provider's routing contract. */
   public String subjectPrefix() {
-    return environment.value("KND_SUBJECT_PREFIX", "keycloak.events");
+    String prefix = environment.value("KND_SUBJECT_PREFIX", "keycloak.events");
+    if (prefix.length() > 128 || !prefix.matches("[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*")) {
+      throw new IllegalArgumentException("Invalid KND_SUBJECT_PREFIX");
+    }
+    return prefix;
   }
 
   /** Durable name used for the broker subscription and database deduplication. */
@@ -160,6 +164,9 @@ public final class ConsumerConfig {
     new ProcessingLimits(timeout, timeout, timeout * 1000, 1000, timeout * 1000, 1000)
         .configure(database);
     String realm = environment.optional("KND_REPORT_REALM_ID");
+    if (realm != null && realm.isBlank()) {
+      throw new IllegalArgumentException("KND_REPORT_REALM_ID must not be blank");
+    }
     String realmPrefix =
         realm == null
             ? ""

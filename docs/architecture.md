@@ -19,12 +19,14 @@ flowchart LR
 ```
 
 The listener stores selected events in an outbox using Keycloak's existing persistence unit. Capture
-failure marks the transaction for rollback. NATS availability is outside the request transaction, so
-a broker outage allows account operations to continue while the database has capacity.
+failures reject the account commit even if Keycloak swallows a callback exception. NATS availability
+is outside the request transaction, so a broker outage allows account operations to continue while
+the database has capacity.
 
 Capture separates immutable event and policy snapshots from persistence. Callbacks freeze the
-selected data; transaction preparation stores the batch with its per-user positions. This permits
-nested error-event transactions to finish without waiting on their caller's capture locks.
+selected data in one buffer shared by the transaction's listeners; preparation stores the batch
+with its per-user positions. This permits nested error-event transactions to finish without waiting
+on their caller's capture locks.
 Each user's callback order is preserved, and concurrent transactions serialize through durable
 counters. Counters survive user deletion and outbox draining.
 
@@ -34,7 +36,7 @@ boundaries. Repository commands keep event changes and the indexed pending head 
 transaction results become visible to workers only after commit is confirmed. Types, database
 constraints and tests define the detailed invariants.
 
-For supported admin requests, affected-user identity comes from Keycloak's routed `user-id`
+For supported admin requests, affected-user identity comes from Keycloak's routed user ID
 parameter after matching the request to the event's realm and resource. Capture resolves this ID
 once for filtering, message metadata and ordering. Without matching request context, only an
 unambiguous direct user path supplies an ID; ambiguous nested events remain independent.
@@ -46,7 +48,7 @@ installation or a period with the listener disabled. Keycloak error events can h
 transaction from the operation that failed.
 
 `JpaEntityProvider` registers the entities and initializes the schema through Liquibase. Keycloak
-marks this mechanism [unsupported](https://www.keycloak.org/docs/26.7.4/server_development/#_extensions_jpa)
+marks this mechanism [unsupported](https://www.keycloak.org/docs/26.7.5/server_development/#_extensions_jpa)
 and classifies the event-listener SPI as internal. These dependencies require runtime and restart
 validation for each candidate server version; see [development](development.md#compatibility).
 Replacing JPA registration would require preserving capture in Keycloak's database transaction.
@@ -81,8 +83,10 @@ ends the extension's publication responsibility. Counter locks cover short datab
 never held during broker requests.
 
 Holding the transaction through publication simplifies ownership and crash recovery, at the cost of
-occupying a database connection during bounded broker requests. Local commit notifications reduce
-latency; periodic scans recover work after missed notifications, another node's failure or a restart.
+occupying a database connection during a bounded publication attempt. The total network deadline
+and relay-specific database limits bound this work; cancelling an attempt does not prove that an
+in-flight original was rejected. Local commit notifications reduce latency; periodic scans recover
+work after missed notifications, another node's failure or a restart.
 Worker concurrency must leave database capacity for Keycloak requests.
 
 A timeout or failed database commit can leave an accepted original whose acknowledgement was lost.

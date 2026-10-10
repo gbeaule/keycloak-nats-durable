@@ -29,6 +29,8 @@ public final class OutboxReport {
             inspect(
                 settings.database(),
                 settings.schema(),
+                settings.subject(),
+                settings.realmPrefix(),
                 settings.timeoutSeconds(),
                 args.length == 1 ? Long.MIN_VALUE : Long.parseLong(args[1]),
                 args.length == 1 ? "" : args[2],
@@ -206,15 +208,32 @@ public final class OutboxReport {
       String afterId,
       int limit)
       throws Exception {
+    return inspect(database, schema, ">", "", timeoutSeconds, afterDiscardedAt, afterId, limit);
+  }
+
+  /** Applies the collector's subject and realm scope before paginating retained audit metadata. */
+  public static List<Map<String, Object>> inspect(
+      DataSource database,
+      String schema,
+      String subject,
+      String realmPrefix,
+      int timeoutSeconds,
+      long afterDiscardedAt,
+      String afterId,
+      int limit)
+      throws Exception {
     if (afterId == null || limit < 1 || limit > 500) {
       throw new IllegalArgumentException("Expected a cursor and limit of 1..500");
     }
+    String pattern = sqlPattern(subject);
     String sql =
         """
         SELECT id, realm_id, event_type, subject, payload_sha256, ordering_key, user_sequence,
           max_age_seconds, max_failures, expires_at, filter_sha256, rule_id, created_at,
           discarded_at, reason, attempts, publication_may_have_occurred
-        FROM %s WHERE (discarded_at, id) > (?, ?) ORDER BY discarded_at, id LIMIT ?
+        FROM %s WHERE (discarded_at, id) > (?, ?)
+          AND (? = '' OR subject ~ ?) AND (? = '' OR starts_with(subject,?))
+        ORDER BY discarded_at, id LIMIT ?
         """
             .formatted(table(schema, "kc_nats_discard_audit"));
     var rows = new ArrayList<Map<String, Object>>();
@@ -223,7 +242,11 @@ public final class OutboxReport {
       query.setQueryTimeout(timeoutSeconds);
       query.setLong(1, afterDiscardedAt);
       query.setString(2, afterId);
-      query.setInt(3, limit);
+      query.setString(3, ">".equals(subject) ? "" : pattern);
+      query.setString(4, pattern);
+      query.setString(5, realmPrefix);
+      query.setString(6, realmPrefix);
+      query.setInt(7, limit);
       try (var result = query.executeQuery()) {
         while (result.next()) {
           var row = new LinkedHashMap<String, Object>();

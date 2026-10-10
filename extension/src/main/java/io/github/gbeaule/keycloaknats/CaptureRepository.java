@@ -17,7 +17,10 @@ import org.hibernate.persister.entity.AbstractEntityPersister;
 final class CaptureRepository {
   private CaptureRepository() {}
 
-  record Capture(EventEnvelope.Description description, ResolvedPublicationPolicy policy) {
+  record Capture(
+      EventEnvelope.Description description,
+      ResolvedPublicationPolicy policy,
+      EventEnvelope envelopes) {
     String orderingKey() {
       return description.userId() == null
           ? ""
@@ -25,30 +28,66 @@ final class CaptureRepository {
     }
   }
 
-  static void persistBatch(EntityManager em, EventEnvelope envelopes, List<Capture> pending) {
+  static void persistBatch(EntityManager em, List<Capture> pending) {
+    // Keycloak account mutations must acquire their locks before capture counters. Native JPA
+    // queries can auto-flush; acquiring a JDBC counter first inverted this order for PUT/DELETE.
+    em.flush();
     // Compute grouping keys once; ordered groups preserve callback order within each user and give
     // multi-user transactions one counter-lock order. This runs only during transaction prepare.
     var groups =
         pending.stream()
             .collect(
                 Collectors.groupingBy(Capture::orderingKey, TreeMap::new, Collectors.toList()));
-    for (var captures : groups.values()) {
+    var positions = new TreeMap<String, EventOrdering>();
+    for (var entry : groups.entrySet()) {
+      var captures = entry.getValue();
+      var description = captures.getFirst().description();
+      positions.put(
+          entry.getKey(),
+          allocateSequenceRange(em, description.realmId(), description.userId(), captures.size()));
+    }
+    // Read after all counter waits, so queued transactions do not capture an already-aged policy.
+    long capturedAt = readDatabaseTime(em);
+    var heads = new TreeMap<String, OutboxEvent>();
+    for (var entry : groups.entrySet()) {
+      var captures = entry.getValue();
+      var first = positions.get(entry.getKey());
+      int offset = 0;
       for (Capture capture : captures) {
         var description = capture.description();
-        var ordering = allocateNextSequence(em, description.realmId(), description.userId());
-        long capturedAt = readDatabaseTime(em);
-        em.persist(
-            envelopes.serialize(
-                UUID.randomUUID().toString(), description, ordering, capturedAt, capture.policy()));
+        var ordering =
+            first == null
+                ? null
+                : new EventOrdering(first.realmId(), first.userId(), first.sequence() + offset);
+        offset++;
+        var row =
+            capture
+                .envelopes()
+                .serialize(
+                    UUID.randomUUID().toString(),
+                    description,
+                    ordering,
+                    capturedAt,
+                    capture.policy());
+        em.persist(row);
+        if (ordering != null) {
+          heads.putIfAbsent(entry.getKey(), row);
+        }
       }
     }
     em.flush();
-    groups.keySet().stream()
-        .filter(key -> !key.isEmpty())
-        .forEach(key -> OutboxHeads.refresh(em, key));
+    heads.values().forEach(head -> OutboxHeads.append(em, head));
   }
 
   static EventOrdering allocateNextSequence(EntityManager em, String realmId, String userId) {
+    return allocateSequenceRange(em, realmId, userId, 1);
+  }
+
+  static EventOrdering allocateSequenceRange(
+      EntityManager em, String realmId, String userId, int count) {
+    if (count <= 0) {
+      throw new IllegalArgumentException("Capture range must be nonempty");
+    }
     if (userId == null) {
       return null;
     }
@@ -62,34 +101,36 @@ final class CaptureRepository {
     String update =
         "UPDATE "
             + mapping.getTableName()
-            + " SET LAST_SEQUENCE = LAST_SEQUENCE + 1"
+            + " SET LAST_SEQUENCE = LAST_SEQUENCE + "
+            + count
             + " WHERE ORDERING_KEY = ? AND REALM_ID = ? AND USER_ID = ?"
-            + " AND LAST_SEQUENCE < "
-            + Long.MAX_VALUE
+            + " AND LAST_SEQUENCE <= "
+            + (Long.MAX_VALUE - count)
             + " RETURNING LAST_SEQUENCE";
     String insert =
         "INSERT INTO "
             + mapping.getTableName()
-            + " (ORDERING_KEY, REALM_ID, USER_ID, LAST_SEQUENCE) VALUES (?, ?, ?, 1)"
-            + " ON CONFLICT DO NOTHING RETURNING LAST_SEQUENCE";
+            + " (ORDERING_KEY, REALM_ID, USER_ID, LAST_SEQUENCE) VALUES (?, ?, ?, "
+            + count
+            + ") ON CONFLICT DO NOTHING RETURNING LAST_SEQUENCE";
     long sequence =
         session.doReturningWork(
             connection -> {
-              Long next = execute(connection, update, key, realmId, userId);
-              if (next == null) {
-                // Concurrent first captures can conflict on either unique index. Handle both,
-                // then use a fresh statement snapshot to see the winner's committed counter.
-                next = execute(connection, insert, key, realmId, userId);
-                if (next == null) {
-                  next = execute(connection, update, key, realmId, userId);
+              Long last = execute(connection, update, key, realmId, userId);
+              if (last == null) {
+                // First captures can race on either unique index. A targeted UPSERT can fail on
+                // the other constraint; DO NOTHING handles both and a fresh UPDATE sees the winner.
+                last = execute(connection, insert, key, realmId, userId);
+                if (last == null) {
+                  last = execute(connection, update, key, realmId, userId);
                 }
               }
-              if (next == null) {
-                throw new IllegalStateException("User capture sequence exhausted");
+              if (last == null) {
+                throw new IllegalStateException("User capture sequence exhausted or mismatched");
               }
-              return next;
+              return last;
             });
-    return new EventOrdering(realmId, userId, sequence);
+    return new EventOrdering(realmId, userId, sequence - count + 1);
   }
 
   private static Long execute(

@@ -8,13 +8,15 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parent.parent
 POSTGRES_MAJORS = ("14", "15", "16", "17")
 POSTGRES_TESTS = (
-    "ConsumerHardeningIT,CustomSchemaIT,UpgradeIT,"
+    "ConsumerHardeningIT,ConsumerStartupIT,CustomSchemaIT,UpgradeIT,"
+    "AdminUserAttributionIT,OrganizationGroupAttributionIT,ConsumerReconnectIT,NatsReadinessIT,"
     "PerUserCaptureIT,PerUserRelayIT,OutboxDiscardIT,OutboxAuditRetentionIT,"
-    "NestedEventCaptureIT,OutboxHeadIT,OutboxSchemaIT,"
+    "NestedEventCaptureIT,OutboxHeadIT,OutboxSchemaIT,OutboxExpiryIT,CaptureLockOrderIT,"
     "PerUserPublicationIT,PerUserSystemIT,FilteringIT,DurabilityIT#"
     "uncommittedAndRolledBackRowsAreNeverPublished+"
     "outboxWritesKeepSynchronousCommitForAuthenticationOnlyTransactions+"
@@ -87,13 +89,18 @@ def main(argv=None):
     maven = shutil.which("mvn")
     if not maven:
         parser.error("Maven 3.9+ must be on PATH; set JAVA_HOME to a JDK 21+ installation")
+    if args.mode == "security":
+        # Invalidate the previous verdict even if tests or the new build fail before scanning.
+        (ROOT / "target" / "security" / "gate.json").unlink(missing_ok=True)
     try:
         run([sys.executable, "-m", "unittest", "discover", "-s", "scripts", "-p", "test_*.py"])
         for command in maven_commands(args.mode, matrix, args.keycloak_version,
                                       args.postgres_major, args.maven_arg):
+            build_started = time.time_ns()
             run([maven, *command])
+            run([sys.executable, "scripts/packaged_licenses.py", "--built-after", str(build_started)])
         if args.mode == "security":
-            run([sys.executable, "scripts/security-check.py"])
+            run([sys.executable, "scripts/security-check.py", "--built-after", str(build_started)])
     except subprocess.CalledProcessError as error:
         return error.returncode
     return 0

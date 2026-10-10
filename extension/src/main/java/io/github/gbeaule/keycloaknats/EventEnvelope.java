@@ -59,17 +59,17 @@ public final class EventEnvelope {
     return description(event.getRealmId(), suffix, suffix, event.getTime(), data);
   }
 
-  Description describe(AdminEvent event, String userId, Boolean userEnabled) {
+  Description describe(AdminEvent event, String userId, Boolean userEnabled, String clientId) {
     Map<String, Object> data = common("admin", event.getId(), event.getRealmId(), event.getError());
     data.put("resourceType", event.getResourceTypeAsString());
     data.put("operationType", event.getOperationType().name());
     data.put("resourcePath", event.getResourcePath());
     data.put("userId", userId);
     data.put("userEnabled", userEnabled);
+    data.put("clientId", clientId);
     if (event.getAuthDetails() != null) {
       data.put("actorUserId", event.getAuthDetails().getUserId());
       data.put("actorRealmId", event.getAuthDetails().getRealmId());
-      data.put("clientId", event.getAuthDetails().getClientId());
     }
     String operation = event.getOperationType().name().toLowerCase(Locale.ROOT);
     String typeSuffix = "admin." + operation;

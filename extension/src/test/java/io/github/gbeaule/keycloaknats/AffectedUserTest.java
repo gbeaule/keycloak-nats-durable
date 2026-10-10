@@ -25,10 +25,270 @@ import org.keycloak.models.KeycloakSession;
 class AffectedUserTest {
   @ParameterizedTest
   @CsvSource({
+    "CREATE,target,organization,group",
+    "DELETE,target,organization,group",
+    "CREATE,f:p:x/+%2F/用户/,org/+%2F/组织/,group/+%2F/组/",
+    "DELETE,f:p:x/+%2F/用户/,org/+%2F/组织/,group/+%2F/组/"
+  })
+  void organizationGroupMembershipPreservesRoutedIdentitiesAndUserOrdering(
+      String operation, String user, String organization, String group) throws Exception {
+    var event = EventEnvelopeTest.admin(OperationType.valueOf(operation));
+    event.setResourceTypeAsString("ORGANIZATION_GROUP_MEMBERSHIP");
+    event.setResourcePath(
+        "organizations/" + organization + "/groups/" + group + "/members/" + user);
+    event.setAuthDetails(new AuthDetails());
+    event.getAuthDetails().setUserId("actor");
+    event.setError("denied");
+    var session =
+        AdminRequestFixtures.request(
+            event,
+            "unrelated-user",
+            Map.of(
+                "userId",
+                user,
+                "member-id",
+                "unrelated-member",
+                "org-id",
+                organization,
+                "group-id",
+                group));
+    assertEquals(user, AffectedUser.resolve(event, session));
+    assertFalse(AffectedUser.isDirectUser(event, user));
+    assertNull(AffectedUser.resolve(event), "Organization group paths require routed identities");
+    var encoder = new EventEnvelope(BridgeConfig.from(Map.of()));
+    var ordering = new EventOrdering("realm", user, 2);
+    var row =
+        encoder.serialize(
+            UUID.randomUUID().toString(),
+            encoder.describe(event, AffectedUser.resolve(event, session), null, null),
+            ordering,
+            123,
+            CaptureFixtures.RETRY);
+    var data = new ObjectMapper().readTree(row.payload()).path("data");
+    assertEquals(user, data.path("userId").asText());
+    assertEquals("actor", data.path("actorUserId").asText());
+    assertEquals(ordering.key(), data.at("/ordering/key").asText());
+    assertEquals("2", data.at("/ordering/sequence").asText());
+    assertEquals(ordering.key(), row.orderingKey());
+    assertEquals(2L, row.userSequence());
+    assertFalse(data.has("userEnabled"));
+    event.setResourcePath(event.getResourcePath() + "/");
+    when(session.getContext().getUri().getPath())
+        .thenReturn("/admin/realms/realm-name/" + event.getResourcePath());
+    assertEquals(user, AffectedUser.resolve(event, session));
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "ORGANIZATION_GROUP_MEMBERSHIP,UPDATE,organizations/organization/groups/group/members/target",
+    "ORGANIZATION_GROUP_MEMBERSHIP,ACTION,organizations/organization/groups/group/members/target",
+    "ORGANIZATION_GROUP_MEMBERSHIP,CREATE,organizations/organization/groups/group/members",
+    "ORGANIZATION_GROUP_MEMBERSHIP,DELETE,organizations/organization/groups/group/members/",
+    "ORGANIZATION_GROUP_MEMBERSHIP,CREATE,organizations/other/groups/group/members/target",
+    "ORGANIZATION_GROUP_MEMBERSHIP,DELETE,organizations/organization/groups/other/members/target",
+    "ORGANIZATION_GROUP_MEMBERSHIP,CREATE,organizations/organization/groups/group/members/other",
+    "ORGANIZATION_GROUP_MEMBERSHIP,DELETE,organizations/organization/groups/group/members/target//",
+    "ORGANIZATION_GROUP_MEMBERSHIP,CREATE,"
+        + "organizations/organization/groups/group/members/target/extra",
+    "ORGANIZATION_GROUP_MEMBERSHIP,DELETE,organizations/organization/members/target",
+    "ORGANIZATION_GROUP_MEMBERSHIP,CREATE,users/target",
+    "ORGANIZATION_GROUP,CREATE,organizations/organization/groups/group/members/target",
+    "ORGANIZATION_MEMBERSHIP,DELETE,organizations/organization/groups/group/members/target",
+    "custom:ORGANIZATION_GROUP_MEMBERSHIP,CREATE,"
+        + "organizations/organization/groups/group/members/target"
+  })
+  void organizationGroupRoutesRejectOtherOperationsCollectionsAndMismatchedPaths(
+      String resource, String operation, String path) {
+    var event = EventEnvelopeTest.admin(OperationType.valueOf(operation));
+    event.setResourceTypeAsString(resource);
+    event.setResourcePath(path);
+    var session = organizationGroupRequest(event);
+    assertNull(AffectedUser.resolve(event, session));
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"org-id", "group-id", "userId"})
+  void organizationGroupMembershipRequiresOneValidValueForEachRoutedIdentity(String parameter) {
+    var event = EventEnvelopeTest.admin(OperationType.CREATE);
+    event.setResourceTypeAsString("ORGANIZATION_GROUP_MEMBERSHIP");
+    event.setResourcePath("organizations/organization/groups/group/members/target");
+    for (var invalid :
+        List.of(List.<String>of(), List.of("target", "other"), List.of(" "), List.of("id\u0000"))) {
+      var session = organizationGroupRequest(event);
+      session.getContext().getUri().getPathParameters().put(parameter, invalid);
+      assertNull(AffectedUser.resolve(event, session));
+    }
+    var session = organizationGroupRequest(event);
+    session.getContext().getUri().getPathParameters().remove(parameter);
+    assertNull(AffectedUser.resolve(event, session));
+    session
+        .getContext()
+        .getUri()
+        .getPathParameters()
+        .put(parameter, Collections.singletonList(null));
+    assertNull(AffectedUser.resolve(event, session));
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"realm", "path", "inactive", "uri", "missing-realm", "no-context"})
+  void organizationGroupMembershipRequiresItsOwnActiveRealmAndRequest(String mismatch) {
+    var event = EventEnvelopeTest.admin(OperationType.DELETE);
+    event.setResourceTypeAsString("ORGANIZATION_GROUP_MEMBERSHIP");
+    event.setResourcePath("organizations/organization/groups/group/members/target");
+    var session = organizationGroupRequest(event);
+    var context = session.getContext();
+    switch (mismatch) {
+      case "realm" -> when(context.getRealm().getId()).thenReturn("other-realm");
+      case "path" ->
+          when(context.getUri().getPath()).thenReturn("/admin/realms/realm-name/users/target");
+      case "inactive" ->
+          when(context.getUri().getPathParameters()).thenThrow(new ContextNotActiveException());
+      case "uri" -> when(context.getUri()).thenReturn(null);
+      case "missing-realm" -> when(context.getRealm()).thenReturn(null);
+      case "no-context" -> when(session.getContext()).thenReturn(null);
+      default -> throw new AssertionError(mismatch);
+    }
+    assertNull(AffectedUser.resolve(event, session));
+  }
+
+  private static KeycloakSession organizationGroupRequest(
+      org.keycloak.events.admin.AdminEvent event) {
+    return AdminRequestFixtures.request(
+        event,
+        "target",
+        Map.of(
+            "userId",
+            "target",
+            "member-id",
+            "target",
+            "org-id",
+            "organization",
+            "group-id",
+            "group"));
+  }
+
+  @ParameterizedTest
+  @CsvSource({"target,organization", "f:p:x/+%2F/用户/,org/+%2F/组织/"})
+  void organizationMemberDeletionPreservesRoutedIdentityAndActor(String user, String organization)
+      throws Exception {
+    var event = EventEnvelopeTest.admin(OperationType.DELETE);
+    event.setResourceTypeAsString("ORGANIZATION_MEMBERSHIP");
+    event.setResourcePath("organizations/" + organization + "/members/" + user);
+    event.setAuthDetails(new AuthDetails());
+    event.getAuthDetails().setUserId("actor");
+    event.setError("denied");
+    var session =
+        AdminRequestFixtures.request(
+            event, "unrelated-user", Map.of("member-id", user, "org-id", organization));
+    assertEquals(user, AffectedUser.resolve(event, session));
+    assertFalse(AffectedUser.isDirectUser(event, user));
+    assertNull(AffectedUser.resolve(event), "Organization paths require routed identities");
+
+    var encoder = new EventEnvelope(BridgeConfig.from(Map.of()));
+    var row =
+        encoder.serialize(
+            UUID.randomUUID().toString(),
+            encoder.describe(event, AffectedUser.resolve(event, session), null, null),
+            new EventOrdering("realm", user, 2),
+            123,
+            CaptureFixtures.RETRY);
+    var data = new ObjectMapper().readTree(row.payload()).path("data");
+    assertEquals(user, data.path("userId").asText());
+    assertEquals("actor", data.path("actorUserId").asText());
+    assertEquals(new EventOrdering("realm", user, 2).key(), data.at("/ordering/key").asText());
+    assertFalse(data.has("userEnabled"));
+
+    event.setResourcePath(event.getResourcePath() + "/");
+    when(session.getContext().getUri().getPath())
+        .thenReturn("/admin/realms/realm-name/" + event.getResourcePath());
+    assertEquals(user, AffectedUser.resolve(event, session));
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "ORGANIZATION_MEMBERSHIP,CREATE,organizations/organization/members/target",
+    "ORGANIZATION_MEMBERSHIP,UPDATE,organizations/organization/members/target",
+    "ORGANIZATION_MEMBERSHIP,ACTION,organizations/organization/members/target",
+    "ORGANIZATION_MEMBERSHIP,DELETE,organizations/organization/members",
+    "ORGANIZATION_MEMBERSHIP,DELETE,organizations/organization/members/",
+    "ORGANIZATION_MEMBERSHIP,DELETE,organizations/organization/members/invite-user",
+    "ORGANIZATION_MEMBERSHIP,DELETE,organizations/organization/members/target/organizations",
+    "ORGANIZATION_MEMBERSHIP,DELETE,organizations/organization/members/target//",
+    "ORGANIZATION_MEMBERSHIP,DELETE,organizations/other/members/target",
+    "ORGANIZATION_MEMBERSHIP,DELETE,users/target",
+    "ORGANIZATION,DELETE,organizations/organization/members/target",
+    "USER,DELETE,organizations/organization/members/target",
+    "custom:ORGANIZATION_MEMBERSHIP,DELETE,organizations/organization/members/target"
+  })
+  void organizationRoutesDoNotGuessUsersFromCollectionsOrOtherOperations(
+      String resource, String operation, String path) {
+    var event = EventEnvelopeTest.admin(OperationType.valueOf(operation));
+    event.setResourceTypeAsString(resource);
+    event.setResourcePath(path);
+    var session =
+        AdminRequestFixtures.request(
+            event, "target", Map.of("member-id", "target", "org-id", "organization"));
+    assertNull(AffectedUser.resolve(event, session));
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"org-id", "member-id"})
+  void organizationMemberDeletionRequiresOneValidParameterForEachIdentity(String parameter) {
+    var event = EventEnvelopeTest.admin(OperationType.DELETE);
+    event.setResourceTypeAsString("ORGANIZATION_MEMBERSHIP");
+    event.setResourcePath("organizations/organization/members/target");
+    for (var invalid :
+        List.of(List.<String>of(), List.of("target", "other"), List.of(" "), List.of("id\u0000"))) {
+      var session =
+          AdminRequestFixtures.request(
+              event, "target", Map.of("member-id", "target", "org-id", "organization"));
+      session.getContext().getUri().getPathParameters().put(parameter, invalid);
+      assertNull(AffectedUser.resolve(event, session));
+    }
+    var session =
+        AdminRequestFixtures.request(
+            event, "target", Map.of("member-id", "target", "org-id", "organization"));
+    session.getContext().getUri().getPathParameters().remove(parameter);
+    assertNull(AffectedUser.resolve(event, session));
+    session
+        .getContext()
+        .getUri()
+        .getPathParameters()
+        .put(parameter, Collections.singletonList(null));
+    assertNull(AffectedUser.resolve(event, session));
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"realm", "path", "inactive", "different-member"})
+  void organizationMemberDeletionRequiresItsMatchingRequest(String mismatch) {
+    var event = EventEnvelopeTest.admin(OperationType.DELETE);
+    event.setResourceTypeAsString("ORGANIZATION_MEMBERSHIP");
+    event.setResourcePath("organizations/organization/members/target");
+    var session =
+        AdminRequestFixtures.request(
+            event, "target", Map.of("member-id", "target", "org-id", "organization"));
+    var uri = session.getContext().getUri();
+    switch (mismatch) {
+      case "realm" -> when(session.getContext().getRealm().getId()).thenReturn("other-realm");
+      case "path" -> when(uri.getPath()).thenReturn("/admin/realms/realm-name/users/target");
+      case "inactive" -> when(uri.getPathParameters()).thenThrow(new ContextNotActiveException());
+      case "different-member" -> uri.getPathParameters().putSingle("member-id", "other");
+      default -> throw new AssertionError(mismatch);
+    }
+    assertNull(AffectedUser.resolve(event, session));
+  }
+
+  @ParameterizedTest
+  @CsvSource({
     "USER,users/target",
     "USER,users/target/credentials/credential",
     "USER,users/target/reset-password",
+    "USER,users/target/logout",
+    "USER,users/target/execute-actions-email",
+    "USER,users/target/send-verify-email",
+    "USER,users/target/reset-password-email",
     "USER,users/target/consents/client",
+    "USER_LOGIN_FAILURE,users/target",
     "GROUP_MEMBERSHIP,users/target/groups/group",
     "REALM_ROLE_MAPPING,users/target/role-mappings/realm",
     "CLIENT_ROLE_MAPPING,users/target/role-mappings/clients/client"
@@ -52,7 +312,7 @@ class AffectedUserTest {
     var row =
         encoder.serialize(
             UUID.randomUUID().toString(),
-            encoder.describe(event, userId, null),
+            encoder.describe(event, userId, null, null),
             new EventOrdering("realm", "target", 2),
             123,
             CaptureFixtures.RETRY);
@@ -90,7 +350,6 @@ class AffectedUserTest {
     "USER,users/ /credentials/c",
     "USER,users//credentials/c",
     "USER,/users/target",
-    "USER,users/target/",
     "USER,users/./credentials/c",
     "USER,users/../credentials/c",
     "USER,users/target/credentials/"
@@ -101,6 +360,144 @@ class AffectedUserTest {
     event.setResourcePath(path);
     assertNull(AffectedUser.resolve(event));
     assertNull(AffectedUser.directUserId(event));
+    assertNull(AffectedUser.resolve(event, request(event, "target")));
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "USER,UPDATE,users/target/",
+    "USER,ACTION,users/target/logout/",
+    "USER,ACTION,users/target/reset-password/",
+    "USER,ACTION,users/target/execute-actions-email/",
+    "USER,ACTION,users/target/send-verify-email/",
+    "USER,ACTION,users/target/reset-password-email/",
+    "USER,ACTION,users/target/credentials/credential/",
+    "USER,ACTION,users/target/consents/client/",
+    "USER,CREATE,users/target/federated-identity/provider/",
+    "USER,DELETE,users/target/federated-identity/provider/",
+    "USER_LOGIN_FAILURE,DELETE,users/target/",
+    "GROUP_MEMBERSHIP,CREATE,users/target/groups/group/",
+    "REALM_ROLE_MAPPING,DELETE,users/target/role-mappings/realm/",
+    "CLIENT_ROLE_MAPPING,CREATE,users/target/role-mappings/clients/client/"
+  })
+  void endpointTrailingSlashesPreserveRoutedIdentity(
+      String resource, String operation, String path) {
+    var event = EventEnvelopeTest.admin(OperationType.valueOf(operation));
+    event.setResourceTypeAsString(resource);
+    event.setResourcePath(path);
+    assertEquals("target", AffectedUser.resolve(event, request(event, "target")));
+    assertEquals(
+        path.equals("users/target/") && resource.equals("USER"),
+        AffectedUser.isDirectUser(event, "target"));
+    assertNull(
+        AffectedUser.resolve(event), "Decoded trailing slashes alone cannot identify a user");
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"target", "f:p:x/+%2F/用户/"})
+  void bruteForceResetUsesItsOwnRoutedParameterAndPreservesOpaqueIds(String user) {
+    var event = EventEnvelopeTest.admin(OperationType.DELETE);
+    event.setResourceTypeAsString("USER_LOGIN_FAILURE");
+    event.setResourcePath("attack-detection/brute-force/users/" + user);
+    var session = AdminRequestFixtures.request(event, "unrelated", Map.of("userId", user));
+    assertEquals(user, AffectedUser.resolve(event, session));
+    assertFalse(AffectedUser.isDirectUser(event, user));
+    assertNull(AffectedUser.resolve(event), "A decoded path cannot replace the routed identity");
+    event.setResourcePath(event.getResourcePath() + "/");
+    when(session.getContext().getUri().getPath())
+        .thenReturn("/admin/realms/realm-name/" + event.getResourcePath());
+    assertEquals(user, AffectedUser.resolve(event, session));
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "USER_LOGIN_FAILURE,DELETE,attack-detection/brute-force/users",
+    "USER_LOGIN_FAILURE,DELETE,attack-detection/brute-force/users/",
+    "USER_LOGIN_FAILURE,DELETE,attack-detection/brute-force/users/other",
+    "USER_LOGIN_FAILURE,DELETE,attack-detection/brute-force/users/target/extra",
+    "USER_LOGIN_FAILURE,DELETE,attack-detection/brute-force/users/target//",
+    "USER_LOGIN_FAILURE,UPDATE,attack-detection/brute-force/users/target",
+    "USER,DELETE,attack-detection/brute-force/users/target",
+    "USER_LOGIN_FAILURE,DELETE,users/target"
+  })
+  void bruteForceIdentityCannotBeBorrowedByBulkUnrelatedOrOrdinaryUserRoutes(
+      String resource, String operation, String path) {
+    var event = EventEnvelopeTest.admin(OperationType.valueOf(operation));
+    event.setResourceTypeAsString(resource);
+    event.setResourcePath(path);
+    event.setAuthDetails(new AuthDetails());
+    event.getAuthDetails().setUserId("actor");
+    var session = AdminRequestFixtures.request(event, null, Map.of("userId", "target"));
+    assertNull(AffectedUser.resolve(event, session));
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"realm", "path", "missing", "different", "duplicate", "empty", "control"})
+  void bruteForceResetRequiresMatchingContextAndOneValidRoutedIdentity(String mismatch) {
+    var event = EventEnvelopeTest.admin(OperationType.DELETE);
+    event.setResourceTypeAsString("USER_LOGIN_FAILURE");
+    event.setResourcePath("attack-detection/brute-force/users/target");
+    var session = AdminRequestFixtures.request(event, "target", Map.of("userId", "target"));
+    var uri = session.getContext().getUri();
+    switch (mismatch) {
+      case "realm" -> when(session.getContext().getRealm().getId()).thenReturn("another-realm");
+      case "path" -> when(uri.getPath()).thenReturn("/admin/realms/realm-name/users/target");
+      case "missing" -> uri.getPathParameters().remove("userId");
+      case "different" -> uri.getPathParameters().putSingle("userId", "other");
+      case "duplicate" -> uri.getPathParameters().put("userId", List.of("target", "other"));
+      case "empty" -> uri.getPathParameters().putSingle("userId", " ");
+      case "control" -> uri.getPathParameters().putSingle("userId", "target\u0000");
+      default -> throw new AssertionError(mismatch);
+    }
+    assertNull(AffectedUser.resolve(event, session));
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"f:p:x/", "f:p:x//", "f:p:x/+%2F/用户/"})
+  void trailingDelimiterDoesNotTrimOpaqueRoutedUserIds(String user) {
+    var event = EventEnvelopeTest.admin(OperationType.UPDATE);
+    event.setResourcePath("users/" + user + "/");
+    assertEquals(user, AffectedUser.resolve(event, request(event, user)));
+    assertTrue(AffectedUser.isDirectUser(event, user));
+    assertNull(AffectedUser.resolve(event));
+    event.setOperationType(OperationType.ACTION);
+    event.setResourcePath("users/" + user + "/logout/");
+    assertEquals(user, AffectedUser.resolve(event, request(event, user)));
+    assertFalse(AffectedUser.isDirectUser(event, user));
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"CREATE", "DELETE"})
+  void federatedIdentityRoutesRequireTheirExactOpaqueProvider(String operation) {
+    String user = "f:p:x/federated-identity";
+    String provider = "provider/+%2F/用户/";
+    var event = EventEnvelopeTest.admin(OperationType.valueOf(operation));
+    event.setResourcePath("users/" + user + "/federated-identity/" + provider);
+    var session = AdminRequestFixtures.request(event, user, Map.of("provider", provider));
+    assertEquals(user, AffectedUser.resolve(event, session));
+    assertFalse(AffectedUser.isDirectUser(event, user));
+    assertNull(AffectedUser.resolve(event));
+    session.getContext().getUri().getPathParameters().putSingle("provider", "other");
+    assertNull(AffectedUser.resolve(event, session));
+    session.getContext().getUri().getPathParameters().remove("provider");
+    assertNull(AffectedUser.resolve(event, session));
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "USER,UPDATE,users/target/logout",
+    "USER,DELETE,users/target/send-verify-email",
+    "USER,UPDATE,users/target/federated-identity/provider",
+    "USER,ACTION,users/target/federated-identity/provider",
+    "USER_LOGIN_FAILURE,UPDATE,users/target",
+    "USER_LOGIN_FAILURE,DELETE,users/target/logout",
+    "USER,ACTION,users/target/logout//"
+  })
+  void nestedResourcesRejectUnrelatedOperationsAndExtraDelimiters(
+      String resource, String operation, String path) {
+    var event = EventEnvelopeTest.admin(OperationType.valueOf(operation));
+    event.setResourceTypeAsString(resource);
+    event.setResourcePath(path);
     assertNull(AffectedUser.resolve(event, request(event, "target")));
   }
 
@@ -265,7 +662,9 @@ class AffectedUserTest {
             "groupId",
             "group",
             "client-id",
-            "client"));
+            "client",
+            "provider",
+            "provider"));
   }
 
   @ParameterizedTest

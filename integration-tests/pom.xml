@@ -125,6 +125,7 @@
                 <keycloak.upgrade.from>${keycloak.upgrade.from}</keycloak.upgrade.from>
                 <postgres.image>${postgres.image}</postgres.image>
                 <extension.jar>${project.basedir}/../extension/target/keycloak-nats-durable-${project.version}.jar</extension.jar>
+                <consumer.jar>${project.basedir}/../consumer-example/target/consumer-example-${project.version}.jar</consumer.jar>
               </systemPropertyVariables>
             </configuration>
           </plugin>

@@ -5,6 +5,10 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyInt;
+import static org.mockito.Mockito.anyString;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -18,6 +22,7 @@ import static org.mockito.Mockito.when;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.BooleanNode;
 import jakarta.persistence.EntityManager;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
@@ -28,7 +33,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
+import org.keycloak.events.admin.AuthDetails;
 import org.keycloak.events.admin.OperationType;
+import org.keycloak.models.ClientModel;
+import org.keycloak.models.ClientProvider;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.KeycloakTransaction;
 import org.keycloak.models.KeycloakTransactionManager;
@@ -50,17 +58,32 @@ class DurableEventListenerTest {
   @BeforeEach
   void setup() {
     capture = org.mockito.Mockito.mockStatic(CaptureRepository.class);
-    capture.when(() -> CaptureRepository.persistBatch(any(), any(), any())).thenCallRealMethod();
+    capture.when(() -> CaptureRepository.persistBatch(any(), any())).thenCallRealMethod();
     heads = org.mockito.Mockito.mockStatic(OutboxHeads.class);
+    var positions = new HashMap<String, Long>();
     capture
-        .when(() -> CaptureRepository.allocateNextSequence(any(), any(), any()))
+        .when(() -> CaptureRepository.allocateSequenceRange(any(), any(), any(), anyInt()))
         .thenAnswer(
-            call ->
-                call.getArgument(2) == null
-                    ? null
-                    : new EventOrdering(call.getArgument(1), call.getArgument(2), 1));
+            call -> {
+              verify(em).flush();
+              verify(em, never()).persist(any());
+              String realmId = call.getArgument(1);
+              String userId = call.getArgument(2);
+              int count = call.getArgument(3);
+              if (userId == null) {
+                return null;
+              }
+              long last =
+                  positions.merge(EventOrdering.keyFor(realmId, userId), (long) count, Long::sum);
+              return new EventOrdering(realmId, userId, last - count + 1);
+            });
     capture.when(() -> CaptureRepository.readDatabaseTime(any())).thenReturn(1234L);
     session = mock(KeycloakSession.class);
+    var attributes = new HashMap<String, Object>();
+    when(session.getAttribute(anyString())).thenAnswer(call -> attributes.get(call.getArgument(0)));
+    doAnswer(call -> attributes.put(call.getArgument(0), call.getArgument(1)))
+        .when(session)
+        .setAttribute(anyString(), any());
     em = mock(EntityManager.class);
     tx = mock(KeycloakTransactionManager.class);
     when(session.getTransactionManager()).thenReturn(tx);
@@ -122,7 +145,8 @@ class DurableEventListenerTest {
         assertThrows(IllegalArgumentException.class, () -> listener.onEvent(event, false));
     assertEquals("Event subject exceeds storage limit", failure.getMessage());
     verify(tx).setRollbackOnly();
-    verify(tx, never()).enlistAfterCompletion(any());
+    verify(tx).enlistPrepare(any());
+    verify(tx).enlistAfterCompletion(any());
     capture.verifyNoInteractions();
     verifyNoInteractions(em, wakeRelay);
   }
@@ -149,6 +173,97 @@ class DurableEventListenerTest {
   }
 
   @Test
+  void normalizesTheActingClientOnceForCapturePolicyAndFrozenPayload() throws Exception {
+    var event = EventEnvelopeTest.admin(OperationType.DELETE);
+    var auth = new AuthDetails();
+    auth.setRealmId("management");
+    auth.setClientId("internal-uuid");
+    event.setAuthDetails(auth);
+    var realms = mock(RealmProvider.class);
+    var clients = mock(ClientProvider.class);
+    var realm = mock(RealmModel.class);
+    var client = mock(ClientModel.class);
+    when(session.realms()).thenReturn(realms);
+    when(session.clients()).thenReturn(clients);
+    when(realms.getRealm("management")).thenReturn(realm);
+    when(clients.getClientById(realm, "internal-uuid")).thenReturn(client);
+    when(client.getClientId()).thenReturn("admin-cli", "changed-later");
+    var policy =
+        EventFilterTest.parse(
+            """
+            {"clientIds":["admin-cli"],"userEvents":[],"adminEvents":[
+              {"resourceType":"USER","operations":["DELETE"]}],
+             "delivery":{"rules":[{"id":"client-policy",
+               "match":{"kind":"admin","resourceType":"USER","operations":["DELETE"],
+                        "clientIds":["admin-cli"]},
+               "policy":{"action":"discard","maxFailures":2}}]}}
+            """);
+    listener =
+        new DurableEventListener(session, BridgeConfig.from(Map.of()), wakeRelay, () -> policy);
+    listener.onEvent(event, false);
+    assertEquals("internal-uuid", auth.getClientId());
+    auth.setClientId("changed-source-event");
+    prepare();
+    var captured = ArgumentCaptor.forClass(OutboxEvent.class);
+    verify(em).persist(captured.capture());
+    var row = captured.getValue();
+    var data = new ObjectMapper().readTree(row.payload()).path("data");
+    assertEquals("admin-cli", data.path("clientId").asText());
+    assertEquals("management", data.path("actorRealmId").asText());
+    assertEquals("realm", data.path("realmId").asText());
+    assertEquals("client-policy", row.publicationPolicy().ruleId());
+    verify(client).getClientId();
+    verify(clients).getClientById(realm, "internal-uuid");
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void unresolvedAdminClientsAreOmittedAndNeverMatchAnExplicitClientScope(boolean scoped)
+      throws Exception {
+    var event = EventEnvelopeTest.admin(OperationType.DELETE);
+    var auth = new AuthDetails();
+    auth.setRealmId("removed-realm");
+    auth.setClientId("internal-uuid");
+    event.setAuthDetails(auth);
+    var realms = mock(RealmProvider.class);
+    when(session.realms()).thenReturn(realms);
+    var policy =
+        EventFilterTest.parse(
+            "{\"userEvents\":[],\"adminEvents\":[{\"resourceType\":\"*\",\"operations\":[\"*\"]}]"
+                + (scoped ? ",\"clientIds\":[\"internal-uuid\"]}" : "}"));
+    listener =
+        new DurableEventListener(session, BridgeConfig.from(Map.of()), wakeRelay, () -> policy);
+    listener.onEvent(event, false);
+    if (scoped) {
+      verifyNoInteractions(em, tx, wakeRelay);
+      capture.verifyNoInteractions();
+    } else {
+      prepare();
+      var captured = ArgumentCaptor.forClass(OutboxEvent.class);
+      verify(em).persist(captured.capture());
+      assertFalse(
+          new ObjectMapper().readTree(captured.getValue().payload()).path("data").has("clientId"));
+    }
+    verify(session, never()).clients();
+  }
+
+  @Test
+  void normalizationFailureRollsBackWithoutCapturingMisidentifiedEvents() {
+    var event = EventEnvelopeTest.admin(OperationType.DELETE);
+    var auth = new AuthDetails();
+    auth.setRealmId("management");
+    auth.setClientId("internal-uuid");
+    event.setAuthDetails(auth);
+    var failure = new IllegalStateException("client lookup failed");
+    when(session.realms()).thenThrow(failure);
+    assertSame(
+        failure, assertThrows(IllegalStateException.class, () -> listener.onEvent(event, false)));
+    verify(tx).setRollbackOnly();
+    verifyNoInteractions(em, wakeRelay);
+    capture.verifyNoInteractions();
+  }
+
+  @Test
   void snapshotsImmediatelyAndPersistsInPrepareBeforeTheRequestCommits() throws Exception {
     var event = EventEnvelopeTest.login();
     event.setSessionId("login-session");
@@ -162,6 +277,7 @@ class DurableEventListenerTest {
     order.verify(tx).isActive();
     order.verify(tx).enlistPrepare(any());
     order.verify(tx).enlistAfterCompletion(any());
+    order.verify(em).flush();
     order.verify(em).persist(captured.capture());
     order.verify(em).flush();
     verifyNoMoreInteractions(tx, em);
@@ -180,7 +296,7 @@ class DurableEventListenerTest {
     listener.onEvent(EventEnvelopeTest.login());
     assertSame(failure, assertThrows(IllegalStateException.class, this::prepare));
     verify(tx).setRollbackOnly();
-    verify(em, never()).flush();
+    verify(em).flush();
     verifyNoInteractions(wakeRelay);
   }
 
@@ -191,15 +307,30 @@ class DurableEventListenerTest {
     assertThrows(NullPointerException.class, () -> listener.onEvent(event));
     verify(tx).setRollbackOnly();
     verifyNoInteractions(em, wakeRelay);
-    verify(tx, never()).enlistAfterCompletion(any());
+    verify(tx).enlistPrepare(any());
+    verify(tx).enlistAfterCompletion(any());
   }
 
-  @Test
-  void flushFailureInPreparePreventsCommit() {
-    doThrow(new IllegalStateException("constraint failure")).when(em).flush();
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void flushFailureInPreparePreventsCommit(boolean beforeCounters) {
+    var failure = new IllegalStateException("constraint failure");
+    if (beforeCounters) {
+      doThrow(failure).when(em).flush();
+    } else {
+      doNothing().doThrow(failure).when(em).flush();
+    }
     listener.onEvent(EventEnvelopeTest.login());
-    assertThrows(IllegalStateException.class, this::prepare);
+    assertSame(failure, assertThrows(IllegalStateException.class, this::prepare));
     verify(tx).setRollbackOnly();
+    verify(em, times(beforeCounters ? 1 : 2)).flush();
+    if (beforeCounters) {
+      verify(em, never()).persist(any());
+      capture.verify(
+          () -> CaptureRepository.allocateSequenceRange(any(), any(), any(), anyInt()), never());
+    } else {
+      verify(em).persist(any());
+    }
     verifyNoInteractions(wakeRelay);
   }
 
@@ -208,7 +339,7 @@ class DurableEventListenerTest {
     when(tx.isActive()).thenReturn(false);
     assertThrows(IllegalStateException.class, () -> listener.onEvent(EventEnvelopeTest.login()));
     verify(em, never()).persist(any());
-    verify(tx).setRollbackOnly();
+    verify(tx, never()).setRollbackOnly();
     verifyNoInteractions(em, wakeRelay);
     verify(tx, never()).enlistAfterCompletion(any());
   }
@@ -237,8 +368,11 @@ class DurableEventListenerTest {
     listener.onEvent(EventEnvelopeTest.login());
     verifyNoInteractions(wakeRelay);
     prepare();
-    verify(em, times(2)).persist(any(OutboxEvent.class));
-    verify(em).flush();
+    var rows = ArgumentCaptor.forClass(OutboxEvent.class);
+    verify(em, times(2)).persist(rows.capture());
+    assertEquals(
+        List.of(1L, 2L), rows.getAllValues().stream().map(OutboxEvent::userSequence).toList());
+    verify(em, times(2)).flush();
     var callback = ArgumentCaptor.forClass(KeycloakTransaction.class);
     verify(tx).enlistAfterCompletion(callback.capture());
     callback.getValue().begin();
@@ -265,7 +399,7 @@ class DurableEventListenerTest {
     listener.onEvent(EventEnvelopeTest.login());
     assertSame(failure, assertThrows(IllegalStateException.class, this::prepare).getCause());
     verify(tx).setRollbackOnly();
-    verify(em, never()).flush();
+    verify(em).flush();
     verifyNoInteractions(wakeRelay);
   }
 
@@ -347,6 +481,22 @@ class DurableEventListenerTest {
     verifyNoInteractions(em);
     verify(tx).setRollbackOnly();
     verifyNoInteractions(wakeRelay);
+    var guard = ArgumentCaptor.forClass(KeycloakTransaction.class);
+    verify(tx).enlistPrepare(guard.capture());
+    guard.getValue().begin();
+    assertSame(
+        failure, assertThrows(IllegalStateException.class, guard.getValue()::commit).getCause());
+    guard.getValue().rollback();
+    org.mockito.Mockito.doNothing().when(tx).enlistAfterCompletion(any());
+    org.mockito.Mockito.clearInvocations(tx);
+    listener.onEvent(EventEnvelopeTest.login());
+    prepare();
+    var completion = ArgumentCaptor.forClass(KeycloakTransaction.class);
+    verify(tx).enlistAfterCompletion(completion.capture());
+    completion.getValue().begin();
+    completion.getValue().commit();
+    verify(em).persist(any(OutboxEvent.class));
+    verify(wakeRelay).run();
   }
 
   @ParameterizedTest
@@ -536,10 +686,17 @@ class DurableEventListenerTest {
       snapshots.add(mapper.readTree(row.payload()).at("/data/sessionId").asText());
     }
     assertEquals(List.of("a-first", "z-first", "z-second"), snapshots);
-    String a = new EventOrdering(event.getRealmId(), "a", 1).key();
-    String z = new EventOrdering(event.getRealmId(), "z", 1).key();
-    heads.verify(() -> OutboxHeads.refresh(em, a));
-    heads.verify(() -> OutboxHeads.refresh(em, z));
+    assertEquals(
+        List.of(1L, 1L, 2L), rows.getAllValues().stream().map(OutboxEvent::userSequence).toList());
+    assertEquals(
+        List.of(1234L, 1234L, 1234L),
+        rows.getAllValues().stream().map(OutboxEvent::createdAt).toList());
+    capture.verify(() -> CaptureRepository.allocateSequenceRange(em, event.getRealmId(), "a", 1));
+    capture.verify(() -> CaptureRepository.allocateSequenceRange(em, event.getRealmId(), "z", 2));
+    capture.verify(() -> CaptureRepository.readDatabaseTime(em));
+    heads.verify(() -> OutboxHeads.append(em, rows.getAllValues().get(0)));
+    heads.verify(() -> OutboxHeads.append(em, rows.getAllValues().get(1)));
+    heads.verifyNoMoreInteractions();
   }
 
   @Test
@@ -563,10 +720,20 @@ class DurableEventListenerTest {
 
   @Test
   void prepareEnlistmentFailureMarksRollbackBeforeAnyPersistence() {
-    doThrow(new IllegalStateException("cannot enlist")).when(tx).enlistPrepare(any());
-    assertThrows(IllegalStateException.class, () -> listener.onEvent(EventEnvelopeTest.login()));
+    var failure = new IllegalStateException("cannot enlist");
+    doThrow(failure).when(tx).enlistPrepare(any());
+    var hibernate = mock(org.hibernate.engine.spi.SessionImplementor.class);
+    var managed = mock(org.hibernate.Transaction.class);
+    when(em.unwrap(org.hibernate.engine.spi.SessionImplementor.class)).thenReturn(hibernate);
+    when(hibernate.accessTransaction()).thenReturn(managed);
+    assertSame(
+        failure,
+        assertThrows(
+            IllegalStateException.class, () -> listener.onEvent(EventEnvelopeTest.login())));
     verify(tx).setRollbackOnly();
-    verifyNoInteractions(em, wakeRelay);
+    verify(managed).markRollbackOnly();
+    verify(em, never()).persist(any());
+    verifyNoInteractions(wakeRelay);
   }
 
   @Test

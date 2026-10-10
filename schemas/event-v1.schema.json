@@ -16,7 +16,7 @@
       "type": "object", "required": ["kind", "realmId", "outcome"],
       "properties": {
         "kind": {"enum": ["user", "admin"]}, "realmId": {"type": "string", "maxLength": 255},
-        "keycloakEventId": {"type": "string"}, "userId": {"type": "string", "maxLength": 255}, "clientId": {"type": "string"},
+        "keycloakEventId": {"type": "string"}, "userId": {"type": "string", "maxLength": 255}, "clientId": {"type": "string", "description": "Public Keycloak client ID. For admin events, resolved in actorRealmId; omitted when unavailable."},
         "sessionId": {"type": "string", "maxLength": 255, "description": "User session identified by Keycloak's source event, when available. Not an authentication-session ID or a guarantee of a newly created session."},
         "outcome": {"enum": ["success", "error"]}, "error": {"type": "string"},
         "eventType": {"type": "string"}, "operationType": {"enum": ["CREATE", "UPDATE", "DELETE", "ACTION"]}, "resourceType": {"type": "string"},
