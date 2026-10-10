@@ -36,7 +36,7 @@ class OrganizationGroupAttributionIT extends IntegrationSupport {
   @BeforeAll
   static void start() throws Exception {
     startInfrastructure(
-        System.getProperty("keycloak.version", "26.7.5"),
+        System.getProperty("keycloak.version", "26.8.0"),
         container ->
             container
                 .withEnv("KND_FILTER_FILE", "/opt/keycloak/conf/knd-organization-groups.json")
