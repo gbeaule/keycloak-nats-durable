@@ -60,7 +60,7 @@ abstract class IntegrationSupport {
   }
 
   static void startInfrastructure() throws Exception {
-    startInfrastructure(System.getProperty("keycloak.version", "26.7.5"));
+    startInfrastructure(System.getProperty("keycloak.version", "26.8.0"));
   }
 
   static void startInfrastructure(String initialVersion) throws Exception {
@@ -116,7 +116,7 @@ abstract class IntegrationSupport {
   }
 
   static GenericContainer<?> keycloakContainer(boolean importRealm) {
-    return keycloakContainer(importRealm, System.getProperty("keycloak.version", "26.7.5"));
+    return keycloakContainer(importRealm, System.getProperty("keycloak.version", "26.8.0"));
   }
 
   static GenericContainer<?> keycloakContainer(boolean importRealm, String version) {

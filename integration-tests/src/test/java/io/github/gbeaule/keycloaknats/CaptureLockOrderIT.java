@@ -38,7 +38,7 @@ class CaptureLockOrderIT extends IntegrationSupport {
 
   @BeforeAll
   static void start() throws Exception {
-    startInfrastructure(System.getProperty("keycloak.version", "26.7.5"), container -> {}, false);
+    startInfrastructure(System.getProperty("keycloak.version", "26.8.0"), container -> {}, false);
     realmId =
         objectMapper
             .readTree(request("GET", "/admin/realms/durable-test", null).body())

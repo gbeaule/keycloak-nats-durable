@@ -20,8 +20,10 @@ import com.networknt.schema.SpecificationVersion;
 import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.keycloak.events.admin.OperationType;
+import org.keycloak.events.admin.ResourceType;
 
 class EventFilterSchemaTest {
   private static final Schema schema =
@@ -92,7 +94,7 @@ class EventFilterSchemaTest {
             .readTree(getClass().getResourceAsStream("/schemas/event-filter.schema.json"))
             .get("$defs");
     var catalogue =
-        mapper.readTree(getClass().getResourceAsStream("/schemas/keycloak-catalogue-26.7.5.json"));
+        mapper.readTree(getClass().getResourceAsStream("/schemas/keycloak-catalogue-26.8.0.json"));
     assertEquals(
         catalogue.get("userEventTypes"), withoutWildcard(definitions.at("/eventTypes/items/enum")));
     assertEquals(
@@ -107,6 +109,28 @@ class EventFilterSchemaTest {
     var result = ((ArrayNode) node).deepCopy();
     result.remove(0);
     return result;
+  }
+
+  @ParameterizedTest
+  @EnumSource(ResourceType.class)
+  void builtInResourcesAreAcceptedForCaptureAndDelivery(ResourceType resource) throws Exception {
+    String selector = "{\"resourceType\":\"" + resource.name() + "\",\"operations\":[\"UPDATE\"]}";
+    String json =
+        "{\"userEvents\":[],\"adminEvents\":["
+            + selector
+            + "],\"delivery\":{\"rules\":["
+            + rule(
+                "resource", selector.replace("{", "{\"kind\":\"admin\","), "{\"action\":\"retry\"}")
+            + "]}}";
+    assertAccepted(json);
+    var event = EventEnvelopeTest.admin(OperationType.UPDATE);
+    event.setResourceType(resource);
+    var policy = DeliveryRulesTest.resolve(EventFilterTest.parse(json), event, null);
+    assertEquals("resource", policy.ruleId());
+    assertEquals(PublicationPolicy.RETRY, policy.policy());
+    event.setOperationType(OperationType.DELETE);
+    assertTrue(
+        EventFilterTest.parse(json).resolve(event, null, null, null, "events.admin").isEmpty());
   }
 
   @ParameterizedTest

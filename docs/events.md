@@ -6,7 +6,7 @@ capture policy. A listed event type describes a supported shape, not a promise t
 or external storage provider emits it.
 
 The exact contract lives in the [versioned JSON schema](../schemas/event-v1.schema.json),
-[machine-readable Keycloak catalogue](../schemas/keycloak-catalogue-26.7.5.json) and
+[machine-readable Keycloak catalogue](../schemas/keycloak-catalogue-26.8.0.json) and
 [envelope implementation](../extension/src/main/java/io/github/gbeaule/keycloaknats/EventEnvelope.java).
 [JSON examples](examples) are validated by
 [schema tests](../extension/src/test/java/io/github/gbeaule/keycloaknats/EventSchemaTest.java).

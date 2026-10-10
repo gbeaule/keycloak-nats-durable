@@ -34,7 +34,7 @@ class PerUserPublicationIT extends IntegrationSupport {
            "policy":{"action":"discard","maxAgeSeconds":3,"maxFailures":1}}]}}
         """;
     startInfrastructure(
-        System.getProperty("keycloak.version", "26.7.5"),
+        System.getProperty("keycloak.version", "26.8.0"),
         node ->
             node.withExposedPorts(8080, 9000)
                 .withEnv("KC_METRICS_ENABLED", "true")

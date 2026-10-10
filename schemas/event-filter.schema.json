@@ -323,7 +323,8 @@
             "ORGANIZATION",
             "ORGANIZATION_MEMBERSHIP",
             "ORGANIZATION_GROUP",
-            "ORGANIZATION_GROUP_MEMBERSHIP"
+            "ORGANIZATION_GROUP_MEMBERSHIP",
+            "WORKFLOW"
           ]
         },
         {

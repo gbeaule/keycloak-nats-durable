@@ -29,11 +29,11 @@
     <project.build.outputTimestamp>2026-09-26T00:00:00Z</project.build.outputTimestamp>
     <maven.compiler.release>21</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <keycloak.version>26.7.5</keycloak.version>
+    <keycloak.version>26.8.0</keycloak.version>
     <keycloak.runtime.version>${keycloak.version}</keycloak.runtime.version>
     <keycloak.upgrade.from>26.6.4</keycloak.upgrade.from>
     <postgres.image>postgres:18.6-alpine</postgres.image>
-    <jnats.version>2.26.3</jnats.version>
+    <jnats.version>2.26.4</jnats.version>
     <hikaricp.version>7.1.0</hikaricp.version>
     <bouncycastle.version>2.73.13</bouncycastle.version>
     <jackson.version>2.22.3</jackson.version>
