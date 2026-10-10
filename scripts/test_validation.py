@@ -68,7 +68,8 @@ class ValidationRunnerTest(unittest.TestCase):
             "AdminUserAttributionIT", "OrganizationGroupAttributionIT", "ConsumerReconnectIT",
             "NatsReadinessIT", "PerUserCaptureIT",
             "PerUserRelayIT", "OutboxDiscardIT", "OutboxAuditRetentionIT",
-            "NestedEventCaptureIT", "OutboxHeadIT", "OutboxSchemaIT",
+            "NestedEventCaptureIT", "OutboxHeadIT", "OutboxSchemaIT", "OutboxExpiryIT",
+            "CaptureLockOrderIT",
             "PerUserPublicationIT", "PerUserSystemIT", "FilteringIT",
             "DurabilityIT#uncommittedAndRolledBackRowsAreNeverPublished+"
             "outboxWritesKeepSynchronousCommitForAuthenticationOnlyTransactions+"

@@ -16,7 +16,7 @@ POSTGRES_TESTS = (
     "ConsumerHardeningIT,ConsumerStartupIT,CustomSchemaIT,UpgradeIT,"
     "AdminUserAttributionIT,OrganizationGroupAttributionIT,ConsumerReconnectIT,NatsReadinessIT,"
     "PerUserCaptureIT,PerUserRelayIT,OutboxDiscardIT,OutboxAuditRetentionIT,"
-    "NestedEventCaptureIT,OutboxHeadIT,OutboxSchemaIT,"
+    "NestedEventCaptureIT,OutboxHeadIT,OutboxSchemaIT,OutboxExpiryIT,CaptureLockOrderIT,"
     "PerUserPublicationIT,PerUserSystemIT,FilteringIT,DurabilityIT#"
     "uncommittedAndRolledBackRowsAreNeverPublished+"
     "outboxWritesKeepSynchronousCommitForAuthenticationOnlyTransactions+"

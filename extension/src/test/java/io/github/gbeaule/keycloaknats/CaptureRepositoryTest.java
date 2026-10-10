@@ -32,9 +32,9 @@ import org.mockito.ArgumentCaptor;
 
 class CaptureRepositoryTest {
   @ParameterizedTest
-  @CsvSource({"1,12", "2,1", "3,12", "0,0"})
-  void managedConnectionAllocatesExistingNewAndRacingCountersOrRejectsOverflow(
-      int successAt, long sequence) throws Exception {
+  @CsvSource({"1,1,12", "1,3,12", "2,3,3", "3,3,12", "0,3,0"})
+  void managedConnectionAtomicallyAllocatesWholeRangesOrRejectsOverflowAndIdentityMismatch(
+      int successAt, int count, long sequence) throws Exception {
     var em = mock(EntityManager.class);
     var session = mock(Session.class);
     var factory = mock(SessionFactoryImplementor.class);
@@ -65,11 +65,16 @@ class CaptureRepositoryTest {
     if (successAt == 0) {
       assertThrows(
           IllegalStateException.class,
-          () -> CaptureRepository.allocateNextSequence(em, identity.realmId(), identity.userId()));
+          () ->
+              CaptureRepository.allocateSequenceRange(
+                  em, identity.realmId(), identity.userId(), count));
     } else {
       var ordering =
-          CaptureRepository.allocateNextSequence(em, identity.realmId(), identity.userId());
-      assertEquals(sequence, ordering.sequence());
+          count == 1
+              ? CaptureRepository.allocateNextSequence(em, identity.realmId(), identity.userId())
+              : CaptureRepository.allocateSequenceRange(
+                  em, identity.realmId(), identity.userId(), count);
+      assertEquals(sequence - count + 1, ordering.sequence());
       assertEquals(identity.key(), ordering.key());
     }
     int statements = successAt == 0 ? 3 : successAt;
@@ -80,10 +85,13 @@ class CaptureRepositoryTest {
     verify(connection, times(statements)).prepareStatement(sql.capture());
     var queries = sql.getAllValues();
     assertTrue(queries.getFirst().startsWith("UPDATE \"bridge-data\".KC_NATS_CAPTURE_COUNTER"));
-    assertTrue(queries.getFirst().endsWith("< " + Long.MAX_VALUE + " RETURNING LAST_SEQUENCE"));
+    assertTrue(queries.getFirst().contains("SET LAST_SEQUENCE = LAST_SEQUENCE + " + count));
+    assertTrue(
+        queries.getFirst().endsWith("<= " + (Long.MAX_VALUE - count) + " RETURNING LAST_SEQUENCE"));
     if (statements > 1) {
       assertTrue(queries.get(1).startsWith("INSERT INTO \"bridge-data\".KC_NATS_CAPTURE_COUNTER"));
-      assertTrue(queries.get(1).endsWith("ON CONFLICT DO NOTHING RETURNING LAST_SEQUENCE"));
+      assertTrue(
+          queries.get(1).endsWith(count + ") ON CONFLICT DO NOTHING RETURNING LAST_SEQUENCE"));
     }
     if (statements == 3) {
       assertEquals(queries.getFirst(), queries.getLast());
@@ -93,6 +101,16 @@ class CaptureRepositoryTest {
     verify(connection, never()).commit();
     verify(connection, never()).close();
     new CaptureCounter();
+  }
+
+  @ParameterizedTest
+  @org.junit.jupiter.params.provider.ValueSource(ints = {0, -1})
+  void invalidRangeCannotMutateCounters(int count) {
+    var em = mock(EntityManager.class);
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> CaptureRepository.allocateSequenceRange(em, "realm", "user", count));
+    verifyNoInteractions(em);
   }
 
   @Test

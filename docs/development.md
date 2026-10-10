@@ -36,6 +36,14 @@ diagnostic cleanup without a receiver. Reports under `integration-tests/target/p
 include the environment, latency distributions, query plan and retained-row samples. Cleanup bounds
 live diagnostic history; physical PostgreSQL space also depends on vacuum, and protected originals
 remain a separate capacity concern.
+
+For larger workloads, set `benchmark.workload-timeout-seconds`, `benchmark.drain-timeout-seconds`
+and `benchmark.recovery-timeout-seconds` explicitly with Maven `-D` arguments. Reports record these
+phase budgets; HTTP, broker and correctness deadlines remain separate. Defaults live in
+[BenchmarkTimeouts](../integration-tests/src/test/java/io/github/gbeaule/keycloaknats/BenchmarkTimeouts.java)
+and the benchmark callers. Concurrent admin requests renew fixture credentials before their JWT
+expiry; an in-flight request receives one retry only after that token has expired.
+
 Measure capacity and recovery on the intended deployment; reference tests do not certify its topology.
 
 ## Compatibility

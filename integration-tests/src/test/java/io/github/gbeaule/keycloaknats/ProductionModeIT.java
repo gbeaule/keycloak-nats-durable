@@ -37,6 +37,7 @@ class ProductionModeIT extends IntegrationSupport {
   @TempDir static Path certificatesDirectory;
   private static TestCertificates certificates;
   private static HttpClient secureClient;
+  private static String adminToken;
   private static String image;
   private static TestCredentials credentials;
 

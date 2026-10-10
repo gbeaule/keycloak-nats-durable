@@ -21,13 +21,14 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.TestFactory;
 
 /** Opt-in repeatable load measurement; does not turn a workstation result into a production SLO. */
 class ThroughputBenchmark extends IntegrationSupport {
+  private final BenchmarkTimeouts timeouts = BenchmarkTimeouts.configured(20);
+
   @TestFactory
   Stream<DynamicTest> measureRelayConcurrency() {
     return Arrays.stream(System.getProperty("benchmark.relay.workers", "1,4").split(","))
@@ -73,17 +74,18 @@ class ThroughputBenchmark extends IntegrationSupport {
       report.put("keycloakDbPoolMax", 32);
       report.put("eventsPerPhase", events);
       report.put("warmupRequests", warmup);
+      report.put("waitBudgets", timeouts.report());
       report.put(
           "storage", "PostgreSQL fsync/synchronous_commit on; one NATS File replica, sync always");
       report.put(
           "workload", "Alternating password login and admin user creation; isolated containers");
       requestLoad(warmup, concurrency);
-      drained();
+      drained(timeouts.drain());
       consume(warmup, Set.of());
 
       long liveStart = System.nanoTime();
       Map<String, Object> live = requestLoad(events, concurrency);
-      drained();
+      drained(timeouts.drain());
       live.put("captureAndRelaySeconds", secondsSince(liveStart));
       live.put("captureAndRelayEventsPerSecond", events / secondsSince(liveStart));
       live.put("consumer", consume(events, Set.of()));
@@ -106,7 +108,7 @@ class ThroughputBenchmark extends IntegrationSupport {
         int ongoing = Math.max(20, events / 2);
         final Map<String, Object> duringRecovery = requestLoad(ongoing, concurrency);
         await()
-            .atMost(Duration.ofMinutes(5))
+            .atMost(timeouts.recovery())
             .until(() -> scalar("SELECT count(*) FROM kc_nats_outbox") == 0);
         double recoverySeconds = secondsSince(recoveryStart);
         var recovery = new LinkedHashMap<String, Object>();
@@ -166,9 +168,7 @@ class ThroughputBenchmark extends IntegrationSupport {
                   return null;
                 }));
       }
-      for (var request : work) {
-        request.get(30, TimeUnit.SECONDS);
-      }
+      BenchmarkTimeouts.finish(work, started, timeouts.workload());
     }
     double seconds = secondsSince(started);
     var result = new LinkedHashMap<String, Object>();
@@ -198,6 +198,9 @@ class ThroughputBenchmark extends IntegrationSupport {
     var subscription = nats.jetStream().subscribe(null, PullSubscribeOptions.bind(STREAM, DURABLE));
     try {
       while (seen.size() < expected) {
+        assertTrue(
+            System.nanoTime() - started < timeouts.workload().toNanos(),
+            "Consumer workload wait budget exceeded");
         var messages = subscription.fetch(1, Duration.ofSeconds(5));
         assertTrue(!messages.isEmpty(), "All accepted events must reach the consumer");
         for (var message : messages) {

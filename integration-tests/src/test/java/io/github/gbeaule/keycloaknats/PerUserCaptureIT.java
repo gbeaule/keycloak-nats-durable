@@ -113,6 +113,7 @@ class PerUserCaptureIT extends IntegrationSupport {
         var captures = new java.util.ArrayList<java.util.concurrent.Future<?>>();
         for (int worker = 0; worker < 8; worker++) {
           boolean rollback = rollBackSome && worker % 2 == 0;
+          int callbackCount = worker % 3 + 1;
           captures.add(
               executor.submit(
                   () -> {
@@ -120,7 +121,10 @@ class PerUserCaptureIT extends IntegrationSupport {
                       session.beginTransaction();
                       ready.countDown();
                       assertTrue(start.await(10, TimeUnit.SECONDS));
-                      listener(session, EventFilter::all).onEvent(event("first-capture", user));
+                      var capture = listener(session, EventFilter::all);
+                      for (int callback = 0; callback < callbackCount; callback++) {
+                        capture.onEvent(event("first-capture", user));
+                      }
                       if (rollback) {
                         session.getTransaction().rollback();
                       } else {
@@ -138,9 +142,13 @@ class PerUserCaptureIT extends IntegrationSupport {
         for (var capture : captures) {
           capture.get(10, TimeUnit.SECONDS);
         }
+        long expected =
+            java.util.stream.IntStream.range(0, 8)
+                .filter(worker -> !rollBackSome || worker % 2 != 0)
+                .map(worker -> worker % 3 + 1)
+                .sum();
         assertEquals(
-            java.util.stream.LongStream.rangeClosed(1, rollBackSome ? 4 : 8).boxed().toList(),
-            sequences(user));
+            java.util.stream.LongStream.rangeClosed(1, expected).boxed().toList(), sequences(user));
       }
     }
   }
@@ -522,6 +530,42 @@ class PerUserCaptureIT extends IntegrationSupport {
   }
 
   @Test
+  void atomicRangeCanReachTheLastSequenceButCannotPartiallyAllocatePastIt() {
+    String user = "z-" + UUID.randomUUID();
+    final String earlier = "a-" + UUID.randomUUID();
+    commitEvent(event("capture", user));
+    try (var session = sessions.openSession()) {
+      session.beginTransaction();
+      session
+          .createNativeMutationQuery(
+              "UPDATE kc_nats_capture_counter SET last_sequence="
+                  + (Long.MAX_VALUE - 3)
+                  + " WHERE user_id=:user")
+          .setParameter("user", user)
+          .executeUpdate();
+      var capture = listener(session, EventFilter::all);
+      for (int callback = 0; callback < 3; callback++) {
+        capture.onEvent(event("capture", user));
+      }
+      session.getTransaction().commit();
+    }
+    var expected = List.of(1L, Long.MAX_VALUE - 2, Long.MAX_VALUE - 1, Long.MAX_VALUE);
+    assertEquals(expected, sequences(user));
+    try (var session = sessions.openSession()) {
+      session.beginTransaction();
+      var capture = listener(session, EventFilter::all);
+      capture.onEvent(event("capture", earlier));
+      capture.onEvent(event("capture", user));
+      capture.onEvent(event("capture", user));
+      assertThrows(RuntimeException.class, () -> session.getTransaction().commit());
+    }
+    assertEquals(expected, sequences(user));
+    assertEquals(List.of(), sequences(earlier));
+    commitEvent(event("capture", earlier));
+    assertEquals(List.of(1L), sequences(earlier));
+  }
+
+  @Test
   void lockTimeoutRollsBackEarlierCallbacksForOtherUsers() {
     String locked = "z-" + UUID.randomUUID();
     String earlier = "a-" + UUID.randomUUID();
@@ -632,6 +676,40 @@ class PerUserCaptureIT extends IntegrationSupport {
           "23505",
           assertThrows(java.sql.SQLException.class, duplicate::executeUpdate).getSQLState());
     }
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void atomicAllocationCannotReuseACounterWithAnInconsistentIdentity(boolean wrongKey)
+      throws Exception {
+    String user = UUID.randomUUID().toString();
+    commitEvent(event("capture", user));
+    try (var connection = database.getConnection();
+        var corrupt =
+            connection.prepareStatement(
+                "UPDATE kc_nats_capture_counter SET "
+                    + (wrongKey ? "ordering_key='incorrect-key'" : "realm_id='incorrect-realm'")
+                    + " WHERE user_id=?")) {
+      corrupt.setString(1, user);
+      assertEquals(1, corrupt.executeUpdate());
+    }
+    try (var session = sessions.openSession()) {
+      session.beginTransaction();
+      var capture = listener(session, EventFilter::all);
+      capture.onEvent(event("capture", user));
+      capture.onEvent(event("capture", user));
+      assertThrows(RuntimeException.class, () -> session.getTransaction().commit());
+    }
+    assertEquals(
+        1,
+        scalar("SELECT last_sequence FROM kc_nats_capture_counter WHERE user_id='" + user + "'"));
+    assertEquals(
+        1,
+        scalar(
+            "SELECT count(*) FROM kc_nats_outbox WHERE realm_id='capture'"
+                + " AND payload::jsonb->'data'->>'userId'='"
+                + user
+                + "'"));
   }
 
   @Test

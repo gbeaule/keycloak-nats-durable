@@ -5,8 +5,10 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyInt;
 import static org.mockito.Mockito.anyString;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -58,13 +60,23 @@ class DurableEventListenerTest {
     capture = org.mockito.Mockito.mockStatic(CaptureRepository.class);
     capture.when(() -> CaptureRepository.persistBatch(any(), any())).thenCallRealMethod();
     heads = org.mockito.Mockito.mockStatic(OutboxHeads.class);
+    var positions = new HashMap<String, Long>();
     capture
-        .when(() -> CaptureRepository.allocateNextSequence(any(), any(), any()))
+        .when(() -> CaptureRepository.allocateSequenceRange(any(), any(), any(), anyInt()))
         .thenAnswer(
-            call ->
-                call.getArgument(2) == null
-                    ? null
-                    : new EventOrdering(call.getArgument(1), call.getArgument(2), 1));
+            call -> {
+              verify(em).flush();
+              verify(em, never()).persist(any());
+              String realmId = call.getArgument(1);
+              String userId = call.getArgument(2);
+              int count = call.getArgument(3);
+              if (userId == null) {
+                return null;
+              }
+              long last =
+                  positions.merge(EventOrdering.keyFor(realmId, userId), (long) count, Long::sum);
+              return new EventOrdering(realmId, userId, last - count + 1);
+            });
     capture.when(() -> CaptureRepository.readDatabaseTime(any())).thenReturn(1234L);
     session = mock(KeycloakSession.class);
     var attributes = new HashMap<String, Object>();
@@ -265,6 +277,7 @@ class DurableEventListenerTest {
     order.verify(tx).isActive();
     order.verify(tx).enlistPrepare(any());
     order.verify(tx).enlistAfterCompletion(any());
+    order.verify(em).flush();
     order.verify(em).persist(captured.capture());
     order.verify(em).flush();
     verifyNoMoreInteractions(tx, em);
@@ -283,7 +296,7 @@ class DurableEventListenerTest {
     listener.onEvent(EventEnvelopeTest.login());
     assertSame(failure, assertThrows(IllegalStateException.class, this::prepare));
     verify(tx).setRollbackOnly();
-    verify(em, never()).flush();
+    verify(em).flush();
     verifyNoInteractions(wakeRelay);
   }
 
@@ -298,12 +311,26 @@ class DurableEventListenerTest {
     verify(tx).enlistAfterCompletion(any());
   }
 
-  @Test
-  void flushFailureInPreparePreventsCommit() {
-    doThrow(new IllegalStateException("constraint failure")).when(em).flush();
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void flushFailureInPreparePreventsCommit(boolean beforeCounters) {
+    var failure = new IllegalStateException("constraint failure");
+    if (beforeCounters) {
+      doThrow(failure).when(em).flush();
+    } else {
+      doNothing().doThrow(failure).when(em).flush();
+    }
     listener.onEvent(EventEnvelopeTest.login());
-    assertThrows(IllegalStateException.class, this::prepare);
+    assertSame(failure, assertThrows(IllegalStateException.class, this::prepare));
     verify(tx).setRollbackOnly();
+    verify(em, times(beforeCounters ? 1 : 2)).flush();
+    if (beforeCounters) {
+      verify(em, never()).persist(any());
+      capture.verify(
+          () -> CaptureRepository.allocateSequenceRange(any(), any(), any(), anyInt()), never());
+    } else {
+      verify(em).persist(any());
+    }
     verifyNoInteractions(wakeRelay);
   }
 
@@ -341,8 +368,11 @@ class DurableEventListenerTest {
     listener.onEvent(EventEnvelopeTest.login());
     verifyNoInteractions(wakeRelay);
     prepare();
-    verify(em, times(2)).persist(any(OutboxEvent.class));
-    verify(em).flush();
+    var rows = ArgumentCaptor.forClass(OutboxEvent.class);
+    verify(em, times(2)).persist(rows.capture());
+    assertEquals(
+        List.of(1L, 2L), rows.getAllValues().stream().map(OutboxEvent::userSequence).toList());
+    verify(em, times(2)).flush();
     var callback = ArgumentCaptor.forClass(KeycloakTransaction.class);
     verify(tx).enlistAfterCompletion(callback.capture());
     callback.getValue().begin();
@@ -369,7 +399,7 @@ class DurableEventListenerTest {
     listener.onEvent(EventEnvelopeTest.login());
     assertSame(failure, assertThrows(IllegalStateException.class, this::prepare).getCause());
     verify(tx).setRollbackOnly();
-    verify(em, never()).flush();
+    verify(em).flush();
     verifyNoInteractions(wakeRelay);
   }
 
@@ -656,10 +686,17 @@ class DurableEventListenerTest {
       snapshots.add(mapper.readTree(row.payload()).at("/data/sessionId").asText());
     }
     assertEquals(List.of("a-first", "z-first", "z-second"), snapshots);
-    String a = new EventOrdering(event.getRealmId(), "a", 1).key();
-    String z = new EventOrdering(event.getRealmId(), "z", 1).key();
-    heads.verify(() -> OutboxHeads.refresh(em, a));
-    heads.verify(() -> OutboxHeads.refresh(em, z));
+    assertEquals(
+        List.of(1L, 1L, 2L), rows.getAllValues().stream().map(OutboxEvent::userSequence).toList());
+    assertEquals(
+        List.of(1234L, 1234L, 1234L),
+        rows.getAllValues().stream().map(OutboxEvent::createdAt).toList());
+    capture.verify(() -> CaptureRepository.allocateSequenceRange(em, event.getRealmId(), "a", 1));
+    capture.verify(() -> CaptureRepository.allocateSequenceRange(em, event.getRealmId(), "z", 2));
+    capture.verify(() -> CaptureRepository.readDatabaseTime(em));
+    heads.verify(() -> OutboxHeads.append(em, rows.getAllValues().get(0)));
+    heads.verify(() -> OutboxHeads.append(em, rows.getAllValues().get(1)));
+    heads.verifyNoMoreInteractions();
   }
 
   @Test

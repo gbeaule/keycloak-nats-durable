@@ -258,4 +258,60 @@ class ReloadingEventFilterTest {
                 "bad", DeliveryRulesTest.USER_MATCH, "{\"action\":\"discard\"}")));
     assertThrows(IllegalArgumentException.class, () -> new ReloadingEventFilter(file.toString()));
   }
+
+  @Test
+  void nulRuleIdFailsStartupBeforeThePolicyCanBeActivated() throws Exception {
+    Path file = directory.resolve("filter.json");
+    Files.writeString(
+        file,
+        DeliveryRulesTest.document(
+            DeliveryRulesTest.rule(
+                "protected\\u0000login", DeliveryRulesTest.USER_MATCH, "{\"action\":\"retry\"}")));
+    var failure =
+        assertThrows(
+            IllegalArgumentException.class, () -> new ReloadingEventFilter(file.toString()));
+    assertEquals("Cannot load initial event filter; check file and schema", failure.getMessage());
+    assertNull(failure.getCause());
+  }
+
+  @Test
+  void invalidRuleReloadRetainsCaptureAndDeliveryUntilReplacement() throws Exception {
+    Path file = directory.resolve("filter.json");
+    String valid =
+        DeliveryRulesTest.document(
+            DeliveryRulesTest.rule(
+                "protected",
+                DeliveryRulesTest.USER_MATCH,
+                "{\"action\":\"discard\",\"maxFailures\":2}"));
+    Files.writeString(file, valid);
+    try (var logs = new LogCapture(ReloadingEventFilter.class);
+        var filter = new ReloadingEventFilter(file.toString())) {
+      EventFilter original = filter.current();
+      var event = EventEnvelopeTest.login();
+      final var resolved = DeliveryRulesTest.resolve(original, event);
+      Files.writeString(
+          file,
+          valid
+              .replace("\"id\":\"protected\"", "\"id\":\"protected\\u0000login\"")
+              .replace("\"userEvents\":[\"*\"]", "\"userEvents\":[]"));
+      filter.reload();
+      assertSame(original, filter.current());
+      assertTrue(EventFilterTest.accepts(filter.current(), event));
+      assertEquals(resolved, DeliveryRulesTest.resolve(filter.current(), event));
+      assertEquals("protected", resolved.ruleId());
+      assertEquals(original.sha256(), resolved.filterSha256());
+      assertEquals(new PublicationPolicy(null, 2), resolved.policy());
+      assertEquals(2, logs.records().size());
+      assertEquals(Level.SEVERE, logs.records().get(1).getLevel());
+      filter.reload();
+      assertSame(original, filter.current());
+      assertEquals(2, logs.records().size());
+
+      Files.writeString(file, valid.replace("\"id\":\"protected\"", "\"id\":\"replacement\""));
+      filter.reload();
+      assertNotSame(original, filter.current());
+      assertEquals("replacement", DeliveryRulesTest.resolve(filter.current(), event).ruleId());
+      assertEquals(3, logs.records().size());
+    }
+  }
 }

@@ -48,7 +48,13 @@ class OutboxChangelogTest {
               .map(AddUniqueConstraintChange.class::cast)
               .map(AddUniqueConstraintChange::getColumnNames)
               .toList());
-      assertEquals(3, changes.stream().filter(CreateIndexChange.class::isInstance).count());
+      assertEquals(
+          List.of("IDX_KC_NATS_OUTBOX_DUE", "IDX_KC_NATS_DISCARD_RETENTION"),
+          changes.stream()
+              .filter(CreateIndexChange.class::isInstance)
+              .map(CreateIndexChange.class::cast)
+              .map(CreateIndexChange::getIndexName)
+              .toList());
     }
   }
 
@@ -64,10 +70,10 @@ class OutboxChangelogTest {
     assertEquals(
         "Configured outbox constraints, indexes and autovacuum", setup.getConfirmationMessage());
     var statements = setup.generateStatements(database);
-    assertEquals(6, statements.length);
+    assertEquals(8, statements.length);
     String qualifier =
         schema.equals("public") ? "public" : "\"" + schema.replace("\"", "\"\"") + "\"";
-    for (int i : new int[] {0, 1, 2, 5}) {
+    for (int i : new int[] {0, 1, 2, 7}) {
       assertTrue(
           ((RawSqlStatement) statements[i])
               .getSql()
@@ -79,5 +85,15 @@ class OutboxChangelogTest {
             .contains("ON " + qualifier + ".kc_nats_capture_counter"));
     assertTrue(
         ((RawSqlStatement) statements[4]).getSql().contains("ON " + qualifier + ".kc_nats_outbox"));
+    assertEquals(
+        "CREATE INDEX IDX_KC_NATS_ORDERED_EXPIRY ON "
+            + qualifier
+            + ".kc_nats_outbox (NEXT_EXPIRY_ATTEMPT_AT, ID) WHERE ORDERING_KEY IS NOT NULL",
+        ((RawSqlStatement) statements[5]).getSql().replaceAll("\\s+", " "));
+    assertEquals(
+        "CREATE INDEX IDX_KC_NATS_INDEPENDENT_EXPIRY ON "
+            + qualifier
+            + ".kc_nats_outbox (NEXT_EXPIRY_ATTEMPT_AT, ID) WHERE ORDERING_KEY IS NULL",
+        ((RawSqlStatement) statements[6]).getSql().replaceAll("\\s+", " "));
   }
 }

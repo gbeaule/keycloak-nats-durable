@@ -6,12 +6,14 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyInt;
 import static org.mockito.Mockito.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -404,7 +406,13 @@ class CaptureTransactionTest {
       assertEquals(List.of("UPDATE_PROFILE", "UPDATE", "UPDATE_EMAIL"), operations);
       assertEquals(
           List.of(1L, 2L, 3L), fixture.rows.stream().map(OutboxEvent::userSequence).toList());
-      verify(fixture.em).flush();
+      verify(fixture.em, times(2)).flush();
+      fixture.captures.verify(
+          () ->
+              CaptureRepository.allocateSequenceRange(
+                  fixture.em, Fixture.REALM_ID, Fixture.USER_ID, 3));
+      fixture.captures.verify(() -> CaptureRepository.readDatabaseTime(fixture.em));
+      fixture.heads.verify(() -> OutboxHeads.append(fixture.em, fixture.rows.getFirst()));
       verify(fixture.wakeup).run();
       verify(fixture.resource).commit();
       verify(fixture.resource, never()).rollback();
@@ -555,16 +563,21 @@ class CaptureTransactionTest {
       captures.when(() -> CaptureRepository.readDatabaseTime(any())).thenReturn(1234L);
       var positions = new HashMap<String, Long>();
       captures
-          .when(() -> CaptureRepository.allocateNextSequence(any(), any(), any()))
+          .when(() -> CaptureRepository.allocateSequenceRange(any(), any(), any(), anyInt()))
           .thenAnswer(
               call -> {
+                // Account writes have flushed before the first managed-JDBC counter allocation.
+                verify(em).flush();
+                assertTrue(rows.isEmpty(), "All counter ranges precede outbox writes");
                 String realmId = call.getArgument(1);
                 String userId = call.getArgument(2);
+                int count = call.getArgument(3);
                 if (userId == null) {
                   return null;
                 }
-                long next = positions.merge(EventOrdering.keyFor(realmId, userId), 1L, Long::sum);
-                return new EventOrdering(realmId, userId, next);
+                long last =
+                    positions.merge(EventOrdering.keyFor(realmId, userId), (long) count, Long::sum);
+                return new EventOrdering(realmId, userId, last - count + 1);
               });
       var tracing = mock(TracingProvider.class);
       doAnswer(

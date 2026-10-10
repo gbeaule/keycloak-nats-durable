@@ -46,6 +46,23 @@ class EventFilterTest {
     assertEquals("Expected an object", failure.getMessage());
   }
 
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "\\u0000",
+        "\\u0000protected",
+        "protected\\u0000login",
+        "protected\\u0000",
+        "protected\\n\\u0000login"
+      })
+  void rejectsDeliveryRuleIdsThatPostgresCannotStore(String id) {
+    String json =
+        DeliveryRulesTest.document(
+            DeliveryRulesTest.rule(id, DeliveryRulesTest.USER_MATCH, "{\"action\":\"retry\"}"));
+    var failure = assertThrows(IllegalArgumentException.class, () -> parse(json));
+    assertEquals("Rule ID must not contain NUL", failure.getMessage());
+  }
+
   @Test
   void unknownAdminRuleFieldsCannotSilentlyBroadenCapture() {
     String json =

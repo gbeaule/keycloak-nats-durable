@@ -164,6 +164,8 @@ final class EventFilter {
       require(
           id != null && id.isTextual() && !id.textValue().isBlank(),
           "Rule ID must be a nonblank string");
+      // Resolved rule IDs are persisted in PostgreSQL TEXT, which cannot store NUL.
+      require(id.textValue().indexOf('\0') < 0, "Rule ID must not contain NUL");
       require(ids.add(id.textValue()), "Duplicate delivery rule ID");
       JsonNode match = rule.get("match");
       require(match != null && match.isObject(), "Rule match must be an object");

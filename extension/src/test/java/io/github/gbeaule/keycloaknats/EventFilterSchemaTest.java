@@ -203,6 +203,34 @@ class EventFilterSchemaTest {
                 .replace("\"id\":\"rule\"", "\"id\":" + id)));
   }
 
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "\\u0000",
+        "\\u0000protected",
+        "protected\\u0000login",
+        "protected\\u0000",
+        "protected\\n\\u0000login"
+      })
+  void nulRuleIdsAreRejectedBySchemaAndParserForBothEventKinds(String id) {
+    assertRejected(document(rule(id, USER_MATCH, "{\"action\":\"retry\"}")));
+    assertRejected(document(rule(id, ADMIN_MATCH, "{\"action\":\"retry\"}")));
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "protected-login",
+        "protected-\\u00e9-\\ud83d\\ude00",
+        "protected\\u0001login",
+        "literal\\\\u0000",
+        "protected\\nlogin"
+      })
+  void databaseCompatibleRuleIdsKeepTheirSchemaAndParserAcceptance(String id) {
+    assertAccepted(document(rule(id, USER_MATCH, "{\"action\":\"retry\"}")));
+    assertAccepted(document(rule(id, ADMIN_MATCH, "{\"action\":\"retry\"}")));
+  }
+
   @Test
   void everyRequiredRuleFieldIsCheckedAndUnknownFieldsFailClosed() {
     assertRejected(document("{\"match\":" + USER_MATCH + ",\"policy\":{\"action\":\"retry\"}}"));
