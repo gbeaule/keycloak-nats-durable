@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -50,6 +51,12 @@ class CaptureLockOrderIT extends IntegrationSupport {
   static void stop() throws Exception {
     try {
       writeEvidence();
+      if (keycloak != null && keycloak.getContainerId() != null) {
+        Files.writeString(Path.of("target/capture-lock-order-keycloak.log"), keycloak.getLogs());
+      }
+      if (postgres != null && postgres.getContainerId() != null) {
+        Files.writeString(Path.of("target/capture-lock-order-postgres.log"), postgres.getLogs());
+      }
     } finally {
       stopInfrastructure();
     }
@@ -156,6 +163,84 @@ class CaptureLockOrderIT extends IntegrationSupport {
 
   @Test
   @Order(2)
+  void deletionQueuedBeforeProfileFlushRollsBackTheUpdate() throws Exception {
+    String user = createUser();
+    drained();
+    final long sequenceBefore = captureSequence(user);
+    String endpoint = "/admin/realms/durable-test/users/" + user;
+    var collected = new LinkedHashMap<String, Object>();
+    evidence.put("deletionBeforeProfileFlush", collected);
+    String postgresBefore = postgres.getLogs();
+    final String keycloakBefore = keycloak.getLogs();
+    try (var coordinator = database.getConnection();
+        var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+      coordinator.setAutoCommit(false);
+      try {
+        int coordinatorPid = backendPid(coordinator);
+        try (var lock =
+            coordinator.prepareStatement("SELECT id FROM user_entity WHERE id=? FOR UPDATE")) {
+          lock.setString(1, user);
+          try (var found = lock.executeQuery()) {
+            assertTrue(found.next());
+          }
+        }
+        var deletion = executor.submit(() -> request("DELETE", endpoint, null));
+        var deletePid = new CompletableFuture<Integer>();
+        await("DELETE queues behind the held user row")
+            .atMost(Duration.ofSeconds(8))
+            .pollInterval(Duration.ofMillis(20))
+            .until(
+                () -> {
+                  var waiting = userRowWaiters(coordinatorPid);
+                  if (waiting.size() == 1) {
+                    deletePid.complete(waiting.getFirst());
+                    return true;
+                  }
+                  assertFalse(
+                      deletion.isDone(), "DELETE completed before waiting for the user row");
+                  return false;
+                });
+        int removalPid = deletePid.get();
+        var update =
+            executor.submit(
+                () ->
+                    request(
+                        "PUT", endpoint, Map.of("enabled", false, "firstName", "racing-profile")));
+        await("PUT has loaded the user and queues its flush behind DELETE")
+            .atMost(Duration.ofSeconds(8))
+            .pollInterval(Duration.ofMillis(20))
+            .until(
+                () -> {
+                  if (userRowWaiters(removalPid).size() == 1) {
+                    return true;
+                  }
+                  assertFalse(update.isDone(), "PUT completed before waiting for the user row");
+                  return false;
+                });
+        collected.put("blockingGraph", blockingGraph());
+        coordinator.commit();
+        var removed = deletion.get(30, TimeUnit.SECONDS);
+        var updated = update.get(30, TimeUnit.SECONDS);
+        collected.put("deleteStatus", removed.statusCode());
+        collected.put("putStatus", updated.statusCode());
+        collected.put("putBody", updated.body());
+        writeEvidence();
+        assertEquals(204, removed.statusCode(), removed.body());
+        assertNoNewDeadlock(postgresBefore);
+        assertDeletedUserConflict(updated, user, keycloakBefore);
+        assertEquals(404, request("GET", endpoint, null).statusCode());
+        // Only deletion commits an event; the rejected profile write must not allocate a position.
+        assertEquals(sequenceBefore + 1, captureSequence(user));
+      } finally {
+        coordinator.rollback();
+        writeEvidence();
+      }
+    }
+    drained();
+  }
+
+  @Test
+  @Order(3)
   void uncoordinatedProfileDeletionAndPasswordChangesCompleteWithoutDeadlocks() throws Exception {
     var rounds = new ArrayList<Map<String, Object>>();
     evidence.put("uncoordinated", rounds);
@@ -165,8 +250,11 @@ class CaptureLockOrderIT extends IntegrationSupport {
         if (round % 10 == 0) {
           loginAdmin();
         }
-        String endpoint = "/admin/realms/durable-test/users/" + createUser();
+        String user = createUser();
+        String endpoint = "/admin/realms/durable-test/users/" + user;
         drained();
+        final long sequenceBefore = captureSequence(user);
+        final String keycloakBefore = keycloak.getLogs();
         var start = new CountDownLatch(1);
         var update =
             executor.submit(
@@ -204,20 +292,67 @@ class CaptureLockOrderIT extends IntegrationSupport {
                 round,
                 "kind",
                 delete ? "profile-and-delete" : "profile-and-password-reset",
+                "user",
+                user,
                 "putStatus",
                 updated.statusCode(),
+                "putBody",
+                updated.body(),
                 "mixedStatus",
-                other.statusCode()));
+                other.statusCode(),
+                "mixedBody",
+                other.body()));
         writeEvidence();
-        // If deletion wins before profile lookup, that request correctly observes a missing user.
-        assertTrue(
-            updated.statusCode() == 204 || (delete && updated.statusCode() == 404), updated.body());
         assertEquals(204, other.statusCode(), other.body());
+        assertNoNewDeadlock(postgresBefore);
+        // Deletion can win before lookup (404) or after lookup but before flush (stale entity).
+        if (updated.statusCode() != 204) {
+          assertTrue(delete, updated.body());
+          if (updated.statusCode() != 404) {
+            assertDeletedUserConflict(updated, user, keycloakBefore);
+          }
+          assertEquals(sequenceBefore + 1, captureSequence(user));
+        }
+        if (delete) {
+          assertEquals(404, request("GET", endpoint, null).statusCode());
+        }
       }
     }
     assertEquals(20, rounds.size());
     assertNoNewDeadlock(postgresBefore);
     drained();
+  }
+
+  private static void assertDeletedUserConflict(
+      HttpResponse<String> update, String user, String keycloakBefore) throws Exception {
+    assertEquals(500, update.statusCode(), update.body());
+    assertEquals(
+        "Database operation failed",
+        objectMapper.readTree(update.body()).path("errorMessage").asText());
+    String after = keycloak.getLogs();
+    String added = after.substring(Math.min(keycloakBefore.length(), after.length()));
+    assertTrue(
+        added
+            .lines()
+            .anyMatch(
+                line ->
+                    line.contains("org.hibernate.StaleObjectStateException:")
+                        && line.contains("org.keycloak.models.jpa.entities.UserEntity")
+                        && line.contains(user)),
+        added);
+  }
+
+  private static long captureSequence(String user) throws SQLException {
+    try (var db = database.getConnection();
+        var query =
+            db.prepareStatement(
+                "SELECT last_sequence FROM kc_nats_capture_counter WHERE user_id=?")) {
+      query.setString(1, user);
+      try (var rows = query.executeQuery()) {
+        assertTrue(rows.next());
+        return rows.getLong(1);
+      }
+    }
   }
 
   private static int backendPid(Connection db) throws SQLException {

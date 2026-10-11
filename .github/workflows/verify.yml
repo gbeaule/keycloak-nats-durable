@@ -86,6 +86,7 @@ jobs:
             **/target/surefire-reports/**
             **/target/failsafe-reports/**
             integration-tests/target/*.log
+            integration-tests/target/capture-lock-order-evidence.json
   test:
     needs: quick-checks
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -117,6 +118,7 @@ jobs:
             **/target/surefire-reports/**
             **/target/failsafe-reports/**
             integration-tests/target/*.log
+            integration-tests/target/capture-lock-order-evidence.json
   postgres-compatibility:
     needs: quick-checks
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -149,3 +151,4 @@ jobs:
             **/target/surefire-reports/**
             **/target/failsafe-reports/**
             integration-tests/target/*.log
+            integration-tests/target/capture-lock-order-evidence.json
