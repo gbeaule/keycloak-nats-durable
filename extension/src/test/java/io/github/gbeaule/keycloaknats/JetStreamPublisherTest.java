@@ -46,12 +46,14 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.SecureRandom;
 import java.time.Duration;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -62,7 +64,7 @@ import org.junit.jupiter.params.provider.EnumSource;
 import org.mockito.ArgumentCaptor;
 
 class JetStreamPublisherTest {
-  private final BridgeConfig config = BridgeConfig.from(Map.of());
+  private final BridgeConfig config = functionalConfig(Map.of());
   private final OutboxEvent event =
       CaptureFixtures.row("id", "keycloak.events.realm.user.login", "{}", 0);
   private Connection connection;
@@ -72,6 +74,13 @@ class JetStreamPublisherTest {
   private JetStreamPublisher publisher;
   private PublishAck ack;
   @TempDir Path directory;
+
+  private static BridgeConfig functionalConfig(Map<String, String> overrides) {
+    var settings = new HashMap<>(overrides);
+    // Allow cold class loading and instrumentation on CI; deadline tests use explicit budgets.
+    settings.put("timeout-ms", "10000");
+    return BridgeConfig.from(settings);
+  }
 
   private static StreamConfiguration.Builder safeStream() {
     return StreamConfiguration.builder()
@@ -127,6 +136,23 @@ class JetStreamPublisherTest {
   @Test
   void validatesBeforePublishingOriginalBytesAndDeduplicationIdentityWithBoundedRequests()
       throws Exception {
+    var clock = new AtomicLong();
+    Duration connectTime = Duration.ofSeconds(3);
+    Duration validationTime = Duration.ofSeconds(1);
+    var info = safeStreamInfo();
+    when(connector.connect(any()))
+        .thenAnswer(
+            call -> {
+              clock.addAndGet(connectTime.toNanos());
+              return connection;
+            });
+    when(management.getStreamInfo(config.stream()))
+        .thenAnswer(
+            call -> {
+              clock.addAndGet(validationTime.toNanos());
+              return info;
+            });
+    publisher = new JetStreamPublisher(config, connector, clock::get);
     var original =
         CaptureFixtures.row(
             "persisted-id", "keycloak.events.realm.user.login", "{\"value\":\"é\"}", 0);
@@ -146,14 +172,15 @@ class JetStreamPublisherTest {
     assertEquals(original.id(), options.getValue().getMessageId());
     assertEquals(config.stream(), options.getValue().getExpectedStream());
     assertNull(options.getValue().getMessageTtl());
+    var connectionOptions = ArgumentCaptor.forClass(Options.class);
+    verify(connector).connect(connectionOptions.capture());
+    assertEquals(config.timeout(), connectionOptions.getValue().getConnectionTimeout());
     var request = ArgumentCaptor.forClass(JetStreamOptions.class);
     verify(connection).jetStreamManagement(request.capture());
     Duration managementBudget = request.getValue().getRequestTimeout();
-    assertTrue(managementBudget.compareTo(Duration.ZERO) > 0);
-    assertTrue(managementBudget.compareTo(config.timeout()) <= 0);
+    assertEquals(config.timeout().minus(connectTime), managementBudget);
     verify(connection).jetStream(request.capture());
-    assertTrue(request.getValue().getRequestTimeout().compareTo(Duration.ZERO) > 0);
-    assertTrue(request.getValue().getRequestTimeout().compareTo(managementBudget) <= 0);
+    assertEquals(managementBudget.minus(validationTime), request.getValue().getRequestTimeout());
   }
 
   @Test
@@ -233,7 +260,7 @@ class JetStreamPublisherTest {
 
   @Test
   void connectionOptionsPreserveTokenAndDisableUnacknowledgedReconnectBuffering() throws Exception {
-    var settings = BridgeConfig.from(Map.of("token", " private-token ", "timeout-ms", "1234"));
+    var settings = functionalConfig(Map.of("token", " private-token "));
     try (var configured = new JetStreamPublisher(settings, connector)) {
       configured.publish(event);
       var options = ArgumentCaptor.forClass(Options.class);
@@ -251,7 +278,7 @@ class JetStreamPublisherTest {
 
   @Test
   void tlsUsesVerifiedContextWithoutClientCredentials() throws Exception {
-    var settings = BridgeConfig.from(Map.of("nats-url", "tls://broker:4222"));
+    var settings = functionalConfig(Map.of("nats-url", "tls://broker:4222"));
     try (var configured = new JetStreamPublisher(settings, connector)) {
       configured.publish(event);
       var options = ArgumentCaptor.forClass(Options.class);
@@ -271,7 +298,7 @@ class JetStreamPublisherTest {
             + "-----BEGIN USER NKEY SEED-----\n"
             + new String(key.getSeed())
             + "\n------END USER NKEY SEED------\n");
-    var settings = BridgeConfig.from(Map.of("credentials-file", credentials.toString()));
+    var settings = functionalConfig(Map.of("credentials-file", credentials.toString()));
     try (var configured = new JetStreamPublisher(settings, connector)) {
       configured.publish(event);
       var options = ArgumentCaptor.forClass(Options.class);
@@ -292,7 +319,7 @@ class JetStreamPublisherTest {
     Path empty = directory.resolve("private-ca.pem");
     Files.writeString(empty, "");
     var settings =
-        BridgeConfig.from(Map.of("nats-url", "tls://broker:4222", "tls-ca-file", empty.toString()));
+        functionalConfig(Map.of("nats-url", "tls://broker:4222", "tls-ca-file", empty.toString()));
     try (var configured = new JetStreamPublisher(settings, connector)) {
       var failure = assertThrows(IOException.class, () -> configured.publish(event));
       assertEquals("Cannot load verified NATS TLS configuration", failure.getMessage());
@@ -527,7 +554,7 @@ class JetStreamPublisherTest {
 
   @Test
   void elapsedValidationBudgetCannotRenewThePublishBudget() throws Exception {
-    var clock = new java.util.concurrent.atomic.AtomicLong();
+    var clock = new AtomicLong();
     when(management.getStreamInfo(config.stream()))
         .thenAnswer(
             call -> {
