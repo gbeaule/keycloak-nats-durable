@@ -29,7 +29,7 @@
     <project.build.outputTimestamp>2026-09-26T00:00:00Z</project.build.outputTimestamp>
     <maven.compiler.release>21</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <keycloak.version>26.8.0</keycloak.version>
+    <keycloak.version>26.8.1</keycloak.version>
     <keycloak.runtime.version>${keycloak.version}</keycloak.runtime.version>
     <keycloak.upgrade.from>26.6.4</keycloak.upgrade.from>
     <postgres.image>postgres:18.6-alpine</postgres.image>
@@ -105,7 +105,7 @@
       <dependency>
         <groupId>org.postgresql</groupId>
         <artifactId>postgresql</artifactId>
-        <version>42.7.13</version>
+        <version>42.7.14</version>
       </dependency>
     </dependencies>
   </dependencyManagement>
@@ -187,7 +187,7 @@
       <plugin>
         <groupId>com.diffplug.spotless</groupId>
         <artifactId>spotless-maven-plugin</artifactId>
-        <version>3.10.3</version>
+        <version>3.10.4</version>
         <configuration>
           <lineEndings>UNIX</lineEndings>
           <java>
@@ -299,7 +299,7 @@
           <plugin>
             <groupId>org.pitest</groupId>
             <artifactId>pitest-maven</artifactId>
-            <version>1.30.0</version>
+            <version>1.30.1</version>
             <dependencies>
               <dependency>
                 <groupId>org.pitest</groupId>
