@@ -38,7 +38,7 @@ abstract class IntegrationSupport {
   static final ObjectMapper objectMapper = new ObjectMapper();
   static final String STREAM = "KEYCLOAK_EVENTS";
   static final String DURABLE = "auth-worker";
-  static final String NATS_IMAGE = "nats:2.15.0-alpine";
+  static final String NATS_IMAGE = "nats:2.15.2-alpine";
   static final String POSTGRES_IMAGE = System.getProperty("postgres.image", "postgres:18.6-alpine");
   static final HttpClient httpClient =
       HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
@@ -60,7 +60,7 @@ abstract class IntegrationSupport {
   }
 
   static void startInfrastructure() throws Exception {
-    startInfrastructure(System.getProperty("keycloak.version", "26.8.0"));
+    startInfrastructure(System.getProperty("keycloak.version", "26.8.1"));
   }
 
   static void startInfrastructure(String initialVersion) throws Exception {
@@ -116,7 +116,7 @@ abstract class IntegrationSupport {
   }
 
   static GenericContainer<?> keycloakContainer(boolean importRealm) {
-    return keycloakContainer(importRealm, System.getProperty("keycloak.version", "26.8.0"));
+    return keycloakContainer(importRealm, System.getProperty("keycloak.version", "26.8.1"));
   }
 
   static GenericContainer<?> keycloakContainer(boolean importRealm, String version) {

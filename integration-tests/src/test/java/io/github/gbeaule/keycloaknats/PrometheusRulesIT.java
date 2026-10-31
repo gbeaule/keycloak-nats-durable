@@ -16,7 +16,7 @@ class PrometheusRulesIT {
   void exampleAlertRulesHandleMissingTargetsAndSeries() {
     Path deploy = Path.of("..", "deploy").toAbsolutePath().normalize();
     try (var tool =
-        new GenericContainer<>("prom/prometheus:v3.5.0")
+        new GenericContainer<>("prom/prometheus:v3.13.5")
             .withCreateContainerCmdModifier(command -> command.withEntrypoint("/bin/promtool"))
             .withCopyFileToContainer(
                 MountableFile.forHostPath(deploy.resolve("prometheus-rules.yml")),

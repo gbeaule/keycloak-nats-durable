@@ -1,4 +1,4 @@
-FROM eclipse-temurin:21-jre
+FROM eclipse-temurin:21-jre-noble
 ARG ARTIFACT_VERSION=1.0.0-SNAPSHOT
 ARG VCS_REF=development
 LABEL org.opencontainers.image.source="https://github.com/gbeaule/keycloak-nats-durable" \

@@ -14,7 +14,7 @@ import zipfile
 
 from packaged_licenses import MODULES
 
-SCANNER = "aquasec/trivy:0.74.0"
+SCANNER = "aquasec/trivy:0.76.1"
 BLOCKING_REPORT = "runtime-dependencies.json"
 
 
@@ -116,7 +116,7 @@ def main(argv=None):
     outputs = [reports / "dependencies.json", reports / BLOCKING_REPORT]
     for name in ("consumer", "keycloak"):
         image = f"knd-security-{name}:local"
-        run("docker", "build", "--build-arg", f"ARTIFACT_VERSION={args.version}",
+        run("docker", "build", "--pull", "--build-arg", f"ARTIFACT_VERSION={args.version}",
             "--file", str(root / "deploy" / f"Dockerfile.{name}"), "--tag", image, str(root))
         archive = reports / f"{name}.tar"
         run("docker", "image", "save", "--output", str(archive), image)
