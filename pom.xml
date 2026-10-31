@@ -39,7 +39,7 @@
     <jackson.version>2.22.4</jackson.version>
     <junit.version>6.1.3</junit.version>
     <testcontainers.version>2.0.5</testcontainers.version>
-    <jacoco.version>0.8.15</jacoco.version>
+    <jacoco.version>0.8.16</jacoco.version>
     <!-- Production modules set their initial floors; raise them as gaps are closed. -->
     <coverage.line.minimum>0.00</coverage.line.minimum>
     <coverage.branch.minimum>0.00</coverage.branch.minimum>
@@ -120,7 +120,7 @@
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-surefire-plugin</artifactId>
-          <version>3.6.0</version>
+          <version>3.6.1</version>
           <configuration>
             <useModulePath>false</useModulePath>
             <argLine>@{jacoco.unit.argLine} @{argLine}</argLine>
@@ -129,7 +129,7 @@
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-failsafe-plugin</artifactId>
-          <version>3.6.0</version>
+          <version>3.6.1</version>
           <configuration>
             <useModulePath>false</useModulePath>
           </configuration>
@@ -151,7 +151,7 @@
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-enforcer-plugin</artifactId>
-          <version>3.6.3</version>
+          <version>3.7.0</version>
         </plugin>
       </plugins>
     </pluginManagement>
